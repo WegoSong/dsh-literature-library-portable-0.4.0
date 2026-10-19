@@ -1,0 +1,1058 @@
+#!/usr/bin/env node
+/**
+ * extract_pdf.mjs —— 学术 PDF 文本抽取器（纯本地，无 API 依赖）
+ *
+ * 目标：把「双栏、带公式与角标、分页截断」的论文 PDF，还原成一份
+ * 可直接用于翻译的干净 Markdown。
+ *
+ * 处理链：
+ *   1. run 聚合    —— 按阅读顺序排列 item，用「水平连续性」判断是否同一 run
+ *   2. 行聚合      —— y 容差（容纳上下标）+ 水平连续性（区分左右栏同高文本）
+ *   3. 碎片归位    —— 角标、跨行断词插回原行
+ *   4. 版面划分    —— 递归划分「主导双栏区 + 上下遗留元素」
+ *   5. 段落重建    —— 首行缩进与句末标点判段、跨页续段合并
+ *   6. 版式清理    —— 页眉页脚页码剔除、章节标记、参考文献区标记
+ *
+ * 用法：
+ *   node tools/extract_pdf.mjs <input.pdf> [--out <dir>] [--name <slug>] [--pages 1-4] [--no-json]
+ *   node tools/extract_pdf.mjs <input.pdf> --pages 1 --debug-cols   # 单页版面诊断
+ */
+
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve, basename, extname } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const WORKSPACE = resolve(HERE, '..');
+const requireFromHere = createRequire(import.meta.url);
+
+// ───────────────────────── CLI ─────────────────────────
+
+function parseArgs(argv) {
+  const args = { positional: [], out: null, name: null, json: true, pages: null, debugCols: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--out') args.out = argv[++i];
+    else if (a === '--name') args.name = argv[++i];
+    else if (a === '--no-json') args.json = false;
+    else if (a === '--pages') args.pages = argv[++i];
+    else if (a === '--debug-cols') args.debugCols = true;
+    else if (a === '--dump-layout') { args.dumpLayout = true; args.debugCols = true; }
+    else if (a === '--help' || a === '-h') args.help = true;
+    else args.positional.push(a);
+  }
+  return args;
+}
+
+const USAGE = `用法: node tools/extract_pdf.mjs <input.pdf> [选项]
+
+选项:
+  --out <dir>     输出根目录（默认 library/extracted）
+  --name <slug>   输出文件名前缀（默认取 PDF 文件名）
+  --pages <范围>  只处理指定页，如 1-4 或 1,3,5
+  --no-json       不输出结构化 JSON
+  --debug-cols    打印版面划分诊断
+  -h, --help      显示帮助`;
+
+// ─────────────────── pdf.js 载入 ───────────────────
+
+let pdfjsCache = null;
+
+async function loadPdfjs() {
+  if (pdfjsCache) return pdfjsCache;
+  const candidates = [];
+  // 市场安装：pdfjs-dist 是包依赖，从当前模块解析（pnpm/npm 都能找到）
+  for (const spec of ['pdfjs-dist/legacy/build/pdf.mjs', 'pdfjs-dist/build/pdf.mjs']) {
+    try { candidates.push(requireFromHere.resolve(spec)); } catch { /* 试下一种布局 */ }
+  }
+  // 旧的“工作区/便携包”布局：node_modules 在工作区根目录
+  candidates.push(
+    join(WORKSPACE, 'node_modules/pdfjs-dist/legacy/build/pdf.mjs'),
+    join(WORKSPACE, 'node_modules/pdfjs-dist/build/pdf.mjs'),
+  );
+  let lastErr = null;
+  for (const p of [...new Set(candidates)]) {
+    try {
+      pdfjsCache = await import(new URL(`file://${p.replace(/\\/g, '/')}`).href);
+      return pdfjsCache;
+    } catch (err) { lastErr = err; }
+  }
+  throw new Error(`无法载入 pdfjs-dist，请在工作区执行 npm install。原始错误: ${lastErr?.message ?? '未知'}`);
+}
+
+// ─────────────────── 文本规范化 ───────────────────
+
+const MATH_CHARS = /[=≈≠≤≥±×÷∑∏∫√∂∞∝→←↔⟨⟩⌈⌉⌊⌋αβγδεζηθικλμνξπρστυφχψωΓΔΘΛΞΠΣΦΨΩ]/u;
+
+const SUP_MAP = {
+  '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6',
+  '⁷': '7', '⁸': '8', '⁹': '9', '⁺': '+', '⁻': '-', '⁼': '=', '⁽': '(', '⁾': ')',
+};
+const SUB_MAP = {
+  '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5', '₆': '6',
+  '₇': '7', '₈': '8', '₉': '9', '₊': '+', '₋': '-', '₌': '=', '₍': '(', '₎': ')',
+};
+
+/** 行内规范化：Unicode 上下标与常见数学符号转 LaTeX */
+function normalizeInline(s) {
+  let t = s.replace(/\u00AD/gu, '');
+  t = t.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾]+/gu, (m) => `^{${[...m].map((c) => SUP_MAP[c]).join('')}}`);
+  t = t.replace(/[₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎]+/gu, (m) => `_{${[...m].map((c) => SUB_MAP[c]).join('')}}`);
+  t = t.replace(/×/gu, '\\times ').replace(/÷/gu, '\\div ').replace(/−/gu, '-');
+  t = t.replace(/≈/gu, '\\approx ').replace(/≤/gu, '\\leq ').replace(/≥/gu, '\\geq ')
+    .replace(/≠/gu, '\\neq ').replace(/±/gu, '\\pm ').replace(/∝/gu, '\\propto ')
+    .replace(/∞/gu, '\\infty ');
+  return t.replace(/[ \t]{2,}/gu, ' ').trim();
+}
+
+// ─────────────────── 步骤 1：run 聚合 ───────────────────
+
+/**
+ * pdf.js 把文本切成大量 item（角标、断词、字距调整都会独立成项）。
+ * 按阅读顺序（y 降序、x 升序）扫描，把「同一行 + 字号一致 + 间距合理」的
+ * item 合成 run；间距出现明显跳跃说明跨栏，必须断开——否则左右两栏会被拼成一句。
+ */
+function buildRuns(items, debugOpts = {}) {
+  const sorted = items
+    .filter((it) => (it.str ?? '').length > 0)
+    .map((it) => ({
+      str: it.str,
+      x: it.transform?.[4] ?? 0,
+      y: it.transform?.[5] ?? 0,
+      size: Math.abs(it.transform?.[3] ?? it.height ?? 0),
+      w: it.width ?? 0,
+    }))
+    .sort((a, b) => b.y - a.y || a.x - b.x);
+
+  const runs = [];
+  let cur = null;
+  for (const it of sorted) {
+    if (!cur) {
+      cur = { text: it.str, x0: it.x, x1: it.x + it.w, y: it.y, size: it.size };
+      continue;
+    }
+    const gap = it.x - cur.x1;
+    const em = Math.max(Math.max(cur.size, it.size), 1);
+    const tol = Math.max(1.0, em * 0.32);
+    const sameLine = Math.abs(it.y - cur.y) <= tol;
+    const sameSize = Math.abs(it.size - cur.size) < Math.max(0.75, cur.size * 0.12);
+    const crossColumn = gap > em * 1.4;
+    const overlaps = gap < -em * 0.62;
+    const reasonable = gap < em * 0.95;
+
+    if (sameLine && sameSize && !crossColumn && !overlaps && reasonable) {
+      // 诊断：左栏一行与右栏一行在同一基线上，间距极小（本论文栏间距仅约 11pt，
+      // 与字距同级），"跨栏须有 1.4em 间隔"这条规则会漏判，从而把两栏拼成一行。
+      if (debugOpts?.dumpLayout && debugOpts.pageWidth) {
+        const before = cur.x1 - cur.x0;
+        const after = Math.max(cur.x1, it.x + it.w) - Math.min(cur.x0, it.x);
+        const fromLeft = (cur.x0 + cur.x1) / 2 < debugOpts.pageWidth / 2;
+        const toRight = (it.x + it.w / 2) > debugOpts.pageWidth / 2;
+        if (after > debugOpts.pageWidth * 0.62 && before <= debugOpts.pageWidth * 0.62 && fromLeft && toRight) {
+          console.error(`[RUN-CROSS p${debugOpts.page}] y=${cur.y.toFixed(1)} `
+            + `left=[${cur.x0.toFixed(1)},${cur.x1.toFixed(1)}]"${cur.text.slice(-22)}" `
+            + `+ right=[${it.x.toFixed(1)},${(it.x + it.w).toFixed(1)}]"${it.str.slice(0, 22)}" gap=${gap.toFixed(1)}`);
+        }
+      }
+      cur.text += it.str;
+      cur.x1 = Math.max(cur.x1, it.x + it.w);
+    } else {
+      runs.push(cur);
+      cur = { text: it.str, x0: it.x, x1: it.x + it.w, y: it.y, size: it.size };
+    }
+  }
+  if (cur) runs.push(cur);
+  return runs;
+}
+
+// ─────────────────── 步骤 2：行聚合 ───────────────────
+
+/**
+ * run → 行。两个约束同时满足：
+ *   a) y 容差要容纳上下标；b) 同高不等于同行——双栏的左右栏常共处同一 y，
+ *      必须再要求水平方向连续。
+ * 角标走单独分支：字号更小 + 基线偏移 + 紧贴基准文本。
+ */
+function groupLines(runs, debugOpts = {}) {
+  const sorted = [...runs].sort((a, b) => b.y - a.y || a.x0 - b.x0);
+  const lines = [];
+
+  for (const r of sorted) {
+    const last = lines[lines.length - 1];
+    let handled = false;
+
+    if (last) {
+      const base = Math.max(last.size, r.size);
+      const em = Math.max(base, 1);
+      const dy = Math.abs(last.y - r.y);
+      const horizontal = r.x0 <= last.x1 + em * 1.2 && r.x1 >= last.x0 - em * 0.4;
+
+      const isScript = horizontal && r.size <= last.size * 0.9 && dy <= Math.max(1, em * 0.45);
+      if (isScript) {
+        if (debugOpts?.dumpLayout && debugOpts.pageWidth) {
+          const after = Math.max(last.x1, r.x1) - Math.min(last.x0, r.x0);
+          if (after > debugOpts.pageWidth * 0.62) {
+            console.error(`[WIDE-SCRIPT p${debugOpts.page}] y=${last.y.toFixed(1)}+${r.y.toFixed(1)} `
+              + `prev=[${last.x0.toFixed(0)},${last.x1.toFixed(0)}] + r=[${r.x0.toFixed(0)},${r.x1.toFixed(0)}] `
+              + `=> ${after.toFixed(0)} "${last.text.slice(0, 30)}" | "${r.text.slice(0, 30)}"`);
+          }
+        }
+        last.runs.push(r);
+        last.x1 = Math.max(last.x1, r.x1);
+        last.x0 = Math.min(last.x0, r.x0);
+        handled = true;
+      } else {
+        const tol = Math.max(1.0, base * 0.32);
+        const continuity = r.x0 > last.x0 && r.x0 - last.x1 < em * 1.2;
+        if (dy <= tol && continuity) {
+          // 诊断：任何让行跨度超过页宽 62% 的合并都记录下来
+          if (debugOpts?.dumpLayout && debugOpts.pageWidth) {
+            const after = Math.max(last.x1, r.x1) - Math.min(last.x0, r.x0);
+            if (after > debugOpts.pageWidth * 0.62 && last.x1 - last.x0 <= debugOpts.pageWidth * 0.62) {
+              console.error(`[WIDE-JOIN p${debugOpts.page}] y=${last.y.toFixed(1)}+${r.y.toFixed(1)} `
+                + `prev=[${last.x0.toFixed(0)},${last.x1.toFixed(0)}] + r=[${r.x0.toFixed(0)},${r.x1.toFixed(0)}] `
+                + `gap=${(r.x0 - last.x1).toFixed(1)} tol=${tol.toFixed(1)} => ${after.toFixed(0)} `
+                + `"${last.text.slice(0, 26)}" | "${r.text.slice(0, 26)}"`);
+            }
+          }
+          last.runs.push(r);
+          last.x0 = Math.min(last.x0, r.x0);
+          last.x1 = Math.max(last.x1, r.x1);
+          last.size = Math.max(last.size, r.size);
+          handled = true;
+        }
+      }
+    }
+
+    if (!handled) lines.push({ y: r.y, x0: r.x0, x1: r.x1, size: r.size, runs: [r] });
+  }
+
+  for (const ln of lines) {
+    ln.runs.sort((a, b) => a.x0 - b.x0);
+    ln.text = composeLineText(ln.runs);
+  }
+  return lines;
+}
+
+/**
+ * 行内拼接。角标必须紧贴基准词（`Bi_2Te_3` 不能写成 `Bi _2 Te _3`），
+ * 因此 ^{} / _{} 标记必须在这里就地生成——各段一旦被 trim 拼接，
+ * 几何信息就丢了，之后再也判断不出哪一段是角标。
+ */
+function composeLineText(runs) {
+  let out = '';
+  for (let i = 0; i < runs.length; i += 1) {
+    const r = runs[i];
+    const prev = runs[i - 1];
+    const piece = r.text.trim();
+    let script = null;
+
+    if (prev) {
+      const gap = r.x0 - prev.x1;
+      const spaceThreshold = Math.max(0.9, prev.size * 0.24);
+      const dy = r.y - prev.y;
+      const smaller = r.size <= prev.size * 0.85;
+      const offset = dy > prev.size * 0.1 || dy < -prev.size * 0.03;
+      const adjacent = gap < Math.max(2.5, prev.size * 0.7);
+      const token = /^[0-9A-Za-z+\-=()]{1,6}$/u.test(piece);
+
+      if (smaller && offset && adjacent && token) script = dy > 0 ? '^' : '_';
+      else if (gap > spaceThreshold && !/[-–—/(]$/u.test(out) && !/^[),.;:%]/u.test(piece)) out += ' ';
+    }
+
+    out += script ? `${script}{${piece}}` : piece;
+  }
+  return normalizeInline(out);
+}
+
+// ─────────────────── 步骤 3：碎片归位 ───────────────────
+
+/**
+ * 把「本是同一行却被拆散」的碎片并回原行：角标与跨行断词。
+ * 判据必须严格（同一栏 + 字号更小或紧接 + 水平紧贴），否则会把
+ * 被断行分开的正文误并进来。
+ */
+function mergeFragments(lines, gutter) {
+  const out = [];
+  const colOf = (l) => {
+    if (!gutter) return 'S';
+    const mid = (l.x0 + l.x1) / 2;
+    if (mid < gutter.start) return 'L';
+    if (mid > gutter.end) return 'R';
+    return 'S';
+  };
+
+  for (const ln of lines) {
+    const prev = out[out.length - 1];
+    const textOnly = ln.runs.map((r) => r.text).join('').trim();
+    const close = prev ? Math.abs(ln.y - prev.y) <= Math.max(1.2, prev.size * 0.55) : false;
+    const sameCol = prev ? colOf(ln) === colOf(prev) : false;
+
+    if (prev && close && sameCol) {
+      const tiny = ln.size <= prev.size * 0.82;
+      const wordish = /^[\p{L}\p{N}\-+=().,;:]{1,8}$/u.test(textOnly);
+      const gap = ln.x0 - prev.x1;
+      const tight = gap > -Math.max(1, prev.size) * 0.6 && gap < Math.max(4, prev.size * 0.9);
+
+      if (tiny && wordish && tight && textOnly.length > 0) {
+        let idx = prev.runs.findIndex((r) => r.x0 > ln.x0);
+        if (idx < 0) idx = prev.runs.length;
+        prev.runs.splice(idx, 0, ...ln.runs);
+        prev.x0 = Math.min(prev.x0, ln.x0);
+        prev.x1 = Math.max(prev.x1, ln.x1);
+        prev.text = composeLineText(prev.runs);
+        continue;
+      }
+
+      // 跨行断词：上行以连字符结尾，本行以小写字母开头
+      if (/[\p{L}]-$/u.test(prev.text) && /^\p{Ll}/u.test(textOnly)) {
+        prev.text = prev.text.replace(/-$/u, '') + ln.text;
+        prev.x1 = Math.max(prev.x1, ln.x1);
+        prev.runs.push(...ln.runs);
+        continue;
+      }
+    }
+    out.push(ln);
+  }
+  return out;
+}
+
+/** 公式的延续片段（如 "described by V = S dT, ..."）不应作为独立公式块 */
+function isEquationFragment(line) {
+  const t = line.text.trim();
+  if (t.length === 0 || t.length > 120) return false;
+  if (!/^[a-z(,;]/u.test(t)) return false;
+  return /[=≈≤≥]/u.test(t) || MATH_CHARS.test(t);
+}
+
+// ─────────────────── 步骤 4：版面划分 ───────────────────
+
+/**
+ * 结构性防护：把「任何行都不得跨越中缝」作为全局不变式来执行。
+ *
+ * 双栏页面里，一条行要么完全在左栏、要么完全在右栏；跨越中缝的行只可能是
+ * 通栏元素（标题、通栏表）。若某条非通栏行横跨了中缝，说明两栏的文本被错误
+ * 拼接了——无论拼接发生在哪一步，都会在这里被拆回两条行。
+ *
+ * 这样处理后，阅读顺序的正确性就不再依赖「拼接发生在哪一步」这类脆弱假设。
+ */
+function splitCrossGutterLines(lines, pageWidth) {
+  if (lines.length < 12) return lines;
+  const narrow = lines.filter((l) => l.x1 - l.x0 <= pageWidth * 0.62);
+  // 只有「窄行」数量足够、且能构成双栏结构时才执行拆分。
+  // 否则（例如通栏摘要块）整块应原样保留，拆了反而会把句子切碎。
+  if (narrow.length < 10 || narrow.length < lines.length * 0.5) return lines;
+  const colInfo = detectColumns(narrow.map((l) => ({ x0: l.x0, x1: l.x1 })), pageWidth);
+  if (colInfo.columns !== 2) return lines;
+
+  const { gutterStart, gutterEnd } = colInfo;
+  const out = [];
+  let splitCount = 0;
+
+  for (const l of lines) {
+    const width = l.x1 - l.x0;
+    const crossesGutter = l.x0 < gutterStart && l.x1 > gutterEnd;
+    if (!crossesGutter || width > pageWidth * 0.62) { out.push(l); continue; }
+
+    // 在行的 runs 之间找落在中缝里的断点，据此拆回两条行
+    const runs = [...l.runs].sort((a, b) => a.x0 - b.x0);
+    const cuts = [];
+    for (let i = 1; i < runs.length; i += 1) {
+      const gapMid = (runs[i - 1].x1 + runs[i].x0) / 2;
+      if (gapMid >= gutterStart - 2 && gapMid <= gutterEnd + 2) cuts.push(i);
+    }
+    if (cuts.length === 0) { out.push(l); continue; }
+
+    let start = 0;
+    for (const cut of cuts) {
+      const part = runs.slice(start, cut);
+      if (part.length) out.push(makeLine(part));
+      start = cut;
+    }
+    const tail = runs.slice(start);
+    if (tail.length) out.push(makeLine(tail));
+    splitCount += 1;
+  }
+
+  if (splitCount > 0 && process.env.DEBUG_COLS_DETAIL) {
+    console.error(`[splitCrossGutter] 拆回 ${splitCount} 条跨栏行 (gutter=[${gutterStart.toFixed(0)},${gutterEnd.toFixed(0)}])`);
+  }
+  return out;
+}
+
+/** 由一组 run 构造一条行（重算边界与文本） */
+function makeLine(runs) {
+  const sorted = [...runs].sort((a, b) => a.x0 - b.x0);
+  return {
+    y: sorted[0].y,
+    x0: Math.min(...sorted.map((r) => r.x0)),
+    x1: Math.max(...sorted.map((r) => r.x1)),
+    size: Math.max(...sorted.map((r) => r.size)),
+    runs: sorted,
+    text: composeLineText(sorted),
+  };
+}
+
+/**
+ * 在正确的中缝定义下重新归属每一行。
+ * 行本身不跨越中缝，因此归属只看它整体位于中缝的哪一侧。
+ */
+function assignSides(lines, pageWidth) {
+  const narrow = lines.filter((l) => l.x1 - l.x0 <= pageWidth * 0.62);
+  if (narrow.length < 10) return null;
+  const colInfo = detectColumns(narrow.map((l) => ({ x0: l.x0, x1: l.x1 })), pageWidth);
+  if (colInfo.columns !== 2) return null;
+  for (const l of lines) {
+    if (l.x1 - l.x0 > pageWidth * 0.62) { l.side = 'S'; continue; }
+    if (l.x1 <= colInfo.gutterEnd) l.side = 'L';
+    else if (l.x0 >= colInfo.gutterStart) l.side = 'R';
+    else l.side = 'S';
+  }
+  return colInfo;
+}
+
+/**
+ * 中缝检测（按栏边界统计，比「找空白带」稳健）。
+ *
+ * 思路：先按行起始位置 x0 聚类，找出「最靠左的一簇」（左栏左边界）与
+ * 「位于右侧的一簇」（右栏左边界）。两者之差就是栏宽。中缝必然落在这两个
+ * 起点之间，于是用左栏行的最大右边界 x1 与右栏行的最小左边界 x0 夹出中缝。
+ *
+ * 为什么不用「在页面中部找最宽空白带」：真实论文的栏间距常常只有 6~10pt
+ * （实测本论文部分页面即为 8pt），与字距同级，空白带检测极易被行内的
+ * 公式碎片或短行破坏，一旦失败就是静默的跨栏错拼。
+ */
+function detectColumns(lines, pageWidth, opts = {}) {
+  const none = { columns: 1, gutterStart: 0, gutterEnd: 0 };
+  const usable = lines.filter((l) => Number.isFinite(l.x0) && Number.isFinite(l.x1));
+  if (usable.length < 10) return none;
+
+  // 通栏行（标题、摘要框、通栏表）不能参与栏边界统计
+  const narrow = usable.filter((l) => l.x1 - l.x0 <= pageWidth * 0.62);
+  if (narrow.length < 8) return none;
+
+  // 按 x0 聚类：以 15pt 为一档做直方图，取最高峰为左栏起点
+  const BIN = 15;
+  const hist = new Map();
+  for (const l of narrow) {
+    const k = Math.floor(l.x0 / BIN);
+    hist.set(k, (hist.get(k) ?? 0) + 1);
+  }
+  let leftKey = null;
+  let leftPeak = 0;
+  for (const [k, n] of hist) {
+    if (n > leftPeak || (n === leftPeak && leftKey !== null && k < leftKey)) {
+      leftPeak = n;
+      leftKey = k;
+    }
+  }
+  if (leftKey === null) return none;
+  const leftStart = leftKey * BIN;
+
+  // 右栏起点：位于左栏起点右侧至少 0.25 页宽、且计数达到左峰 25% 的最靠左峰
+  let rightKey = null;
+  for (const k of [...hist.keys()].sort((a, b) => a - b)) {
+    const start = k * BIN;
+    if (start - leftStart < pageWidth * 0.25) continue;
+    if (hist.get(k) < Math.max(3, leftPeak * 0.25)) continue;
+    rightKey = k;
+    break;
+  }
+  if (rightKey === null) return none;
+  const rightStart = rightKey * BIN;
+
+  // 中缝：左栏行的最大 x1 与右栏行的最小 x0 之间
+  const leftLines = narrow.filter((l) => l.x0 < rightStart - 10 && l.x1 <= rightStart + 10);
+  const rightLines = narrow.filter((l) => l.x0 >= rightStart - 10);
+  if (leftLines.length < 3 || rightLines.length < 3) return none;
+
+  const leftEnd = Math.max(...leftLines.map((l) => l.x1));
+  const rightBegin = Math.min(...rightLines.map((l) => l.x0));
+  // 中缝取「左栏右边界」与「右栏左边界」的中点；两者交叉时退化为右栏起点
+  let gutterStart = Math.min(leftEnd, rightBegin);
+  let gutterEnd = Math.max(leftEnd, rightBegin);
+  if (gutterEnd - gutterStart < 1) {
+    gutterStart = rightStart - 2;
+    gutterEnd = rightStart + 2;
+  }
+
+  const minSide = Math.max(3, narrow.length * 0.12);
+  const lCount = narrow.filter((l) => l.x1 <= gutterEnd).length;
+  const rCount = narrow.filter((l) => l.x0 >= gutterStart).length;
+  if (lCount < minSide || rCount < minSide) return none;
+
+  if (process.env.DEBUG_COLS_DETAIL) {
+    console.error(`[detect] narrow=${narrow.length} leftStart=${leftStart} rightStart=${rightStart} `
+      + `gutter=[${gutterStart.toFixed(1)},${gutterEnd.toFixed(1)}] l=${lCount} r=${rCount} minSide=${minSide.toFixed(1)}`);
+  }
+  return { columns: 2, gutterStart, gutterEnd };
+}
+
+/**
+ * 纵向切块：按行距空白与「版面换段」把页面切成块。
+ *
+ * 两种信号都必须用：
+ *   - 纵向空白：标题/摘要/正文/页脚之间的常规分隔；
+ *   - 版面换段：摘要框与双栏正文在垂直方向重叠，两者间距太小，
+ *     只能靠结构识别——「上一行属于右栏、本行属于左栏」即进入新的版面段。
+ * 若不做切块而直接在整页找中缝，摘要的宽行会把中缝填掉，
+ * 整页会被误判成单栏，正文左右栏随即交错。
+ */
+function splitBands(lines, pageWidth) {
+  if (lines.length < 2) return lines.length ? [lines] : [];
+  const sorted = [...lines].sort((a, b) => b.y - a.y);
+
+  // 行距估计：含上下标的行 y 会偏高约 3pt，使相邻间距忽大忽小；
+  // 因此只用 1~60pt 的间距做统计并取 60% 分位，避免把行距算得过小。
+  const leads = [];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const lead = sorted[i - 1].y - sorted[i].y;
+    if (lead > 1 && lead < 60) leads.push(lead);
+  }
+  leads.sort((a, b) => a - b);
+  const typicalLead = leads.length ? leads[Math.floor(leads.length * 0.6)] : 12;
+  const gapThreshold = Math.max(2.5, typicalLead) * 1.8;
+
+  // 中缝（用「窄行」估计，通栏行会填掉中缝）：只需粗定位，用于判断
+  // 某一行属于左栏还是右栏。
+  const narrow = sorted.filter((l) => l.x1 - l.x0 <= pageWidth * 0.62);
+  const cols = detectColumns(narrow.map((l) => ({ x0: l.x0, x1: l.x1 })), pageWidth);
+  const mid = cols.columns === 2 ? (cols.gutterStart + cols.gutterEnd) / 2 : null;
+  const sideOf = (l) => {
+    if (mid === null) return null;
+    if (l.x1 - l.x0 > pageWidth * 0.62) return null; // 通栏行，无栏属
+    return (l.x0 + l.x1) / 2 < mid ? 'L' : 'R';
+  };
+
+  const bands = [];
+  let cur = [sorted[0]];
+  let prevSide = sideOf(sorted[0]);
+  for (let i = 1; i < sorted.length; i += 1) {
+    const line = sorted[i];
+    const lead = sorted[i - 1].y - line.y;
+    const side = sideOf(line);
+    // 版面换段：上一行在右栏、本行回到左栏 → 新的版面段开始
+    // （同一栏内阅读时不会出现这种左移）
+    const layoutSwitch = prevSide === 'R' && side === 'L';
+    if (lead > gapThreshold || layoutSwitch) { bands.push(cur); cur = []; }
+    cur.push(line);
+    if (side !== null) prevSide = side;
+  }
+  if (cur.length) bands.push(cur);
+  return bands;
+}
+
+/**
+ * 合并相邻的同类版面块。
+ * 换块判据（行距/版面换段）偶尔会在同一栏内部误切一刀，产生只含一两行的
+ * 碎片块。若相邻两块的栏结构相同、且 y 区间相接，就合并回去。
+ */
+function coalesceBlocks(blocks) {
+  const out = [];
+  for (const b of blocks) {
+    const prev = out[out.length - 1];
+    if (!prev) { out.push(b); continue; }
+    const sameLayout = (prev.gutter === null) === (b.gutter === null);
+    if (!sameLayout) { out.push(b); continue; }
+    const ys = (g) => [Math.min(...g.lines.map((l) => l.y)), Math.max(...g.lines.map((l) => l.y))];
+    const [pMin, pMax] = ys(prev);
+    const [bMin, bMax] = ys(b);
+    // y 区间相接或重叠（容差取 1 行左右），且块本身不宽（宽块通常是通栏元素）
+    const adjacent = bMax >= pMin - 14 && pMax >= bMin - 14;
+    if (adjacent && b.lines.length <= 3) {
+      prev.lines.push(...b.lines);
+      continue;
+    }
+    out.push(b);
+  }
+  return out;
+}
+
+/**
+ * 一页的版面块序列。
+ * 先纵向切块，再对「够大够宽」的块做递归划分（块内仍可能是
+ * 「通栏公式 + 双栏正文」，第 4 页就有这种情况），最后合并同类碎片块。
+ */
+function pageBlocks(lines, pageWidth) {
+  // 整页直接做递归版面划分：partitionLayout 会自行处理
+  // 「通栏摘要框 + 双栏正文」这类上下并存的混合版面。
+  // 不再先做纵向切块——切块会在换段处切断行序，
+  // 使碎片块丢失中缝归属，反而把左右栏的行并成一句。
+  return coalesceBlocks(partitionLayout(lines, pageWidth, 0));
+}
+
+/**
+ * 递归版面划分：在当前行集合里找中缝，把窄行归入左/右栏，
+ * 跨栏的宽行作为「遗留元素」按 y 分成上、下两组并递归。
+ * 这样块内若还有「通栏公式 + 双栏正文」也能正确还原阅读顺序。
+ */
+function partitionLayout(lines, pageWidth, depth = 0) {
+  if (lines.length === 0) return [];
+  if (lines.length < 12 || depth > 6) return [{ lines, gutter: null }];
+
+  const colInfo = detectColumns(lines.map((l) => ({ x0: l.x0, x1: l.x1 })), pageWidth);
+  if (colInfo.columns !== 2) return [{ lines, gutter: null }];
+
+  const { gutterStart, gutterEnd } = colInfo;
+  const gutter = { start: gutterStart, end: gutterEnd };
+  const mid = (gutterStart + gutterEnd) / 2;
+  const wideLimit = pageWidth * 0.62;
+
+  const left = lines.filter((l) => l.x1 <= gutterEnd && l.x1 - l.x0 <= wideLimit);
+  const right = lines.filter((l) => l.x0 >= gutterStart && l.x1 - l.x0 <= wideLimit);
+  const claimed = new Set([...left, ...right]);
+  const rest = lines.filter((l) => !claimed.has(l));
+
+  // 明确跨栏的行才算「遗留元素」；其余窄行按中缝归属
+  const spanning = rest.filter((l) => l.x1 - l.x0 > wideLimit
+    || (l.x0 < gutterStart && l.x1 > gutterEnd));
+  const spanSet = new Set(spanning);
+  for (const l of rest) {
+    if (spanSet.has(l)) continue;
+    if ((l.x0 + l.x1) / 2 < mid) left.push(l); else right.push(l);
+  }
+
+  const core = [...left, ...right];
+  const spanTop = core.length ? Math.max(...core.map((l) => l.y)) : 0;
+  const spanBottom = core.length ? Math.min(...core.map((l) => l.y)) : 0;
+  const above = spanning.filter((l) => l.y > spanTop);
+  const below = spanning.filter((l) => l.y < spanBottom);
+  const inside = spanning.filter((l) => l.y <= spanTop && l.y >= spanBottom);
+
+  const out = [];
+  if (above.length) out.push(...partitionLayout(above, pageWidth, depth + 1));
+  if (inside.length) out.push({ lines: inside, gutter });
+  if (left.length) out.push({ lines: left, gutter });
+  if (right.length) out.push({ lines: right, gutter });
+  if (below.length) out.push(...partitionLayout(below, pageWidth, depth + 1));
+  return out;
+}
+
+// ─────────────────── 步骤 5：段落重建 ───────────────────
+
+const SECTION_PATTERNS = [
+  { re: /^\s*(?:abstract|a\s*b\s*s\s*t\s*r\s*a\s*c\s*t)\b/iu, tag: 'ABSTRACT' },
+  { re: /^\s*(?:\d+\.?\s*)?introduction\b/iu, tag: 'INTRODUCTION' },
+  { re: /^\s*(?:\d+\.?\s*)?(?:results?|experiments?|experimental)\b/iu, tag: 'RESULTS' },
+  { re: /^\s*(?:\d+\.?\s*)?(?:discussions?)\b/iu, tag: 'DISCUSSION' },
+  { re: /^\s*(?:\d+\.?\s*)?(?:conclusions?|summary)\b/iu, tag: 'CONCLUSION' },
+  { re: /^\s*(?:\d+\.?\s*)?(?:methods?|materials?\s+and\s+methods?)\b/iu, tag: 'METHODS' },
+  { re: /^\s*(?:references?|bibliography)\s*$/iu, tag: 'REFERENCES' },
+  { re: /^\s*(?:acknowledge?ments?)\b/iu, tag: 'ACKNOWLEDGMENTS' },
+  { re: /^\s*(?:supplementary|supporting\s+information)\b/iu, tag: 'SUPPLEMENTARY' },
+];
+
+function tagParagraph(p) {
+  for (const s of SECTION_PATTERNS) if (s.re.test(p.text)) return s.tag;
+  return null;
+}
+
+/** 角标最终修正：把被空格隔开的 ^{} / _{} 贴回基准词（幂等） */
+function withScripts(line) {
+  let t = line.text ?? '';
+  for (let i = 0; i < 3; i += 1) {
+    const next = t
+      .replace(/([\p{L}\p{N})\]])[ ]+([_^]\{)/gu, '$1$2')
+      .replace(/([_^]\{[^}]{1,6}\})[ ]+([_^]\{)/gu, '$1$2')
+      .replace(/([_^]\{[^}]{1,6}\})[ ]+([\p{L}\p{N}])/gu, '$1$2');
+    if (next === t) break;
+    t = next;
+  }
+  return t;
+}
+
+function endsSentence(t) { return /[.!?。！？:;]["')\]]?$/u.test(t.trim()); }
+
+/** 行 → 段落 */
+function linesToParagraphs(lines, ctx) {
+  const { bodyLeft, bodyRight, bodySize } = ctx;
+  const paras = [];
+  let cur = null;
+
+  for (const ln of lines) {
+    const text = withScripts(ln);
+    if (!text) continue;
+
+    const isHeading = ln.size > bodySize * 1.12 && text.length < 140;
+    const hasRelation = /[=≈≤≥≪≫]/u.test(text);
+    // 公式块判定从严：同时含数学符号与关系运算符，且不是句子的延续片段
+    const isEquation = hasRelation && text.length < 90 && MATH_CHARS.test(text) && !isEquationFragment(ln);
+
+    if (isHeading || isEquation) {
+      if (cur) { paras.push(cur); cur = null; }
+      paras.push({ type: isHeading ? 'heading' : 'equation', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size });
+      continue;
+    }
+
+    if (!cur) {
+      cur = { type: 'para', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size };
+      continue;
+    }
+
+    const indent = ln.x0 - bodyLeft;
+    const startsNew = indent > (bodyRight - bodyLeft) * 0.022;
+    const bigGap = cur.y0 - ln.y > ln.size * 1.75;
+    const hyphenated = /[A-Za-z]-$/u.test(cur.text);
+    const continuation = /[,;(\[]$/u.test(cur.text);
+    const sameBlock = !endsSentence(cur.text) || (!startsNew && !bigGap) || hyphenated || continuation;
+
+    if (sameBlock) {
+      if (hyphenated) cur.text = cur.text.replace(/-$/u, '') + text;
+      else cur.text += ' ' + text;
+      cur.x0 = Math.min(cur.x0, ln.x0);
+      cur.x1 = Math.max(cur.x1, ln.x1);
+    } else {
+      paras.push(cur);
+      cur = { type: 'para', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size };
+    }
+  }
+  if (cur) paras.push(cur);
+  return paras;
+}
+
+// ─────────────────── 步骤 6：版式清理 ───────────────────
+
+/**
+ * 剔除页眉页脚与页码。
+ * 只按「靠近页边界」判断会误伤正文顶部的行，因此需要更强证据：
+ * 纯页码样式，或在多页重复出现的短「家具文本」。
+ */
+function stripRunningHeads(lines, pageHeight, pageNumber, furniture, bodyLineCount) {
+  const kept = [];
+  const dropped = [];
+  const innerText = bodyLineCount ?? lines.length;
+  const topEdge = pageHeight * 0.925;
+  const bottomEdge = pageHeight * 0.075;
+
+  for (const l of lines) {
+    const t = l.text.trim();
+    const inTop = l.y >= topEdge;
+    const inBottom = l.y <= bottomEdge;
+    const inZone = inTop || inBottom;
+    if (!inZone) { kept.push(l); continue; }
+
+    const isPageNum = /^[\s|·•\-–—]*(\d{1,4}|[ivxlcIVXLC]{1,6})[\s|·•\-–—]*$/u.test(t);
+    if (isPageNum) { dropped.push({ text: t, reason: 'pagenum', page: pageNumber }); continue; }
+
+    const furnitureLike = (furniture.has(t) && t.length <= 90)
+      || (t.length <= 90 && /^(vol\.?|no\.?|pp?\.?|issn|doi|https?:|www\.|received|accepted|published|©|\d{4}\s)/iu.test(t));
+    if (furnitureLike && innerText >= 6) {
+      dropped.push({ text: t, reason: inTop ? 'running-head-top' : 'running-foot', page: pageNumber });
+      continue;
+    }
+    kept.push(l);
+  }
+  return { kept, dropped };
+}
+
+// ─────────────────── 单页处理 ───────────────────
+
+function extractPageParagraphs(pc, furniture, ctx, opts, out) {
+  const { bodyLeft, bodyRight, bodySize } = ctx;
+
+  const { kept, dropped } = stripRunningHeads(pc.lines, pc.height, pc.p, furniture, pc.bodyLines.length);
+  for (const d of dropped) out.dropped.push(d);
+
+  // 版面划分：递归处理「通栏摘要框 + 双栏正文」这类上下并存的混合版面，
+  // 使摘要独立成组、正文左右栏各自成组。
+  const groups = pageBlocks(kept, pc.width);
+
+  // 组内防护：把任何「跨越中缝的非通栏行」拆回两栏。
+  // 拼接可能发生在 run 聚合、行聚合或任何后续步骤，这里作为最后一道不变式，
+  // 使阅读顺序的正确性不再依赖「拼接发生在哪一步」这类脆弱假设。
+  for (const g of groups) {
+    g.lines = splitCrossGutterLines(g.lines, pc.width);
+  }
+
+  const sawTwoColumn = groups.some((g) => g.gutter !== null);
+  out.stats.columns.push({ page: pc.p, columns: sawTwoColumn ? 2 : 1 });
+
+  if (opts.debugCols) {
+    for (const g of groups) {
+      const ys = g.lines.map((l) => l.y);
+      console.error(`[group p${pc.p}] n=${g.lines.length} `
+        + `gutter=${g.gutter ? `[${g.gutter.start.toFixed(0)},${g.gutter.end.toFixed(0)}]` : 'none'} `
+        + `y=[${Math.min(...ys).toFixed(0)},${Math.max(...ys).toFixed(0)}] head="${g.lines[0].text.slice(0, 38)}"`);
+    }
+  }
+
+  // --dump-layout：逐行打印分组与栏属，用于定位跨栏合并
+  if (opts.dumpLayout) {
+    // 按栏分别打印左右两栏在该页的内容，便于并排比对
+    const gut = groups.find((g) => g.gutter)?.gutter ?? null;
+    if (gut) {
+      const colOf = (l) => {
+        const c = (l.x0 + l.x1) / 2;
+        if (c < gut.start) return 'L';
+        if (c > gut.end) return 'R';
+        return 'SPAN';
+      };
+      const all = groups.flatMap((g) => g.lines);
+      console.error(`\n=== left column (p${pc.p}) ===`);
+      for (const l of all.filter((l) => colOf(l) === 'L').sort((a, b) => b.y - a.y).slice(0, 6)) {
+        console.error(`  y=${l.y.toFixed(0).padStart(4)} [${l.x0.toFixed(0)},${l.x1.toFixed(0)}] ${l.text.slice(0, 74)}`);
+      }
+      console.error(`=== right column (p${pc.p}) ===`);
+      for (const l of all.filter((l) => colOf(l) === 'R').sort((a, b) => b.y - a.y).slice(0, 6)) {
+        console.error(`  y=${l.y.toFixed(0).padStart(4)} [${l.x0.toFixed(0)},${l.x1.toFixed(0)}] ${l.text.slice(0, 74)}`);
+      }
+      console.error('=== SPAN lines (跨栏) ===');
+      for (const l of all.filter((l) => colOf(l) === 'SPAN').sort((a, b) => b.y - a.y).slice(0, 8)) {
+        console.error(`  y=${l.y.toFixed(0).padStart(4)} [${l.x0.toFixed(0)},${l.x1.toFixed(0)}] ${l.text.slice(0, 74)}`);
+      }
+    }
+  }
+
+  const pageParas = [];
+  for (const g of groups) {
+    const ordered = [...g.lines].sort((a, b) => b.y - a.y || a.x0 - b.x0);
+    const merged = mergeFragments(ordered, g.gutter);
+    for (const para of linesToParagraphs(merged, { bodyLeft, bodyRight, bodySize })) pageParas.push(para);
+  }
+  return pageParas;
+}
+
+// ─────────────────── 主流程 ───────────────────
+
+async function extract(pdfPath, opts) {
+  const lib = await loadPdfjs();
+  const data = new Uint8Array(await readFile(pdfPath));
+  const task = lib.getDocument({ data, useSystemFonts: false, isEvalSupported: false, verbosity: 0 });
+  const doc = await task.promise;
+
+  const total = doc.numPages;
+  const wanted = opts.pages ? parsePageRange(opts.pages, total) : null;
+  if (opts.debugCols) console.error(`[debug] numPages=${total}`);
+
+  const out = {
+    source: { path: pdfPath, file: basename(pdfPath), pages: total, title: null, author: null },
+    pages: [],
+    dropped: [],
+    stats: { pagesProcessed: 0, paragraphs: 0, columns: [] },
+  };
+
+  // 第一趟：抽取文本，区分正文区与页眉页脚区
+  const pageCache = [];
+  for (let p = 1; p <= total; p += 1) {
+    if (wanted && !wanted.has(p)) continue;
+    const page = await doc.getPage(p);
+    const vp = page.getViewport({ scale: 1 });
+    const tc = await page.getTextContent({ includeMarkedContent: false });
+    const lines = groupLines(
+      buildRuns(
+        tc.items.filter((i) => typeof i.str === 'string'),
+        { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width },
+      ),
+      { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width },
+    );
+    const topEdge = vp.height * 0.925;
+    const bottomEdge = vp.height * 0.075;
+    const inZone = (l) => l.y >= topEdge || l.y <= bottomEdge;
+    pageCache.push({
+      p,
+      width: vp.width,
+      height: vp.height,
+      lines,
+      bodyLines: lines.filter((l) => !inZone(l)),
+      zoneLines: lines.filter(inZone),
+    });
+  }
+
+  // 正文字号：正文区里较长行的中位数
+  const probe = [];
+  for (const pc of pageCache) for (const l of pc.bodyLines) if (l.text.length > 60) probe.push(l.size);
+  let bodySize;
+  if (probe.length) {
+    probe.sort((a, b) => a - b);
+    bodySize = probe[Math.floor(probe.length / 2)];
+  } else {
+    const all = pageCache.flatMap((x) => x.lines).map((l) => l.size).sort((a, b) => a - b);
+    bodySize = all.length ? all[Math.floor(all.length / 2)] : 10;
+  }
+
+  // 跨页重复出现的短文本 = 家具（页眉/页脚/期刊名）
+  const pageCount = pageCache.length || 1;
+  const counts = new Map();
+  for (const pc of pageCache) {
+    const uniq = new Set();
+    for (const l of pc.zoneLines) {
+      const t = l.text.trim();
+      if (t && t.length <= 90) uniq.add(t);
+    }
+    for (const t of uniq) counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  const furniture = new Set();
+  for (const [t, n] of counts) if (n >= Math.max(2, Math.ceil(pageCount * 0.6))) furniture.add(t);
+
+  // 正文左右边界（5% / 95% 分位，避免个别越界元素拉偏）
+  const cleanBody = pageCache.flatMap((x) => x.bodyLines).filter((l) => !furniture.has(l.text.trim()));
+  const wide = cleanBody.filter((l) => l.text.length > 40);
+  const ref = wide.length >= 4 ? wide : cleanBody;
+  let bodyLeft = 0;
+  let bodyRight = pageCache[0]?.width ?? 600;
+  if (ref.length) {
+    const xs0 = ref.map((l) => l.x0).sort((a, b) => a - b);
+    const xs1 = ref.map((l) => l.x1).sort((a, b) => b - a);
+    bodyLeft = xs0[Math.floor(xs0.length * 0.05)];
+    bodyRight = xs1[Math.floor(xs1.length * 0.05)];
+  }
+
+  // 第二趟：逐页还原阅读顺序 → 段落 → 跨页续段合并
+  let pending = null;
+  let refsStarted = false;
+
+  for (const pc of pageCache) {
+    const pageParas = extractPageParagraphs(pc, furniture, { bodyLeft, bodyRight, bodySize }, opts, out);
+    const columns = out.stats.columns[out.stats.columns.length - 1].columns;
+
+    for (const para of pageParas) {
+      const tag = tagParagraph(para);
+      if (tag === 'REFERENCES') refsStarted = true;
+      if (tag === 'ABSTRACT') refsStarted = false;
+      para.section = tag ?? (refsStarted ? 'REFERENCES' : null);
+    }
+
+    // 跨页续段：pending 可能跨多页累积，只累加、不覆盖
+    if (pending && pageParas.length) {
+      const first = pageParas[0];
+      if (first.type === 'para' && !/^[A-Z0-9]{2,}/u.test(first.text) && !first.section) {
+        const glue = /-$/u.test(pending.text) ? '' : ' ';
+        first.text = (pending.text.replace(/-$/u, '') + glue + first.text).replace(/\s{2,}/gu, ' ').trim();
+        first.y0 = pending.y0;
+        first.section = pending.section ?? first.section;
+        pending = null;
+      }
+    }
+
+    const last = pageParas[pageParas.length - 1];
+    if (last && last.type === 'para' && !endsSentence(last.text) && !last.section) {
+      pending = pageParas.pop();
+    } else {
+      pending = null;
+    }
+
+    out.pages.push({ page: pc.p, width: pc.width, height: pc.height, columns, paragraphs: pageParas });
+    out.stats.pagesProcessed += 1;
+    out.stats.paragraphs += pageParas.length;
+  }
+
+  if (pending && out.pages.length) {
+    out.pages[out.pages.length - 1].paragraphs.push(pending);
+    out.stats.paragraphs += 1;
+  }
+
+  try {
+    const meta = await doc.getMetadata();
+    out.source.title = meta?.info?.Title ?? null;
+    out.source.author = meta?.info?.Author ?? null;
+  } catch { /* 元数据缺失可忽略 */ }
+
+  await task.destroy();
+  out.stats.bodySize = Number(bodySize.toFixed(2));
+  out.stats.bodyLeft = Number(bodyLeft.toFixed(1));
+  out.stats.bodyRight = Number(bodyRight.toFixed(1));
+  return out;
+}
+
+function parsePageRange(spec, total) {
+  const set = new Set();
+  for (const part of String(spec).split(',')) {
+    const m = /^(\d+)\s*-\s*(\d+)$/u.exec(part.trim());
+    if (m) {
+      const a = Math.max(1, Number(m[1]));
+      const b = Math.min(total, Number(m[2]));
+      for (let i = a; i <= b; i += 1) set.add(i);
+    } else if (/^\d+$/u.test(part.trim())) {
+      const n = Number(part.trim());
+      if (n >= 1 && n <= total) set.add(n);
+    }
+  }
+  return set.size ? set : null;
+}
+
+// ─────────────────── 渲染 ───────────────────
+
+function renderMarkdown(result) {
+  const L = [];
+  L.push(`<!-- source: ${result.source.file} | pages: ${result.source.pages} | extracted-at: ${new Date().toISOString()} -->`);
+  L.push('<!-- 本文件由 extract_pdf.mjs 自动抽取，供翻译使用。===SEC:xxx=== 为章节标记，===PAGE n=== 为原页码。 -->');
+  L.push('');
+  if (result.source.title) L.push(`# ${result.source.title}`);
+  if (result.source.author) L.push(`> ${result.source.author}`);
+  L.push('');
+
+  const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december';
+  const NOISE = new RegExp(`^(vol\\.?\\s*\\d+|no\\.?\\s*\\d+|pp?\\.?\\s*\\d+|issn|doi|https?://|www\\.|received|accepted|published|©|\\d{4}\\s+${MONTHS}|${MONTHS}\\s+\\d{4})`, 'iu');
+
+  for (const page of result.pages) {
+    L.push(`===PAGE ${page.page}===`);
+    L.push('');
+    for (const p of page.paragraphs) {
+      const text = p.text.trim();
+      if (!text) continue;
+      if (NOISE.test(text) && text.length < 120) continue;
+      if (p.section) L.push(`===SEC:${p.section}===`);
+      if (p.type === 'heading') L.push(`## ${text}`);
+      else if (p.type === 'equation') L.push(`$$${text}$$`);
+      else L.push(text);
+      L.push('');
+    }
+  }
+  return L.join('\n').replace(/\n{3,}/gu, '\n\n');
+}
+
+function renderReport(result) {
+  const twoCol = result.stats.columns.filter((c) => c.columns === 2).length;
+  const L = [];
+  L.push(`抽取报告: ${result.source.file}`);
+  L.push(`总页数: ${result.source.pages}，已处理: ${result.stats.pagesProcessed}`);
+  L.push(`判定为双栏的页: ${twoCol} / ${result.stats.pagesProcessed}`);
+  L.push(`正文字号估计: ${result.stats.bodySize}pt，正文x范围: ${result.stats.bodyLeft} ~ ${result.stats.bodyRight}`);
+  L.push(`段落总数: ${result.stats.paragraphs}`);
+  L.push('');
+  L.push(`剔除的页眉/页脚/页码 (${result.dropped.length}):`);
+  for (const d of result.dropped.slice(0, 60)) L.push(`  p${d.page} [${d.reason}] ${d.text.slice(0, 90)}`);
+  if (result.dropped.length > 60) L.push(`  ... 其余 ${result.dropped.length - 60} 条略`);
+  L.push('');
+  L.push('逐页栏数:');
+  for (const c of result.stats.columns) L.push(`  p${c.page}: ${c.columns} 栏`);
+  return L.join('\n');
+}
+
+// ─────────────────── 入口 ───────────────────
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help || args.positional.length === 0) {
+    console.log(USAGE);
+    process.exit(args.help ? 0 : 1);
+  }
+  const pdfPath = resolve(args.positional[0]);
+  const slug = args.name ?? basename(pdfPath, extname(pdfPath)).replace(/[\\/:*?"<>|\s]+/gu, '-').slice(0, 80);
+  const outDir = join(resolve(args.out ?? join(WORKSPACE, 'library/extracted')), slug);
+  await mkdir(outDir, { recursive: true });
+
+  const started = Date.now();
+  const result = await extract(pdfPath, args);
+  const md = renderMarkdown(result);
+
+  await writeFile(join(outDir, `${slug}.md`), md, 'utf8');
+  await writeFile(join(outDir, `${slug}.report.txt`), renderReport(result), 'utf8');
+  if (args.json) await writeFile(join(outDir, `${slug}.json`), JSON.stringify(result, null, 1), 'utf8');
+
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+  console.log(`✓ 抽取完成 (${secs}s)`);
+  console.log(`  源文件   : ${result.source.file}`);
+  console.log(`  页数     : ${result.stats.pagesProcessed}/${result.source.pages}`);
+  console.log(`  双栏页   : ${result.stats.columns.filter((c) => c.columns === 2).length}`);
+  console.log(`  段落     : ${result.stats.paragraphs}  剔除页眉页脚: ${result.dropped.length}`);
+  console.log(`  Markdown : ${join(outDir, `${slug}.md`)}`);
+  console.log(`  正文字符 : ${md.length}`);
+}
+
+main().catch((err) => {
+  console.error(`✗ 抽取失败: ${err?.message ?? err}`);
+  if (process.env.DEBUG) console.error(err);
+  process.exit(1);
+});

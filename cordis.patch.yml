@@ -1,0 +1,6 @@
+# DSH Literature Library bundle.
+# The host half is this package's main (index.js); the web client half is
+# discovered from package.json -> dsh.client (exports "./client").
+- insert:
+    - id: literature-library
+      name: dsh-literature-library

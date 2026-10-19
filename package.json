@@ -1,0 +1,44 @@
+{
+  "name": "dsh-literature-library",
+  "version": "0.4.0",
+  "description": "DSH literature library: categorized PDFs, bilingual reading, continuous PDF.js viewer, DeepSeek translation, and journal metadata.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "tools/**/*.mjs",
+    "vendor/**/*",
+    "README.md",
+    "README-plugin.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "pdfjs-dist": "6.4.299"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
