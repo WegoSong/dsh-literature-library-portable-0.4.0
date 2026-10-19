@@ -24,7 +24,7 @@
         "en": "Categorized PDF library, bilingual reading, continuous PDF.js viewer, DeepSeek translation, and journal metadata.",
         "zh": "分类 PDF 库、中英对照阅读、PDF.js 连续滚动、DeepSeek 翻译与期刊信息。"
       },
-      "icon": "https://raw.githubusercontent.com/WegoSong/dsh-literature-library-portable-0.3.4/main/icon.svg",
+      "icon": "https://raw.githubusercontent.com/WegoSong/dsh-literature-library-portable-0.4.0/main/icon.svg",
       "metadata": {
         "keywords": [
           "literature",
@@ -43,7 +43,7 @@
           "publishTimestamp": 1792397279,
           "source": {
             "type": "git",
-            "url": "https://github.com/WegoSong/dsh-literature-library-portable-0.3.4",
+            "url": "https://github.com/WegoSong/dsh-literature-library-portable-0.4.0",
             "commit": "9206ca6729e1ab9403c35de0d0e342eadd1005e0"
           },
           "engines": {
