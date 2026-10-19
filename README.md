@@ -1,5 +1,8 @@
 # DSH Literature Library（市场安装包）
 
+> **从零开始安装**：安装完 DSH 后不知道下一步怎么做？请看
+> [INSTALL.md](INSTALL.md)（前置工具、三种安装方式、首次使用、旧数据迁移、常见报错）。
+
 这是可在 **DSH Web → Plugins** 中安装的 bundle 包，不再需要 `install.mjs` 或手工改
 `cordis.patch.yml`。
 
