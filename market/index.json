@@ -39,12 +39,12 @@
       },
       "versions": [
         {
-          "version": "0.4.2",
-          "publishTimestamp": 1792464136,
+          "version": "0.4.3",
+          "publishTimestamp": 1792471504,
           "source": {
             "type": "git",
             "url": "https://github.com/WegoSong/dsh-literature-library-portable-0.4.0",
-            "commit": "ccdf8aeb52065d0b67f2ab3cee57017e88db3aeb"
+            "commit": "93312b3f1478c00d40f34214e25c00565d9eef6e"
           },
           "engines": {
             "dsh": ">=0.2.1-rc.2 <0.3.0"
