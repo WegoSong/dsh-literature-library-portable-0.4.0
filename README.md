@@ -18,7 +18,7 @@
 对应的 CLI 写法：
 
 ```powershell
-dsh plugin add "E:/path/to/dsh-literature-library-0.4.1.tgz"
+dsh plugin add "E:/path/to/dsh-literature-library-0.4.2.tgz"
 ```
 
 ### 方式 B：插件市场

@@ -14,6 +14,25 @@
 
 ---
 
+## 0.4.2 — 2026-10-20
+
+### 新增
+
+- **离线一键更新**：工具条新增「更新」，自动扫描
+  `<DSH_HOME>/literature-library/updates/*.tgz`，显示本地更新包版本，点「一键更新」即可。
+- 也可以在更新对话框里直接选择一个本地 `.tgz` 上传并更新；全程不访问 GitHub、npm 或外网。
+- host 新增 `GET /plugin-update`、`POST /plugin-update/apply`：
+  - 校验包名、SemVer、`dsh.bundle.patch` 与必要文件；
+  - 先把旧文件备份到 `updates/backup-<旧版本>-<时间>/`，失败自动回滚；
+  - 用“临时文件 + rename”替换，避免破坏 pnpm store 的硬链接；
+  - 更新只覆盖程序文件，不碰 `library/` 和 `node_modules`。
+- 更新完成后必须**完全退出并重启 DSH**；运行中的 host 仍是旧代码。
+
+### 说明
+
+- 0.4.1 及更早版本没有「更新」入口，需要手动安装一次 0.4.2；之后即可离线一键更新。
+- 更新包格式为 `npm pack` 生成的 `.tgz`（release 里的 `dsh-literature-library-<版本>.tgz`）。
+
 ## 0.4.1 — 2026-10-20
 
 ### 新增

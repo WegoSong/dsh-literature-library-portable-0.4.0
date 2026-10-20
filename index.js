@@ -19,12 +19,15 @@
  */
 
 import { readFile, stat, readdir, writeFile, mkdir, copyFile, rename, rmdir } from 'node:fs/promises';
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync,
+  readFileSync, renameSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
 import { resolve, join, extname, sep, normalize, relative, basename, dirname, parse } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { homedir as osHomedir } from 'node:os';
-import { zstdDecompressSync } from 'node:zlib';
+import { gunzipSync, zstdDecompressSync } from 'node:zlib';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -45,6 +48,86 @@ const PLUGIN_PACKAGE = (() => {
 })();
 const PLUGIN_VERSION = typeof PLUGIN_PACKAGE.version === 'string'
   ? PLUGIN_PACKAGE.version : '0.0.0';
+
+// ─────────────────── 离线更新包（.tgz）───────────────────
+
+/** 读取 tar 头里的 NUL 结尾字符串。 */
+function tarString(buf, start, length) {
+  return buf.subarray(start, start + length).toString('utf8').replace(/\0.*$/u, '').trim();
+}
+
+/**
+ * 解析 npm pack 生成的 `.tgz`，返回 **去掉 `package/` 前缀后** 的文件 Map。
+ * 不依赖系统 tar，Windows/macOS/Linux 行为一致；同时阻断路径穿越。
+ */
+function readUpdateTarGz(buffer) {
+  const tar = gunzipSync(buffer, { maxOutputLength: 64 * 1024 * 1024 });
+  const files = new Map();
+  let offset = 0;
+  let total = 0;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((b) => b === 0)) break;
+    const name = tarString(header, 0, 100);
+    const prefix = tarString(header, 345, 155);
+    const full = (prefix ? `${prefix}/${name}` : name).replace(/\\/g, '/');
+    const size = Number.parseInt(tarString(header, 124, 12) || '0', 8);
+    const type = String.fromCharCode(header[156] || 48);
+    if (!Number.isFinite(size) || size < 0) throw new Error('更新包 tar 头损坏');
+    const dataStart = offset + 512;
+    if (dataStart + size > tar.length) throw new Error('更新包内容不完整');
+    offset = dataStart + Math.ceil(size / 512) * 512;
+
+    if (type !== '0' && type !== '\0') continue; // 目录/PAX/链接一律跳过
+    const normalized = full.replace(/^\.\/+/u, '');
+    if (!normalized.startsWith('package/')) throw new Error('更新包必须是 npm pack 的 package/ 结构');
+    const rel = normalized.slice('package/'.length);
+    if (rel === '' || rel.startsWith('../') || rel.includes('/../') || rel.startsWith('/')) {
+      throw new Error(`更新包包含非法路径：${full}`);
+    }
+    total += size;
+    if (total > 64 * 1024 * 1024) throw new Error('更新包解压后过大');
+    if (files.size > 5000) throw new Error('更新包文件数量过多');
+    files.set(rel, tar.subarray(dataStart, dataStart + size));
+  }
+  if (!files.has('package.json')) throw new Error('更新包缺少 package.json');
+  return files;
+}
+
+function isValidVersion(value) {
+  return typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value);
+}
+
+/**
+ * 用新文件替换目标文件，而不是在原文件上覆盖。
+ * pnpm 的包文件常是 store 的硬链接；原文件上写入会改到 store 里的共享副本。
+ * 先写临时文件再 rename，可以断开硬链接，只替换当前安装目录。
+ */
+function replaceFileSync(src, dest) {
+  mkdirSync(dirname(dest), { recursive: true });
+  const tmp = join(dirname(dest), `.${basename(dest)}.ll-update-${process.pid}-${Date.now()}`);
+  copyFileSync(src, tmp);
+  try {
+    try {
+      renameSync(tmp, dest);
+    } catch {
+      rmSync(dest, { force: true });
+      renameSync(tmp, dest);
+    }
+  } finally {
+    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+  }
+}
+
+/** 只需判断升级方向；预发布版本按数字段比较，足够本插件使用。 */
+function compareVersions(a, b) {
+  const split = (v) => String(v).split('-')[0].split('.').map((n) => Number(n) || 0);
+  const x = split(a); const y = split(b);
+  for (let i = 0; i < 3; i += 1) {
+    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0) ? 1 : -1;
+  }
+  return String(a) === String(b) ? 0 : (String(a) > String(b) ? 1 : -1);
+}
 
 /**
  * 可选配置（不导出 Config schema，因此行里的 `config:` 会原样传入 apply）：
@@ -611,6 +694,8 @@ export function apply(ctx, config = {}) {
   const libraryRoot = resolve(join(workspaceRoot, libraryDir));
   const papersRoot = resolve(join(libraryRoot, papersDir));
   const pluginRoot = dirname(fileURLToPath(import.meta.url));
+  /** 离线更新包目录：把 .tgz 放这里，界面就能发现并一键更新。 */
+  const updatesDir = join(dshHomeDir(), 'literature-library', 'updates');
   /**
    * 工具脚本目录：市场安装包里自带 `tools/`；旧的“工作区路径行”安装
    * 仍然从 workspaceRoot/tools 读，两种布局都支持。
@@ -685,6 +770,162 @@ export function apply(ctx, config = {}) {
     }
     if (size === 0) return {};
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  async function readRawBody(req, limit = 32 * 1024 * 1024) {
+    const chunks = [];
+    let size = 0;
+    for await (const c of req) {
+      size += c.length;
+      if (size > limit) {
+        throw Object.assign(new Error('更新包过大（上限 32 MB）'), { status: 413 });
+      }
+      chunks.push(c);
+    }
+    if (size === 0) throw Object.assign(new Error('更新包为空'), { status: 400 });
+    return Buffer.concat(chunks);
+  }
+
+  /** 扫描 updates/ 下的 .tgz；只读取 package.json，不执行任何代码。 */
+  function listUpdatePackages() {
+    if (!existsSync(updatesDir)) return [];
+    let names = [];
+    try { names = readdirSync(updatesDir); } catch { return []; }
+    return names
+      .filter((name) => /\.(?:tgz|tar\.gz)$/iu.test(name))
+      .map((file) => {
+        try {
+          const abs = join(updatesDir, file);
+          const st = statSync(abs);
+          if (!st.isFile()) return null;
+          const entries = readUpdateTarGz(readFileSync(abs));
+          const pkg = JSON.parse(entries.get('package.json').toString('utf8'));
+          if (pkg?.name !== 'dsh-literature-library' || !isValidVersion(pkg.version)) return null;
+          return {
+            file,
+            version: pkg.version,
+            size: st.size,
+            modified: st.mtime.toISOString(),
+            current: compareVersions(pkg.version, PLUGIN_VERSION) === 0,
+            newer: compareVersions(pkg.version, PLUGIN_VERSION) > 0,
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => compareVersions(b.version, a.version));
+  }
+
+  /**
+   * 用本地 `.tgz` 覆盖当前插件文件。
+   *
+   * 关键点：
+   *   - 只接受 name=dsh-literature-library、带 dsh.bundle.patch 的 npm pack 包；
+   *   - 先把旧文件完整备份到 updates/backup-*，任一步失败就回滚；
+   *   - 不碰 node_modules / library，所以不需要 pnpm、GitHub 或外网。
+   */
+  function applyUpdateBuffer(buffer, fileName) {
+    const entries = readUpdateTarGz(buffer);
+    const pkg = JSON.parse(entries.get('package.json').toString('utf8'));
+    if (pkg?.name !== 'dsh-literature-library') {
+      throw Object.assign(new Error('更新包不是 dsh-literature-library'), { status: 400 });
+    }
+    if (!isValidVersion(pkg.version)) {
+      throw Object.assign(new Error(`更新包版本号非法：${pkg.version}`), { status: 400 });
+    }
+    const direction = compareVersions(pkg.version, PLUGIN_VERSION);
+    if (direction === 0) {
+      throw Object.assign(new Error(`当前已经是 v${PLUGIN_VERSION}`), { status: 409 });
+    }
+    if (direction < 0) {
+      throw Object.assign(new Error(`不允许降级：当前 v${PLUGIN_VERSION}，更新包 v${pkg.version}`), { status: 409 });
+    }
+    if (!pkg.dsh?.bundle?.patch || !entries.has('cordis.patch.yml')) {
+      throw Object.assign(new Error('更新包缺少 dsh.bundle.patch / cordis.patch.yml'), { status: 400 });
+    }
+    for (const required of ['index.js', 'client.js', 'package.json']) {
+      if (!entries.has(required)) {
+        throw Object.assign(new Error(`更新包缺少 ${required}`), { status: 400 });
+      }
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
+    const stagingDir = join(updatesDir, `.staging-${Date.now()}`);
+    const backupDir = join(updatesDir, `backup-${PLUGIN_VERSION}-${stamp}`);
+    const newPaths = [];
+    mkdirSync(updatesDir, { recursive: true });
+    mkdirSync(stagingDir, { recursive: true });
+    mkdirSync(backupDir, { recursive: true });
+
+    try {
+      for (const [rel, data] of entries) {
+        const dest = resolve(stagingDir, rel);
+        if (dest !== stagingDir && !dest.startsWith(`${resolve(stagingDir)}${sep}`)) {
+          throw new Error(`更新包路径越界：${rel}`);
+        }
+        mkdirSync(dirname(dest), { recursive: true });
+        writeFileSync(dest, data);
+      }
+
+      // 备份会被覆盖的旧文件；新文件记录在 newPaths，失败时删除。
+      for (const rel of entries.keys()) {
+        const dest = join(pluginRoot, rel);
+        if (existsSync(dest) && statSync(dest).isFile()) {
+          const bak = join(backupDir, rel);
+          mkdirSync(dirname(bak), { recursive: true });
+          copyFileSync(dest, bak);
+        } else {
+          newPaths.push(rel);
+        }
+      }
+
+      for (const rel of entries.keys()) {
+        const src = join(stagingDir, rel);
+        const dest = join(pluginRoot, rel);
+        replaceFileSync(src, dest);
+      }
+
+      writeFileSync(join(updatesDir, 'last-update.json'), `${JSON.stringify({
+        from: PLUGIN_VERSION,
+        to: pkg.version,
+        file: fileName,
+        backup: backupDir,
+        at: new Date().toISOString(),
+      }, null, 2)}\n`, 'utf8');
+
+      return {
+        ok: true,
+        from: PLUGIN_VERSION,
+        to: pkg.version,
+        backup: backupDir,
+        restartRequired: true,
+      };
+    } catch (err) {
+      // 回滚：恢复备份，删掉本次新增的文件。
+      for (const rel of entries.keys()) {
+        const bak = join(backupDir, rel);
+        const dest = join(pluginRoot, rel);
+        try {
+          if (existsSync(bak)) {
+            replaceFileSync(bak, dest);
+          } else if (newPaths.includes(rel)) {
+            rmSync(dest, { force: true });
+          }
+        } catch { /* 尽力回滚 */ }
+      }
+      throw err;
+    } finally {
+      rmSync(stagingDir, { recursive: true, force: true });
+    }
+  }
+
+  function readLastUpdate() {
+    try {
+      return JSON.parse(readFileSync(join(updatesDir, 'last-update.json'), 'utf8'));
+    } catch {
+      return null;
+    }
   }
 
   async function loadDb() {
@@ -1944,6 +2185,59 @@ export function apply(ctx, config = {}) {
             range: true,
             routePrefix: prefix,
           });
+          return;
+        }
+
+        // 离线更新：扫描本地 updates/ 或上传一个 npm pack 的 .tgz。
+        // 全程只读写本机文件，不需要 GitHub、npm 或任何外网。
+        if (sub === 'plugin-update') {
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            sendJson(res, 405, { error: 'method-not-allowed' }); return;
+          }
+          sendJson(res, 200, {
+            current: PLUGIN_VERSION,
+            name: PLUGIN_PACKAGE.name ?? 'dsh-literature-library',
+            updatesDir,
+            packages: listUpdatePackages(),
+            last: readLastUpdate(),
+          });
+          return;
+        }
+
+        if (sub === 'plugin-update/apply') {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' }); return;
+          }
+          try {
+            const type = String(req.headers['content-type'] ?? '').toLowerCase();
+            let fileName;
+            let buffer;
+            if (type.includes('application/json')) {
+              const body = await readBody(req, 64 * 1024);
+              fileName = basename(String(body?.file ?? ''));
+              if (!/\.(?:tgz|tar\.gz)$/iu.test(fileName)) {
+                throw Object.assign(new Error('请选择 .tgz 或 .tar.gz 更新包'), { status: 400 });
+              }
+              const abs = join(updatesDir, fileName);
+              if (!existsSync(abs)) {
+                throw Object.assign(new Error(`更新包不存在：${fileName}`), { status: 404 });
+              }
+              buffer = readFileSync(abs);
+            } else {
+              buffer = await readRawBody(req);
+              fileName = basename(String(url.searchParams.get('name') ?? 'update.tgz'));
+              if (!/\.(?:tgz|tar\.gz)$/iu.test(fileName)) fileName = 'update.tgz';
+              mkdirSync(updatesDir, { recursive: true });
+              writeFileSync(join(updatesDir, fileName), buffer);
+            }
+            const result = applyUpdateBuffer(buffer, fileName);
+            sendJson(res, 200, result);
+          } catch (err) {
+            sendJson(res, Number(err?.status) || 400, {
+              error: 'update-failed',
+              message: String(err?.message ?? err),
+            });
+          }
           return;
         }
 

@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.4.1';
+    const PDFJS_REV = '0.4.2';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_SCALE_KEY = 'dsh-literature-library/font-scale';
     const FONT_SCALES = [1, 1.1, 1.2, 1.3, 1.5];
@@ -276,6 +276,18 @@ window.__ModuleLoader__.load({
 .ll-modal-sm { width: min(560px, 92vw); height: auto; max-height: 86vh; }
 /* 配置对话框 */
 .ll-cfg-status { font-size: calc(12.5px * var(--ll-font-scale, 1)); margin-bottom: 8px; }
+.ll-update-dir { margin: 4px 0 10px; }
+.ll-update-dir code { word-break: break-all; }
+.ll-update-list { display: flex; flex-direction: column; gap: 2px; }
+.ll-update-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0; border-bottom: .5px solid var(--ll-soft-border);
+}
+.ll-update-meta { flex: auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ll-update-meta .ll-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ll-update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.ll-update-file { max-width: 100%; color: var(--ll-muted); font-size: calc(11px * var(--ll-font-scale, 1)); }
+.ll-update-ok { border-color: var(--ll-success); }
 .ll-cfg-ok { color: var(--ll-text); }
 .ll-cfg-bad { color: #d9534f; }
 .ll-cfg-rows { display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px; }
@@ -2458,6 +2470,142 @@ window.__ModuleLoader__.load({
 
     // ─────────────────── 主面板 ───────────────────
 
+    // ─────────────────── 离线更新对话框 ───────────────────
+
+    /**
+     * 一键更新：只读本机 updates/ 或浏览器上传的 .tgz，不访问 GitHub/npm。
+     * 更新文件由 host 覆盖，运行中的 host 仍是旧代码，所以必须重启 DSH。
+     */
+    function UpdateDialog({ onClose }) {
+      const [info, setInfo] = React.useState(null);
+      const [loading, setLoading] = React.useState(true);
+      const [error, setError] = React.useState('');
+      const [busy, setBusy] = React.useState('');
+      const [file, setFile] = React.useState(null);
+      const [done, setDone] = React.useState(null);
+
+      React.useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const res = await fetch(`${ROUTE_PREFIX}/plugin-update`);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+            if (alive) setInfo(data);
+          } catch (err) {
+            if (alive) setError(String(err?.message ?? err));
+          } finally {
+            if (alive) setLoading(false);
+          }
+        })();
+        return () => { alive = false; };
+      }, []);
+
+      const apply = async (url, options, label) => {
+        setBusy(label);
+        setError('');
+        try {
+          const res = await fetch(url, options);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+          setDone(data);
+        } catch (err) {
+          setError(String(err?.message ?? err));
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const applyLocal = (pkg) => apply(
+        `${ROUTE_PREFIX}/plugin-update/apply`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ file: pkg.file }),
+        },
+        pkg.file,
+      );
+
+      const upload = () => {
+        if (!file) return;
+        if (file.size > 32 * 1024 * 1024) {
+          setError('更新包超过 32 MB');
+          return;
+        }
+        const q = new URLSearchParams({ name: file.name });
+        return apply(
+          `${ROUTE_PREFIX}/plugin-update/apply?${q.toString()}`,
+          { method: 'POST', headers: { 'content-type': 'application/gzip' }, body: file },
+          file.name,
+        );
+      };
+
+      const packages = info?.packages ?? [];
+      return h('div', {
+        className: 'll-modal-bg',
+        onClick: (e) => { if (e.target === e.currentTarget) onClose(); },
+      }, [
+        h('div', { className: 'll-modal ll-modal-sm', onClick: (e) => e.stopPropagation() }, [
+          h('div', { className: 'll-modal-head', key: 'h' }, [
+            h('span', { key: 't' }, '离线更新插件'),
+            h('span', { className: 'll-spacer', key: 's' }),
+            h('button', { key: 'x', className: 'll-btn ll-btn-xs', onClick: onClose }, '关闭'),
+          ]),
+          h('div', { className: 'll-modal-body', key: 'b', style: { padding: '10px 12px' } }, [
+            error ? h('div', { className: 'll-banner err', key: 'e' }, error) : null,
+            done ? h('div', { className: 'll-banner ll-update-ok', key: 'ok' }, [
+              h('b', { key: 'b' }, `已更新到 v${done.to}`),
+              h('div', { key: 'd' }, '请完全退出 DSH 后重新启动；只刷新浏览器不会加载新的 host 代码。'),
+              h('div', { key: 'p', className: 'll-hint' }, `旧版本备份：${done.backup}`),
+            ]) : null,
+            loading ? h('div', { className: 'll-hint' }, '正在扫描本地更新包…') : null,
+            info ? h('div', { key: 'info' }, [
+              h('div', { key: 'cur', className: 'll-cfg-status' }, [
+                '当前版本：', h('b', { key: 'v' }, `v${info.current}`),
+              ]),
+              h('div', { key: 'dir', className: 'll-hint ll-update-dir' }, [
+                '本地更新包目录：', h('code', { key: 'c' }, info.updatesDir),
+              ]),
+              h('div', { key: 'list', className: 'll-update-list' }, packages.length
+                ? packages.map((pkg) => h('div', { key: pkg.file, className: 'll-update-row' }, [
+                  h('div', { key: 'm', className: 'll-update-meta' }, [
+                    h('b', { key: 'v' }, `v${pkg.version}`),
+                    h('span', { key: 'f', className: 'll-hint' }, pkg.file),
+                  ]),
+                  h('button', {
+                    key: 'go', className: 'll-btn ll-btn-xs',
+                    disabled: Boolean(busy) || Boolean(done) || !pkg.newer,
+                    title: pkg.newer ? `用 ${pkg.file} 覆盖当前插件` : '不是比当前更新的版本',
+                    onClick: () => applyLocal(pkg),
+                  }, pkg.newer ? (busy === pkg.file ? '更新中…' : '一键更新') : '当前/旧版本'),
+                ]))
+                : h('div', { key: 'none', className: 'll-hint' }, '没有发现本地 .tgz。可以在下面选择文件，或把文件放进上面的目录。')),
+            ]) : null,
+            !done ? h('div', { key: 'up', className: 'll-update-actions' }, [
+              h('input', {
+                key: 'f', className: 'll-update-file', type: 'file',
+                accept: '.tgz,.tar.gz,application/gzip',
+                disabled: Boolean(busy),
+                onChange: (e) => setFile(e.target.files?.[0] ?? null),
+              }),
+              h('button', {
+                key: 'u', className: 'll-btn ll-btn-xs',
+                disabled: !file || Boolean(busy),
+                onClick: upload,
+              }, busy && busy === file?.name ? '更新中…' : '上传并更新'),
+            ]) : null,
+            h('div', { key: 'hint', className: 'll-hint', style: { marginTop: '10px' } },
+              '更新包是 npm pack 生成的 .tgz；不需要 GitHub、npm 或外网。更新只覆盖程序文件，不会删除 library/。'),
+          ]),
+          h('div', { className: 'll-modal-foot', key: 'f' }, [
+            h('span', { key: 's', className: 'll-hint' }, '更新完成后请重启 DSH'),
+            h('span', { key: 'sp', className: 'll-spacer' }),
+            h('button', { key: 'c', className: 'll-btn', onClick: onClose }, done ? '关闭' : '取消'),
+          ]),
+        ]),
+      ]);
+    }
+
     function LiteraturePanel({ remote }) {
       const [layout, setLayout] = React.useState(loadLayout);
       const [fontScale, setFontScale] = React.useState(loadFontScale);
@@ -2498,6 +2646,7 @@ window.__ModuleLoader__.load({
       const [jobs, setJobs] = React.useState([]);
       const [apiConfig, setApiConfig] = React.useState(null);
       const [configOpen, setConfigOpen] = React.useState(false);
+      const [updateOpen, setUpdateOpen] = React.useState(false);
       // 插件版本（由 host 的 /version 从 package.json 读取）
       const [versionInfo, setVersionInfo] = React.useState(null);
 
@@ -3227,6 +3376,11 @@ window.__ModuleLoader__.load({
               onClick: () => setConfigOpen(true),
             }, '配置'),
             h('button', {
+              key: 'upd', className: 'll-btn ll-btn-xs',
+              title: '从本地 .tgz 一键更新（不需要 GitHub 或外网）',
+              onClick: () => setUpdateOpen(true),
+            }, '更新'),
+            h('button', {
               key: 'fill', className: 'll-btn ll-btn-xs',
               disabled: busy !== null,
               title: '从译稿/抽取文本识别 DOI、标题、作者、年份和刊名，经 Crossref 校准后查询影响因子与分区',
@@ -3506,6 +3660,11 @@ window.__ModuleLoader__.load({
               if (res.ok) setApiConfig(await res.json());
             } catch { /* 忽略 */ }
           },
+        }) : null,
+
+        updateOpen ? h(UpdateDialog, {
+          key: 'update',
+          onClose: () => setUpdateOpen(false),
         }) : null,
 
         // 右键菜单：文献或文件夹
