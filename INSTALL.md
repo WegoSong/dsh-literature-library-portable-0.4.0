@@ -2,7 +2,7 @@
 
 本文从 **DSH 已经安装好、能打开 Web 界面** 开始，带你安装「DSH 文献库」插件（`dsh-literature-library`），并完成第一次导入和翻译配置。
 
-- 插件版本：**0.4.0**
+- 插件版本：**0.4.1**
 - 仓库：<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0>
 - 适用：DSH Web `0.2.1-rc.2` 到 `0.3.0` 之前（市场索引声明 `>=0.2.1-rc.2 <0.3.0`）
 - 平台：Windows 10/11、macOS、Linux
@@ -151,11 +151,7 @@ https://cdn.jsdelivr.net/gh/WegoSong/dsh-literature-library-portable-0.4.0@main/
 https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 ```
 
-或者固定到 0.4.0 的提交：
-
-```text
-git+https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git#9206ca6729e1ab9403c35de0d0e342eadd1005e0
-```
+市场索引会自动固定到对应版本的提交；手动 Git 安装用上面的仓库地址即可。
 
 4. 点 **安装**，等待完成。
 5. **重启 DSH**。
@@ -168,7 +164,7 @@ git+https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git#9206ca
 
 如果那台电脑访问 GitHub 不稳定，先下载：
 
-<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.4.0/dsh-literature-library-0.4.0.tgz>
+<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.4.1/dsh-literature-library-0.4.1.tgz>
 
 把 `.tgz` 复制到目标电脑，然后：
 
@@ -176,7 +172,7 @@ git+https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git#9206ca
 2. 填 tarball 的绝对路径，例如：
 
 ```text
-D:\dsh-literature-library-0.4.0.tgz
+D:\dsh-literature-library-0.4.1.tgz
 ```
 
 3. 点 **安装**，等待完成。
@@ -189,13 +185,13 @@ D:\dsh-literature-library-0.4.0.tgz
 在已经能运行 `dsh` 的终端里：
 
 ```bash
-dsh plugin add "git+https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git#9206ca6729e1ab9403c35de0d0e342eadd1005e0"
+dsh plugin add "git+https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git"
 ```
 
 或本地 tarball：
 
 ```bash
-dsh plugin add "D:/dsh-literature-library-0.4.0.tgz"
+dsh plugin add "D:/dsh-literature-library-0.4.1.tgz"
 ```
 
 安装完成后重启 DSH Web。
@@ -287,10 +283,10 @@ DEEPSEEK_API_KEY
 左栏底部会显示：
 
 ```text
-v0.4.0  PDF.js
+v0.4.1  PDF.js
 ```
 
-如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.4.0，需要确认安装并重启 DSH。
+如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.4.1，需要确认安装并重启 DSH。
 
 ---
 
@@ -330,7 +326,7 @@ C:\Users\<用户名>\.dsh\profiles\web\cordis.patch.yml
 
 删除这一整条 `literature-library` 行，避免安装新包后出现两个文献库面板。
 
-然后安装 0.4.0，再在同一个 `cordis.patch.yml` 末尾加：
+然后安装 0.4.1，再在同一个 `cordis.patch.yml` 末尾加：
 
 ```yaml
 - id: literature-library
