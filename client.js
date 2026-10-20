@@ -24,10 +24,19 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.4.2';
+    const PDFJS_REV = '0.4.3';
     const LS_KEY = 'dsh-literature-library/layout';
+    const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
+    // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
     const FONT_SCALE_KEY = 'dsh-literature-library/font-scale';
-    const FONT_SCALES = [1, 1.1, 1.2, 1.3, 1.5];
+    const FONT_MIN_PERCENT = 1;
+    const FONT_MAX_PERCENT = 1000;
+
+    function clampFontPercent(value) {
+      const n = Math.round(Number(value));
+      if (!Number.isFinite(n)) return 100;
+      return Math.min(FONT_MAX_PERCENT, Math.max(FONT_MIN_PERCENT, n));
+    }
     /**
      * 切换文献后的「停稳」时间。
      * 译文要尽快出现，所以短；PDF 重得多，所以长一些——快速连点时
@@ -276,6 +285,10 @@ window.__ModuleLoader__.load({
 .ll-modal-sm { width: min(560px, 92vw); height: auto; max-height: 86vh; }
 /* 配置对话框 */
 .ll-cfg-status { font-size: calc(12.5px * var(--ll-font-scale, 1)); margin-bottom: 8px; }
+.ll-update-section { margin-top: 10px; padding-top: 10px; border-top: .5px solid var(--ll-soft-border); }
+.ll-update-section > b { display: block; margin-bottom: 3px; }
+.ll-update-section .ll-update-actions { margin-top: 5px; }
+.ll-update-meta a { color: var(--ll-accent); text-decoration: none; }
 .ll-update-dir { margin: 4px 0 10px; }
 .ll-update-dir code { word-break: break-all; }
 .ll-update-list { display: flex; flex-direction: column; gap: 2px; }
@@ -437,11 +450,16 @@ window.__ModuleLoader__.load({
   flex: none; display: inline-flex; align-items: center; gap: 3px;
   color: var(--ll-muted); white-space: nowrap;
 }
-.ll-font-size select {
+.ll-font-range {
+  width: 84px; height: 14px; margin: 0; padding: 0;
+  accent-color: var(--ll-accent); cursor: pointer;
+}
+.ll-font-num {
+  width: 52px; box-sizing: border-box;
   font: inherit; font-size: calc(10px * var(--ll-font-scale, 1)); line-height: 1.4;
   color: var(--ll-text); background: var(--ll-control-bg);
   border: 1px solid var(--ll-soft-border); border-radius: 4px;
-  padding: 0 2px; cursor: pointer;
+  padding: 0 2px; text-align: right;
 }
 .ll-ver { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ll-ver b { color: var(--ll-muted); font-weight: 600; }
@@ -1174,12 +1192,17 @@ window.__ModuleLoader__.load({
     }
 
     /** 插件字号（只放大文字，不改变 PDF 画布缩放） */
-    function loadFontScale() {
+    function loadFontPercent() {
       try {
-        const raw = Number(window.localStorage.getItem(FONT_SCALE_KEY));
-        if (FONT_SCALES.includes(raw)) return raw;
+        const current = window.localStorage.getItem(FONT_PERCENT_KEY);
+        if (current != null) return clampFontPercent(current);
+        const legacy = Number(window.localStorage.getItem(FONT_SCALE_KEY));
+        if (Number.isFinite(legacy) && legacy > 0) {
+          // 旧键是倍率：1.5 → 150%；如果旧键已经是 150 这种百分比也兼容
+          return clampFontPercent(legacy <= 10 ? legacy * 100 : legacy);
+        }
       } catch { /* 忽略 */ }
-      return 1;
+      return 100;
     }
 
     /** 折叠的文件夹路径集合（持久化，跨刷新保留「收起」状态） */
@@ -2473,8 +2496,8 @@ window.__ModuleLoader__.load({
     // ─────────────────── 离线更新对话框 ───────────────────
 
     /**
-     * 一键更新：只读本机 updates/ 或浏览器上传的 .tgz，不访问 GitHub/npm。
-     * 更新文件由 host 覆盖，运行中的 host 仍是旧代码，所以必须重启 DSH。
+     * 更新对话框：GitHub 在线更新 + 本地 .tgz 上传。
+     * 两者最终都走 host 的同一套校验/备份/回滚逻辑；离线时只用本地包。
      */
     function UpdateDialog({ onClose }) {
       const [info, setInfo] = React.useState(null);
@@ -2483,6 +2506,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('');
       const [file, setFile] = React.useState(null);
       const [done, setDone] = React.useState(null);
+      const [github, setGithub] = React.useState(null);
+      const [githubBusy, setGithubBusy] = React.useState(false);
+      const [githubError, setGithubError] = React.useState('');
 
       React.useEffect(() => {
         let alive = true;
@@ -2540,6 +2566,36 @@ window.__ModuleLoader__.load({
         );
       };
 
+      const checkGithub = async () => {
+        setGithubBusy(true);
+        setGithubError('');
+        try {
+          const res = await fetch(`${ROUTE_PREFIX}/plugin-update/github`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+          setGithub(data);
+        } catch (err) {
+          setGithubError(String(err?.message ?? err));
+        } finally {
+          setGithubBusy(false);
+        }
+      };
+
+      const applyGithub = async () => {
+        setBusy('github');
+        setError('');
+        try {
+          const res = await fetch(`${ROUTE_PREFIX}/plugin-update/github`, { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+          setDone(data);
+        } catch (err) {
+          setError(String(err?.message ?? err));
+        } finally {
+          setBusy('');
+        }
+      };
+
       const packages = info?.packages ?? [];
       return h('div', {
         className: 'll-modal-bg',
@@ -2563,23 +2619,51 @@ window.__ModuleLoader__.load({
               h('div', { key: 'cur', className: 'll-cfg-status' }, [
                 '当前版本：', h('b', { key: 'v' }, `v${info.current}`),
               ]),
-              h('div', { key: 'dir', className: 'll-hint ll-update-dir' }, [
-                '本地更新包目录：', h('code', { key: 'c' }, info.updatesDir),
-              ]),
-              h('div', { key: 'list', className: 'll-update-list' }, packages.length
-                ? packages.map((pkg) => h('div', { key: pkg.file, className: 'll-update-row' }, [
-                  h('div', { key: 'm', className: 'll-update-meta' }, [
-                    h('b', { key: 'v' }, `v${pkg.version}`),
-                    h('span', { key: 'f', className: 'll-hint' }, pkg.file),
-                  ]),
+              h('div', { key: 'gh', className: 'll-update-section' }, [
+                h('b', { key: 't' }, '从 GitHub 更新'),
+                h('div', { key: 'h', className: 'll-hint' }, '需要本机能访问 github.com；失败时请用下面的本地包。'),
+                h('div', { key: 'a', className: 'll-update-actions' }, [
                   h('button', {
+                    key: 'check', className: 'll-btn ll-btn-xs',
+                    disabled: githubBusy || Boolean(busy) || Boolean(done),
+                    onClick: checkGithub,
+                  }, githubBusy ? '检查中…' : '检查 GitHub 更新'),
+                ]),
+                githubError ? h('div', { key: 'e', className: 'll-banner err' }, githubError) : null,
+                github ? h('div', { key: 'r', className: 'll-update-row' }, [
+                  h('div', { key: 'm', className: 'll-update-meta' }, [
+                    h('b', { key: 'v' }, `GitHub 最新 v${github.latest}`),
+                    github.releaseUrl
+                      ? h('a', { key: 'l', className: 'll-hint', href: github.releaseUrl, target: '_blank', rel: 'noreferrer' }, '查看 Release')
+                      : null,
+                  ]),
+                  github.newer ? h('button', {
                     key: 'go', className: 'll-btn ll-btn-xs',
-                    disabled: Boolean(busy) || Boolean(done) || !pkg.newer,
-                    title: pkg.newer ? `用 ${pkg.file} 覆盖当前插件` : '不是比当前更新的版本',
-                    onClick: () => applyLocal(pkg),
-                  }, pkg.newer ? (busy === pkg.file ? '更新中…' : '一键更新') : '当前/旧版本'),
-                ]))
-                : h('div', { key: 'none', className: 'll-hint' }, '没有发现本地 .tgz。可以在下面选择文件，或把文件放进上面的目录。')),
+                    disabled: Boolean(busy) || Boolean(done),
+                    onClick: applyGithub,
+                  }, busy === 'github' ? '更新中…' : `更新到 v${github.latest}`) : h('span', { key: 'ok', className: 'll-hint' }, '已是最新'),
+                ]) : null,
+              ]),
+              h('div', { key: 'local', className: 'll-update-section' }, [
+                h('b', { key: 't' }, '从本地更新包'),
+                h('div', { key: 'dir', className: 'll-hint ll-update-dir' }, [
+                  '本地更新包目录：', h('code', { key: 'c' }, info.updatesDir),
+                ]),
+                h('div', { key: 'list', className: 'll-update-list' }, packages.length
+                  ? packages.map((pkg) => h('div', { key: pkg.file, className: 'll-update-row' }, [
+                    h('div', { key: 'm', className: 'll-update-meta' }, [
+                      h('b', { key: 'v' }, `v${pkg.version}`),
+                      h('span', { key: 'f', className: 'll-hint' }, pkg.file),
+                    ]),
+                    h('button', {
+                      key: 'go', className: 'll-btn ll-btn-xs',
+                      disabled: Boolean(busy) || Boolean(done) || !pkg.newer,
+                      title: pkg.newer ? `用 ${pkg.file} 覆盖当前插件` : '不是比当前更新的版本',
+                      onClick: () => applyLocal(pkg),
+                    }, pkg.newer ? (busy === pkg.file ? '更新中…' : '一键更新') : '当前/旧版本'),
+                  ]))
+                  : h('div', { key: 'none', className: 'll-hint' }, '没有发现本地 .tgz。可以在下面选择文件，或把文件放进上面的目录。')),
+              ]),
             ]) : null,
             !done ? h('div', { key: 'up', className: 'll-update-actions' }, [
               h('input', {
@@ -2595,7 +2679,7 @@ window.__ModuleLoader__.load({
               }, busy && busy === file?.name ? '更新中…' : '上传并更新'),
             ]) : null,
             h('div', { key: 'hint', className: 'll-hint', style: { marginTop: '10px' } },
-              '更新包是 npm pack 生成的 .tgz；不需要 GitHub、npm 或外网。更新只覆盖程序文件，不会删除 library/。'),
+              'GitHub 更新和本地包走同一套校验：更新前自动备份，失败回滚；只覆盖程序文件，不会删除 library/。'),
           ]),
           h('div', { className: 'll-modal-foot', key: 'f' }, [
             h('span', { key: 's', className: 'll-hint' }, '更新完成后请重启 DSH'),
@@ -2608,7 +2692,7 @@ window.__ModuleLoader__.load({
 
     function LiteraturePanel({ remote }) {
       const [layout, setLayout] = React.useState(loadLayout);
-      const [fontScale, setFontScale] = React.useState(loadFontScale);
+      const [fontPercent, setFontPercent] = React.useState(loadFontPercent);
       const containerRef = React.useRef(null);
       const dragRef = React.useRef(null);
 
@@ -2664,8 +2748,28 @@ window.__ModuleLoader__.load({
       }, [layout]);
 
       React.useEffect(() => {
-        try { window.localStorage.setItem(FONT_SCALE_KEY, String(fontScale)); } catch { /* 忽略 */ }
-      }, [fontScale]);
+        try { window.localStorage.setItem(FONT_PERCENT_KEY, String(fontPercent)); } catch { /* 忽略 */ }
+      }, [fontPercent]);
+
+      // Ctrl/Cmd + 放大，Ctrl/Cmd - 缩小，Ctrl/Cmd 0 复位。
+      // 用 capture 抢在浏览器页面缩放/DSH 全局快捷键之前处理。
+      React.useEffect(() => {
+        const onKey = (e) => {
+          if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+          if (e.key === '+' || e.key === '=') {
+            e.preventDefault(); e.stopPropagation();
+            setFontPercent((p) => clampFontPercent(p + 10));
+          } else if (e.key === '-' || e.key === '_') {
+            e.preventDefault(); e.stopPropagation();
+            setFontPercent((p) => clampFontPercent(p - 10));
+          } else if (e.key === '0') {
+            e.preventDefault(); e.stopPropagation();
+            setFontPercent(100);
+          }
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+      }, []);
 
       // 索引
       React.useEffect(() => {
@@ -3278,7 +3382,7 @@ window.__ModuleLoader__.load({
       return h('div', {
         className: 'll-root',
         ref: containerRef,
-        style: { '--ll-font-scale': String(fontScale) },
+        style: { '--ll-font-scale': String(fontPercent / 100) },
       }, [
         // 第 1 段：目录树 + 列表
         !focusMode ? h('div', { className: 'll-col ll-nav-shell', key: 'nav', style: { flex: `0 0 ${layout.navPct}%` } }, [
@@ -3410,20 +3514,27 @@ window.__ModuleLoader__.load({
             h('span', { key: 'sp', className: 'll-spacer' }),
             h('label', {
               key: 'fs', className: 'll-font-size',
-              title: '调整插件字体大小（只影响文字，不改变 PDF 页面缩放）',
+              title: '拖动滑块，或输入 1–1000；Ctrl + / Ctrl - 调整，Ctrl 0 复位',
             }, [
               h('span', { key: 'l' }, '字号'),
-              h('select', {
-                key: 's',
-                value: String(fontScale),
-                'aria-label': '插件字体大小',
+              h('input', {
+                key: 'r', className: 'll-font-range', type: 'range',
+                min: FONT_MIN_PERCENT, max: FONT_MAX_PERCENT, step: 1,
+                value: fontPercent,
+                'aria-label': '字号滑块',
+                onChange: (e) => setFontPercent(clampFontPercent(e.target.value)),
+              }),
+              h('input', {
+                key: 'n', className: 'll-font-num', type: 'number',
+                min: FONT_MIN_PERCENT, max: FONT_MAX_PERCENT, step: 1,
+                value: fontPercent,
+                'aria-label': '字号百分比',
                 onChange: (e) => {
-                  const next = Number(e.target.value);
-                  if (FONT_SCALES.includes(next)) setFontScale(next);
+                  if (e.target.value === '') return;
+                  setFontPercent(clampFontPercent(e.target.value));
                 },
-              }, FONT_SCALES.map((v) => h('option', {
-                key: v, value: String(v),
-              }, `${Math.round(v * 100)}%`))),
+              }),
+              h('span', { key: 'p' }, '%'),
             ]),
             h('span', { key: 'h', className: 'll-nav-foot-hint', title: '当前文献总数' }, `${papers.length} 篇`),
           ]),

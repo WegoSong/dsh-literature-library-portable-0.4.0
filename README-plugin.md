@@ -26,8 +26,8 @@ DSH Web GUI 的一个插件（host + client 两半）：在**左侧栏**加一�
 | **译文在中间** | 中栏是译文、右栏是原文 PDF，方便逐段对照 |
 | **译文/原文对齐** | 译文区第 1 行与「原文 PDF」标题栏同高（40px）；第 2 行「预览 / 源码 / 编辑」与 PDF.js 工具条同高（35px，`--ll-pdf-toolbar-h`），两侧正文从同一水平线开始 |
 | **PDF 连续滚动** | 鼠标滚轮/触控板在右侧原文栏直接无级上下浏览所有页，不需要点翻页；只渲染视口附近的页，滚远释放 canvas；页码随滚动实时更新，输入页码/翻页按钮会平滑定位。纸面白底、无四周黑框，适应宽度时铺满栏宽 |
-| **字号调节** | 左栏底部「字号」可选 100%–150%；只放大插件文字，PDF 画布缩放仍由 PDF 工具条独立控制；选择保存在 `localStorage`，刷新后保留 |
-| **离线一键更新** | 工具条「更新」自动扫描 `<DSH_HOME>/literature-library/updates/*.tgz`，也可直接选本地 tarball 上传；校验后备份旧文件并覆盖，失败自动回滚。全程不需要 GitHub/npm/外网 |
+| **无级字号调节** | 左栏底部「字号」支持 **1%–1000%**：拖动滑块、输入百分比，或 `Ctrl +` / `Ctrl -` 调整（每次 10 个百分点），`Ctrl 0` 复位。只放大插件文字，PDF 画布缩放仍由 PDF 工具条独立控制；选择保存在 `localStorage` |
+| **双通道一键更新** | 工具条「更新」支持 **GitHub 在线更新**（检查最新 release 并下载）和 **本地更新包**（扫描 `<DSH_HOME>/literature-library/updates/*.tgz`，或直接选 tarball 上传）。两条路径都先校验、备份旧文件，失败自动回滚；本地方式完全不需要外网 |
 | **可编辑 md 编辑器** | 中栏有三个模式：**预览**（渲染公式）/ **源码**（只读看原始 Markdown）/ **编辑**（可改）。有未保存改动时显示提示点与「保存」按钮；「复制」把全文 Markdown 放进剪贴板 |
 | **添加外部文件夹** | 左栏顶部「＋ 导入」打开**文件夹浏览器**：起点是**盘符列表**（Windows），可逐层点进去，也可**直接粘贴路径**跳到任意位置（文件夹分散在各磁盘时最省事）。把该文件夹（含所有子文件夹）里的 PDF **复制**进 `library/papers/<文件夹名>/`，并保留目录层级作为分类 |
 | **目录树分类** | 按登记时的**子文件夹层级**展示。`library/papers/热物性/气体黏度/a.pdf` → 树里 `热物性 › 气体黏度 › a` |
@@ -329,7 +329,7 @@ node tools/build_market_bundle.mjs
 
 ```text
 dist/market/dsh-literature-library/            # 可直接选的本地目录
-dist/market/dsh-literature-library-0.4.2.tgz   # tarball
+dist/market/dsh-literature-library-0.4.3.tgz   # tarball
 dist/market/index.json                         # 市场索引（npm 源，发布后使用）
 ```
 
@@ -337,7 +337,7 @@ dist/market/index.json                         # 市场索引（npm 源，发布
 `.tgz` 绝对路径（或解压目录绝对路径）；等价 CLI：
 
 ```powershell
-dsh plugin add "E:/path/to/dsh-literature-library-0.4.2.tgz"
+dsh plugin add "E:/path/to/dsh-literature-library-0.4.3.tgz"
 ```
 
 市场包只带程序，首次启动会在 `<DSH_HOME>/literature-library/library/` 建空库；

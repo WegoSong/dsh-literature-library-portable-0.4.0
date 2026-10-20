@@ -696,6 +696,10 @@ export function apply(ctx, config = {}) {
   const pluginRoot = dirname(fileURLToPath(import.meta.url));
   /** 离线更新包目录：把 .tgz 放这里，界面就能发现并一键更新。 */
   const updatesDir = join(dshHomeDir(), 'literature-library', 'updates');
+  /** GitHub 在线更新使用的仓库；可用 config.updateRepo 覆盖。 */
+  const updateRepo = typeof config.updateRepo === 'string' && config.updateRepo.trim() !== ''
+    ? config.updateRepo.trim()
+    : 'WegoSong/dsh-literature-library-portable-0.4.0';
   /**
    * 工具脚本目录：市场安装包里自带 `tools/`；旧的“工作区路径行”安装
    * 仍然从 workspaceRoot/tools 读，两种布局都支持。
@@ -926,6 +930,81 @@ export function apply(ctx, config = {}) {
     } catch {
       return null;
     }
+  }
+
+  /** 查 GitHub 最新 release。只读 API，不下载；离线时快速失败，本地包仍可用。 */
+  async function fetchGithubLatest() {
+    const url = `https://api.github.com/repos/${updateRepo}/releases/latest`;
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: {
+          accept: 'application/vnd.github+json',
+          'user-agent': 'dsh-literature-library',
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (err) {
+      throw Object.assign(new Error(`无法连接 GitHub（${err?.message ?? err}）`), { status: 502 });
+    }
+    if (!res.ok) {
+      throw Object.assign(new Error(`GitHub release 查询失败：HTTP ${res.status}`), { status: 502 });
+    }
+    const release = await res.json().catch(() => null);
+    const tag = typeof release?.tag_name === 'string' ? release.tag_name.trim() : '';
+    const latest = tag.replace(/^v/iu, '');
+    if (!isValidVersion(latest)) {
+      throw Object.assign(new Error('GitHub release 的版本号无法识别'), { status: 502 });
+    }
+    const assets = Array.isArray(release.assets) ? release.assets : [];
+    const asset = assets.find((a) => a?.name === `dsh-literature-library-${latest}.tgz`)
+      ?? assets.find((a) => typeof a?.name === 'string' && /\.tgz$/iu.test(a.name));
+    return {
+      repo: updateRepo,
+      tag,
+      latest,
+      current: PLUGIN_VERSION,
+      newer: compareVersions(latest, PLUGIN_VERSION) > 0,
+      releaseUrl: typeof release.html_url === 'string' ? release.html_url : null,
+      assetUrl: typeof asset?.browser_download_url === 'string' ? asset.browser_download_url : null,
+      size: typeof asset?.size === 'number' ? asset.size : null,
+      publishedAt: typeof release.published_at === 'string' ? release.published_at : null,
+    };
+  }
+
+  async function downloadGithubUpdate() {
+    const latest = await fetchGithubLatest();
+    if (!latest.newer) {
+      throw Object.assign(new Error(`GitHub 上已是最新版本 v${latest.latest}`), { status: 409 });
+    }
+    if (!latest.assetUrl) {
+      throw Object.assign(new Error('GitHub release 里没有 .tgz 安装包'), { status: 404 });
+    }
+    let res;
+    try {
+      res = await fetch(latest.assetUrl, {
+        headers: { 'user-agent': 'dsh-literature-library' },
+        signal: AbortSignal.timeout(60000),
+        redirect: 'follow',
+      });
+    } catch (err) {
+      throw Object.assign(new Error(`下载 GitHub 安装包失败：${err?.message ?? err}`), { status: 502 });
+    }
+    if (!res.ok) {
+      throw Object.assign(new Error(`下载 GitHub 安装包失败：HTTP ${res.status}`), { status: 502 });
+    }
+    const declared = Number(res.headers.get('content-length') || 0);
+    if (declared > 32 * 1024 * 1024) {
+      throw Object.assign(new Error('GitHub 安装包超过 32 MB'), { status: 413 });
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length > 32 * 1024 * 1024) {
+      throw Object.assign(new Error('GitHub 安装包超过 32 MB'), { status: 413 });
+    }
+    mkdirSync(updatesDir, { recursive: true });
+    const fileName = `dsh-literature-library-${latest.latest}.tgz`;
+    writeFileSync(join(updatesDir, fileName), buffer);
+    return applyUpdateBuffer(buffer, fileName);
   }
 
   async function loadDb() {
@@ -2201,6 +2280,27 @@ export function apply(ctx, config = {}) {
             packages: listUpdatePackages(),
             last: readLastUpdate(),
           });
+          return;
+        }
+
+        if (sub === 'plugin-update/github') {
+          if (req.method !== 'GET' && req.method !== 'POST') {
+            sendJson(res, 405, { error: 'method-not-allowed' }); return;
+          }
+          try {
+            if (req.method === 'GET') {
+              const info = await fetchGithubLatest();
+              sendJson(res, 200, info);
+            } else {
+              const result = await downloadGithubUpdate();
+              sendJson(res, 200, result);
+            }
+          } catch (err) {
+            sendJson(res, Number(err?.status) || 502, {
+              error: 'github-update-failed',
+              message: String(err?.message ?? err),
+            });
+          }
           return;
         }
 
