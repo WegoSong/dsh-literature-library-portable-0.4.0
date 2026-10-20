@@ -31,7 +31,8 @@ DSH Web GUI 的一个插件（host + client 两半）：在**左侧栏**加一�
 | **可编辑 md 编辑器** | 中栏有三个模式：**预览**（渲染公式）/ **源码**（只读看原始 Markdown）/ **编辑**（可改）。有未保存改动时显示提示点与「保存」按钮；「复制」把全文 Markdown 放进剪贴板 |
 | **添加外部文件夹** | 左栏顶部「＋ 导入」打开**文件夹浏览器**：起点是**盘符列表**（Windows），可逐层点进去，也可**直接粘贴路径**跳到任意位置（文件夹分散在各磁盘时最省事）。把该文件夹（含所有子文件夹）里的 PDF **复制**进 `library/papers/<文件夹名>/`，并保留目录层级作为分类 |
 | **目录树分类** | 按登记时的**子文件夹层级**展示。`library/papers/热物性/气体黏度/a.pdf` → 树里 `热物性 › 气体黏度 › a` |
-| **扫描库内目录** | 输入框填**库内**相对路径（默认 `library/papers`），点「扫描」→ 登记该目录下已有 PDF |
+| **按分类扫描新增** | 左栏点击分类 → 扫描行显示「扫描：参考文献」→ 点「扫描新增」，host 扫描该分类**导入时记录的原始外部文件夹**，只复制新增 PDF 并登记到原分类；嵌套分类会扫描「来源根/子路径」。点 `×` 取消后，仍可输入库内相对路径手动扫描 |
+| **扫描库内目录（手动）** | 未选中分类时，输入框填**库内**相对路径（默认 `library/papers`），点「扫描」→ 登记该目录下已有 PDF |
 | **一键翻译** | 未翻译的文献旁有「翻译」标签按钮 → **直连 DeepSeek API** 翻译（见下节），条目下方显示真实进度。工具条还有「翻译未译」批量排队 |
 | **翻译进度** | 直连任务的进度是**真实的分块进度**：`翻译第 3 / 12 块` + 百分比，完成后显示 token 用量。有任务在跑时每 2.5 秒轮询，全部结束自动停止并刷新界面 |
 | **频繁切换不卡死** | 原文改用 **PDF.js canvas** 渲染（不再创建浏览器内置 PDF 阅读器）；切换时 `loadingTask.destroy()` 确定释放 worker/文档。选中项停稳后才加载（译文 120ms、PDF 400ms），并用 Range 只拉当前页附近的数据。预览 HTML 用 8 篇 LRU 缓存 |
@@ -329,7 +330,7 @@ node tools/build_market_bundle.mjs
 
 ```text
 dist/market/dsh-literature-library/            # 可直接选的本地目录
-dist/market/dsh-literature-library-0.4.3.tgz   # tarball
+dist/market/dsh-literature-library-0.4.4.tgz   # tarball
 dist/market/index.json                         # 市场索引（npm 源，发布后使用）
 ```
 
@@ -337,7 +338,7 @@ dist/market/index.json                         # 市场索引（npm 源，发布
 `.tgz` 绝对路径（或解压目录绝对路径）；等价 CLI：
 
 ```powershell
-dsh plugin add "E:/path/to/dsh-literature-library-0.4.3.tgz"
+dsh plugin add "E:/path/to/dsh-literature-library-0.4.4.tgz"
 ```
 
 市场包只带程序，首次启动会在 `<DSH_HOME>/literature-library/library/` 建空库；

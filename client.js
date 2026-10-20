@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.4.3';
+    const PDFJS_REV = '0.4.4';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -154,6 +154,15 @@ window.__ModuleLoader__.load({
 /* 可折叠的分类标题 */
 .ll-group-clickable { cursor: pointer; user-select: none; }
 .ll-group-clickable:hover { background: var(--ll-control-bg); }
+.ll-group-selected {
+  background: var(--ll-selected-bg); color: var(--ll-text);
+  box-shadow: inset 2px 0 0 var(--ll-accent);
+}
+.ll-scan-target {
+  flex: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--ll-muted);
+}
+.ll-scan-target b { color: var(--ll-text); font-weight: 600; }
 .ll-caret { flex: none; width: 10px; color: var(--ll-subtle); }
 .ll-group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ll-group-count { flex: none; }
@@ -1556,6 +1565,7 @@ window.__ModuleLoader__.load({
       node, depth, parentPath, selected, collapsed, toggleCollapse,
       onSelect, onTranslate, onMutate, onArrange, translating, showHidden,
       progressOf, jobOf, onContextMenu, papers, allPapers,
+      selectedFolder, onSelectFolder,
     }) {
       const path = nodePath(node, parentPath);
       const isCollapsed = collapsed.has(path);
@@ -1604,10 +1614,13 @@ window.__ModuleLoader__.load({
         const underHidden = under.filter((p) => p.hidden === true).length;
         rows.push(h('div', {
           key: 'head',
-          className: 'll-group ll-group-clickable',
+          className: `ll-group ll-group-clickable${selectedFolder === path ? ' ll-group-selected' : ''}`,
           style: { paddingLeft: `${8 + depth * 10}px` },
-          onClick: () => toggleCollapse(path),
-          title: `${isCollapsed ? '点击展开' : '点击收起'}；右键打开文件夹菜单`,
+          onClick: () => {
+            onSelectFolder(path);
+            toggleCollapse(path);
+          },
+          title: `${isCollapsed ? '点击展开' : '点击收起'}；同时选中为「扫描此文件夹」目标；右键打开文件夹菜单`,
           onContextMenu: (e) => {
             e.preventDefault();
             onContextMenu({
@@ -1754,6 +1767,7 @@ window.__ModuleLoader__.load({
             selected, collapsed, toggleCollapse,
             onSelect, onTranslate, onMutate, onArrange, translating, showHidden,
             progressOf, jobOf, onContextMenu, papers, allPapers,
+            selectedFolder, onSelectFolder,
           }));
         }
       }
@@ -2701,6 +2715,7 @@ window.__ModuleLoader__.load({
       // doc.slug 记录「这份译文属于哪篇」，避免切换瞬间把上一篇的内容显示到新标题下
       const [doc, setDoc] = React.useState({ phase: 'idle', slug: null, translated: null, error: null });
       const [scanDir, setScanDir] = React.useState('library/papers');
+      const [selectedFolder, setSelectedFolder] = React.useState(null);
       const [busy, setBusy] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
       const [tick, setTick] = React.useState(0);
@@ -2948,6 +2963,23 @@ window.__ModuleLoader__.load({
           setNotice({
             kind: 'ok',
             text: `扫描 ${r.scanned} 个 PDF，新增 ${r.added.length} 篇`
+              + (r.skipped?.length ? `，已存在跳过 ${r.skipped.length} 篇` : ''),
+          });
+          if (r.added.length) setTick((t) => t + 1);
+        } catch (err) {
+          setNotice({ kind: 'err', text: `扫描失败：${err.message}` });
+        } finally { setBusy(null); }
+      }
+
+      async function doScanFolder() {
+        if (!selectedFolder) return;
+        setBusy('scan-folder'); setNotice(null);
+        try {
+          const r = await postJson('/scan-source', { folder: selectedFolder });
+          setNotice({
+            kind: 'ok',
+            text: `扫描「${selectedFolder}」的原始文件夹：${r.scanned} 个 PDF，新增 ${r.added.length} 篇`
+              + (r.copied ? `，复制 ${r.copied} 个新文件` : '')
               + (r.skipped?.length ? `，已存在跳过 ${r.skipped.length} 篇` : ''),
           });
           if (r.added.length) setTick((t) => t + 1);
@@ -3377,6 +3409,7 @@ window.__ModuleLoader__.load({
                   translating: busy, showHidden,
                   progressOf, jobOf, onContextMenu: setMenu,
                   papers: filteredPapers, allPapers: papers,
+                  selectedFolder, onSelectFolder: setSelectedFolder,
                 });
 
       return h('div', {
@@ -3420,15 +3453,34 @@ window.__ModuleLoader__.load({
                 onClick: () => { setQuery(''); searchRef.current?.focus(); },
               }, '×'),
             ]),
-            h('div', { className: 'll-scan', key: 'sc' }, [
+            h('div', {
+              className: `ll-scan${selectedFolder ? ' ll-scan-selected' : ''}`,
+              key: 'sc',
+            }, selectedFolder ? [
+              h('span', {
+                key: 't', className: 'll-scan-target',
+                title: `扫描分类「${selectedFolder}」记录的原始外部文件夹；只复制新增 PDF`,
+              }, ['扫描：', h('b', { key: 'b' }, selectedFolder)]),
+              h('button', {
+                key: 'go', className: 'll-btn ll-btn-xs',
+                disabled: busy !== null, onClick: doScanFolder,
+                title: '扫描该分类的原始来源文件夹，把新增 PDF 复制进这个分类',
+              }, busy === 'scan-folder' ? '扫描中…' : '扫描新增'),
+              h('button', {
+                key: 'x', className: 'll-btn ll-btn-xs',
+                disabled: busy !== null,
+                title: '取消选中，回到手动扫描库内路径',
+                onClick: () => setSelectedFolder(null),
+              }, '×'),
+            ] : [
               h('input', {
-                className: 'll-input', value: scanDir, spellCheck: false,
-                title: '扫描库内已有的文件夹（相对工作区路径）',
+                key: 'i', className: 'll-input', value: scanDir, spellCheck: false,
+                title: '手动扫描库内已有的文件夹（相对工作区路径）',
                 onChange: (e) => setScanDir(e.target.value),
                 onKeyDown: (e) => { if (e.key === 'Enter') doScan(); },
               }),
               h('button', {
-                className: 'll-btn ll-btn-xs', disabled: busy !== null, onClick: doScan,
+                key: 'go', className: 'll-btn ll-btn-xs', disabled: busy !== null, onClick: doScan,
                 title: '登记该库内文件夹（含子文件夹）里的 PDF；子文件夹会作为分类',
               }, busy === 'scan' ? '扫描中…' : '扫描'),
             ]),

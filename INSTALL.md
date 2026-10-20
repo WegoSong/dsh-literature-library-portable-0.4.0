@@ -2,7 +2,7 @@
 
 本文从 **DSH 已经安装好、能打开 Web 界面** 开始，带你安装「DSH 文献库」插件（`dsh-literature-library`），并完成第一次导入和翻译配置。
 
-- 插件版本：**0.4.3**
+- 插件版本：**0.4.4**
 - 仓库：<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0>
 - 适用：DSH Web `0.2.1-rc.2` 到 `0.3.0` 之前（市场索引声明 `>=0.2.1-rc.2 <0.3.0`）
 - 平台：Windows 10/11、macOS、Linux
@@ -164,7 +164,7 @@ https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 
 如果那台电脑访问 GitHub 不稳定，先下载：
 
-<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.4.3/dsh-literature-library-0.4.3.tgz>
+<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.4.4/dsh-literature-library-0.4.4.tgz>
 
 把 `.tgz` 复制到目标电脑，然后：
 
@@ -172,7 +172,7 @@ https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 2. 填 tarball 的绝对路径，例如：
 
 ```text
-D:\dsh-literature-library-0.4.3.tgz
+D:\dsh-literature-library-0.4.4.tgz
 ```
 
 3. 点 **安装**，等待完成。
@@ -191,7 +191,7 @@ dsh plugin add "git+https://github.com/WegoSong/dsh-literature-library-portable-
 或本地 tarball：
 
 ```bash
-dsh plugin add "D:/dsh-literature-library-0.4.3.tgz"
+dsh plugin add "D:/dsh-literature-library-0.4.4.tgz"
 ```
 
 安装完成后重启 DSH Web。
@@ -249,6 +249,20 @@ library/
 
 如果你已经手动把 PDF 放进了 `library/papers/`，也可以用工具条的 **「扫描」** 登记，输入库内相对路径（默认 `library/papers`）。
 
+### 3.3.1 扫描某个分类的新增文献
+
+例如「参考文献」是从 `E:\Wego\科研项目\高温高压氦气黏度\参考文献` 导入的：
+
+1. 在左侧目录树点击 **参考文献** 分类标题；它会高亮，扫描行变成「扫描：参考文献」。
+2. 点 **扫描新增**。
+3. 插件会读取该分类导入时记录的**原始外部文件夹**，扫描里面的新增 PDF，
+   复制到 `library/papers/参考文献/`（保留子目录），并登记到原分类。
+4. 如果选中的是嵌套分类 `参考文献/子类`，会扫描原始来源下的 `子类` 目录。
+5. 点扫描行里的 `×` 取消选中，回到手动输入库内路径的模式。
+
+> 如果提示“没有记录导入来源”，说明这个分类是手动放进库里的，不是用「＋ 导入」来的；
+> 用「＋ 导入」重新导入一次该外部文件夹即可建立来源记录。
+
 ### 3.4 阅读与对照
 
 - 左栏选择文献。
@@ -283,10 +297,10 @@ DEEPSEEK_API_KEY
 左栏底部会显示：
 
 ```text
-v0.4.3  PDF.js
+v0.4.4  PDF.js
 ```
 
-如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.4.3，需要确认安装并重启 DSH。
+如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.4.4，需要确认安装并重启 DSH。
 
 ---
 
@@ -326,7 +340,7 @@ C:\Users\<用户名>\.dsh\profiles\web\cordis.patch.yml
 
 删除这一整条 `literature-library` 行，避免安装新包后出现两个文献库面板。
 
-然后安装 0.4.3，再在同一个 `cordis.patch.yml` 末尾加：
+然后安装 0.4.4，再在同一个 `cordis.patch.yml` 末尾加：
 
 ```yaml
 - id: literature-library
@@ -374,7 +388,7 @@ Copy-Item -Recurse "E:\Wego\我的日常\自建项目\文献翻译插件\library
 1. 从 Release、另一台电脑或 U 盘拿到新版本的 `.tgz`，例如：
 
    ```text
-   dsh-literature-library-0.4.3.tgz
+   dsh-literature-library-0.4.4.tgz
    ```
 
 2. 任选一种：
@@ -400,7 +414,7 @@ Copy-Item -Recurse "E:\Wego\我的日常\自建项目\文献翻译插件\library
 
 - 失败自动回滚；只覆盖程序文件，不删除 `library/`。
 
-> **0.4.1 及更早版本没有「更新」按钮**，需要先手动安装一次 0.4.2 或 0.4.3
+> **0.4.1 及更早版本没有「更新」按钮**，需要先手动安装一次 0.4.2 或 0.4.4
 > （方式 A/B/C 均可）。之后才能使用更新入口。
 >
 > 更新包必须是 `npm pack` 生成的 `.tgz`，且版本号高于当前版本；不会接受降级或同名版本。

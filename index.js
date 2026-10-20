@@ -1365,6 +1365,71 @@ export function apply(ctx, config = {}) {
     return { scanned: pdfs.length, added, skipped, dir: relDir, total };
   }
 
+  /**
+   * 扫描某个**库内分类文件夹对应的原始外部文件夹**，把新增 PDF 复制进该分类。
+   *
+   * 来源记录：
+   *   - 新导入会在 library.json 的 folderSources[顶层分类] 记录源路径；
+   *   - 旧库没有 folderSources 时，从该分类已有文献的 importedFrom 推断。
+   * 选中嵌套分类时，顶层源路径 + 嵌套后缀就是真正要扫描的目录。
+   */
+  async function handleScanSource(body) {
+    const raw = String(body.folder ?? '').replace(/\\/g, '/').trim();
+    const parts = raw.split('/').filter((s) => s !== '' && s !== '.' && s !== '..');
+    if (parts.length === 0) throw Object.assign(new Error('缺少要扫描的分类文件夹'), { status: 400 });
+    const folder = parts.join('/');
+    const folderAbs = resolve(join(papersRoot, ...parts));
+    if (folderAbs !== papersRoot && !folderAbs.startsWith(papersRoot + sep)) {
+      throw Object.assign(new Error('分类路径越权'), { status: 403 });
+    }
+
+    const { db } = await loadDb();
+    const top = parts[0];
+    let sourceRoot = db.folderSources?.[top];
+    if (!sourceRoot) {
+      const under = (db.papers ?? []).filter((p) => typeof p.folder === 'string'
+        && (p.folder === folder || p.folder.startsWith(`${folder}/`)));
+      const imported = [...new Set(under.map((p) => p.importedFrom).filter(Boolean))];
+      if (imported.length > 1) {
+        throw Object.assign(new Error('这个文件夹有多个导入来源，无法自动确定要扫描哪个'), { status: 409 });
+      }
+      if (imported.length === 1) sourceRoot = imported[0];
+    }
+    if (!sourceRoot) {
+      throw Object.assign(new Error('这个文件夹没有记录导入来源；请用「＋ 导入」重新导入一次'), { status: 404 });
+    }
+
+    const source = parts.length > 1 ? join(sourceRoot, ...parts.slice(1)) : sourceRoot;
+    if (!existsSync(source)) {
+      throw Object.assign(new Error(`原始文件夹不存在：${source}`), { status: 404 });
+    }
+    if (!(await stat(source)).isDirectory()) {
+      throw Object.assign(new Error(`原始路径不是文件夹：${source}`), { status: 400 });
+    }
+
+    const pdfs = await findPdfs(source);
+    const targets = [];
+    let copied = 0;
+    for (const p of pdfs) {
+      const relParts = [...parts, ...p.relToRoot];
+      const destAbs = resolve(join(papersRoot, ...relParts, p.file));
+      if (!destAbs.startsWith(papersRoot + sep)) continue;
+      await mkdir(dirname(destAbs), { recursive: true });
+      if (!existsSync(destAbs)) {
+        await copyFile(p.absPath, destAbs);
+        copied += 1;
+      }
+      targets.push({ absPath: destAbs, relToRoot: relParts, file: p.file });
+    }
+
+    const { added, skipped } = await registerPdfs(targets, { importedFrom: sourceRoot });
+    const total = await refreshIndex();
+    return {
+      folder, source, scanned: pdfs.length, copied,
+      added, skipped, total,
+    };
+  }
+
   // ── 动作：添加外部文件夹（复制进库，保留子目录层级） ──
 
   /**
@@ -1416,6 +1481,11 @@ export function apply(ctx, config = {}) {
     }
 
     const { added, skipped } = await registerPdfs(targets, { importedFrom: srcRoot });
+    // 记住“顶层分类 ← 原始文件夹”的映射，后续「扫描此文件夹」用它找新增 PDF
+    const { db: freshDb, path: freshDbPath } = await loadDb();
+    freshDb.folderSources ??= {};
+    freshDb.folderSources[group] = srcRoot;
+    await saveDb(freshDb, freshDbPath);
     const total = await refreshIndex();   // 立刻刷新面板读的索引
     return {
       ok: true,
@@ -2475,6 +2545,19 @@ export function apply(ctx, config = {}) {
             sendJson(res, 200, result);
           } catch (err) {
             sendJson(res, err?.status ?? 500, { error: 'scan-failed', message: String(err?.message ?? err) });
+          }
+          return;
+        }
+
+        // 按分类扫描原始来源文件夹（只复制新增 PDF）
+        if (sub === 'scan-source') {
+          if (req.method !== 'POST') { sendJson(res, 405, { error: 'use-post' }); return; }
+          try {
+            const result = await handleScanSource(await readBody(req));
+            ctx.logger?.info?.(`literature-library: 扫描来源 ${result.source} → ${result.folder} — 新增 ${result.added.length} 篇`);
+            sendJson(res, 200, result);
+          } catch (err) {
+            sendJson(res, err?.status ?? 500, { error: 'scan-source-failed', message: String(err?.message ?? err) });
           }
           return;
         }
