@@ -237,9 +237,14 @@ function locateDshRoot(configuredRoot) {
 }
 
 /** DSH 内核包所在目录；在 apply() 里根据配置/环境探测后赋值。 */
-let dsh = { dir: undefined, tried: [], how: 'unresolved' };
+let dsh = { dir: undefined, tried: [], how: 'unresolved', modules: undefined };
 
 async function importDshModule(specifier) {
+  // 测试、嵌入式宿主或特殊打包布局可以直接注入模块对象。这样插件不必依赖
+  // 某个 npx 缓存绝对路径，也让宿主有机会提供与 Node 解析器隔离的 DSH API。
+  if (dsh.modules && Object.hasOwn(dsh.modules, specifier)) {
+    return dsh.modules[specifier];
+  }
   const tried = [];
   const reqs = [];
   if (dsh.dir) {
@@ -573,9 +578,10 @@ async function writeCredentialKey(newKey) {
     : join(osHomedir(), '.dsh');
   const file = join(home, '.credentials.yaml');
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const hadOriginal = existsSync(file);
 
   let original = '';
-  if (existsSync(file)) {
+  if (hadOriginal) {
     original = await readFile(file, 'utf8');
     await writeFile(`${file}.bak-${stamp}`, original, 'utf8');
   } else {
@@ -591,7 +597,7 @@ async function writeCredentialKey(newKey) {
     next = `${original.replace(/\n*$/u, '')}\n${line}\n`;
   }
   await writeFile(file, next, 'utf8');
-  return { file, backup: existsSync(file) ? `${file}.bak-${stamp}` : null };
+  return { file, backup: hadOriginal ? `${file}.bak-${stamp}` : null };
 }
 
 /**
@@ -719,8 +725,48 @@ export function apply(ctx, config = {}) {
   /** 是否允许浏览文件系统（默认允许：要收的文件夹常分散在各磁盘） */
   const allowBrowse = config.allowFileSystemBrowse !== false;
 
+  // 翻译统一经过一个小并发队列。此前批量按钮每 300ms 启动一篇，遇到限流后
+  // 往往整篇重跑；默认串行既便于 DeepSeek 建立前缀缓存，也能把失败范围限制
+  // 在单个块。可用 translationConcurrency 显式调到 2，但不建议更高。
+  const translationConcurrency = Math.max(1, Math.min(2, Number(config.translationConcurrency) || 1));
+  const translationQueue = [];
+  let activeTranslations = 0;
+  let translationQueueTimer = null;
+
+  function pumpTranslationQueue() {
+    if (translationQueueTimer) {
+      clearTimeout(translationQueueTimer);
+      translationQueueTimer = null;
+    }
+    translationQueue.sort((a, b) => a.notBefore - b.notBefore || a.enqueuedAt - b.enqueuedAt);
+    const now = Date.now();
+    while (activeTranslations < translationConcurrency) {
+      const index = translationQueue.findIndex((entry) => entry.notBefore <= now);
+      if (index < 0) break;
+      const [entry] = translationQueue.splice(index, 1);
+      activeTranslations += 1;
+      Promise.resolve()
+        .then(entry.execute)
+        .catch(entry.onError)
+        .finally(() => {
+          activeTranslations -= 1;
+          pumpTranslationQueue();
+        });
+    }
+    if (translationQueue.length && activeTranslations < translationConcurrency) {
+      const waitMs = Math.max(25, translationQueue[0].notBefore - Date.now());
+      translationQueueTimer = setTimeout(pumpTranslationQueue, Math.min(waitMs, 2_147_000_000));
+      translationQueueTimer.unref?.();
+    }
+  }
+
+  function enqueueTranslation({ execute, onError, notBefore = Date.now() }) {
+    translationQueue.push({ execute, onError, notBefore, enqueuedAt: Date.now() });
+    pumpTranslationQueue();
+  }
+
   // 「一键翻译」需要从 DSH 内核里取 createUserMessage / SessionId，这里先定位内核
-  dsh = locateDshRoot(config.dshModulesRoot);
+  dsh = { ...locateDshRoot(config.dshModulesRoot), modules: config.dshModules };
   if (dsh.dir) {
     ctx.logger?.info?.(`literature-library: DSH 内核于 ${dsh.dir}（${dsh.how}）`);
   } else {
@@ -1931,7 +1977,9 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    const tools = await import(`${pathToFileURL(join(toolsRoot, 'deepseek_translate.mjs')).href}?t=${Date.now()}`);
+    const stamp = Date.now();
+    const tools = await import(`${pathToFileURL(join(toolsRoot, 'deepseek_translate.mjs')).href}?t=${stamp}`);
+    const pipeline = await import(`${pathToFileURL(join(toolsRoot, 'translation_pipeline.mjs')).href}?t=${stamp}`);
     const { key, source: keySource } = await tools.resolveApiKey(config);
     if (!key) {
       throw Object.assign(
@@ -1943,15 +1991,22 @@ export function apply(ctx, config = {}) {
 
     const jobId = newJobId();
     const now = new Date().toISOString();
+    const schedule = body.schedule === 'offpeak' ? 'offpeak' : 'now';
+    const requestedStart = schedule === 'offpeak'
+      ? pipeline.nextOffpeakTime(new Date())
+      : new Date();
     const job = {
       id: jobId,
       slug,
       title: paper.title ?? slug,
       phase: 'queued',
-      stage: '准备中',
+      stage: requestedStart.getTime() > Date.now() + 1000
+        ? `等待闲时（${requestedStart.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`
+        : '等待队列',
       chunkIndex: 0,
       chunkTotal: 0,
       startedAt: now,
+      actualStartedAt: null,
       updatedAt: now,
       finishedAt: null,
       error: null,
@@ -1960,24 +2015,49 @@ export function apply(ctx, config = {}) {
         || paper.translationPath
         || `${libraryDir}/translations/${slug}/${slug}.md`,
       model: typeof body.model === 'string' && body.model.trim() !== '' ? body.model.trim() : (config.model || tools.DEFAULT_MODEL),
-      maxTokens: Number.isFinite(body.maxTokens) ? body.maxTokens : (config.maxTokens || 32000),
+      maxTokens: Number.isFinite(body.maxTokens) && body.maxTokens > 0
+        ? Math.floor(body.maxTokens)
+        : (Number.isFinite(Number(config.maxTokens)) && Number(config.maxTokens) > 0
+          ? Math.floor(Number(config.maxTokens)) : 32000),
+      reasoningEffort: ['none', 'low', 'high', 'max'].includes(body.reasoningEffort)
+        ? body.reasoningEffort : 'none',
+      qualityModel: typeof body.qualityModel === 'string' && body.qualityModel.trim() !== ''
+        ? body.qualityModel.trim() : (config.qualityModel || 'deepseek-v4-pro'),
+      schedule,
+      notBefore: requestedStart.toISOString(),
+      pricingPeriod: pipeline.isPeakShanghai(requestedStart) ? 'peak' : 'offpeak',
       keySource,
       charsIn: 0,
       charsOut: 0,
       usages: [],
+      usage: {
+        inputTokens: 0, outputTokens: 0, cacheHitTokens: 0,
+        cacheMissTokens: 0, reasoningTokens: 0,
+      },
+      estimatedCostCny: 0,
+      localCacheHits: 0,
+      apiChunks: 0,
+      retryCount: 0,
+      validationFailures: 0,
+      droppedFormulas: 0,
+      upgradedChunks: 0,
       log: [],
     };
     translateJobs.set(jobId, job);
     pruneJobs();
 
-    // 后台跑，不 await —— 立即把 jobId 还给客户端
-    runTranslateJob(job, paper, tools, key, body).catch((err) => {
-      job.phase = 'failed';
-      job.error = String(err?.message ?? err);
-      job.stage = '失败';
-      job.finishedAt = new Date().toISOString();
-      job.updatedAt = job.finishedAt;
-      ctx.logger?.warn?.(`literature-library: 翻译任务 ${jobId} 失败 — ${job.error}`);
+    // 统一进队列，不在请求处理线程中等待整篇论文完成。
+    enqueueTranslation({
+      notBefore: requestedStart.getTime(),
+      execute: () => runTranslateJob(job, paper, tools, pipeline, key, body),
+      onError: (err) => {
+        job.phase = 'failed';
+        job.error = String(err?.message ?? err);
+        job.stage = '失败（已保存完成的分块，下次可续传）';
+        job.finishedAt = new Date().toISOString();
+        job.updatedAt = job.finishedAt;
+        ctx.logger?.warn?.(`literature-library: 翻译任务 ${jobId} 失败 — ${job.error}`);
+      },
     });
 
     return { ok: true, reused: false, ...publicJob(jobId, job) };
@@ -1997,22 +2077,50 @@ export function apply(ctx, config = {}) {
         ? Math.round((job.chunkIndex / job.chunkTotal) * 100)
         : (job.phase === 'done' ? 100 : 0),
       startedAt: job.startedAt,
+      actualStartedAt: job.actualStartedAt,
       updatedAt: job.updatedAt,
       finishedAt: job.finishedAt,
       error: job.error,
       warning: job.warning,
       outputPath: job.outputPath,
       model: job.model,
+      reasoningEffort: job.reasoningEffort,
+      schedule: job.schedule,
+      notBefore: job.notBefore,
+      scheduledFor: job.notBefore,
+      pricingPeriod: job.pricingPeriod,
       charsIn: job.charsIn,
       charsOut: job.charsOut,
-      tokensIn: job.usages.reduce((a, u) => a + (u?.input_tokens ?? 0), 0),
-      tokensOut: job.usages.reduce((a, u) => a + (u?.output_tokens ?? 0), 0),
+      tokensIn: job.usage?.inputTokens ?? 0,
+      tokensOut: job.usage?.outputTokens ?? 0,
+      usage: job.usage,
+      estimatedCostCny: job.estimatedCostCny ?? 0,
+      costCny: job.estimatedCostCny ?? 0,
+      costEstimated: true,
+      pricingUpdatedAt: '2026-10-21',
+      cacheHitTokens: job.usage?.cacheHitTokens ?? 0,
+      cacheMissTokens: job.usage?.cacheMissTokens ?? 0,
+      reasoningTokens: job.usage?.reasoningTokens ?? 0,
+      visibleOutputTokens: Math.max(
+        0,
+        (job.usage?.outputTokens ?? 0) - (job.usage?.reasoningTokens ?? 0),
+      ),
+      localCacheHits: job.localCacheHits ?? 0,
+      reusedChunks: job.localCacheHits ?? 0,
+      apiChunks: job.apiChunks ?? 0,
+      retryCount: job.retryCount ?? 0,
+      retriedChunks: job.upgradedChunks ?? 0,
+      validationFailures: job.validationFailures ?? 0,
+      droppedFormulas: job.droppedFormulas ?? 0,
+      validation: { failures: job.validationFailures ?? 0 },
+      upgradedChunks: job.upgradedChunks ?? 0,
+      preprocessing: job.preprocessing ?? null,
       log: job.log.slice(-8),
     };
   }
 
   /** 真正执行翻译：抽取 → 分块 → 逐块调 API → 合并写入 */
-  async function runTranslateJob(job, paper, tools, apiKey, body) {
+  async function runTranslateJob(job, paper, tools, pipeline, apiKey, body) {
     const pdfAbs = resolveInside(paper.source);
     if (pdfAbs === undefined) throw new Error(`PDF 路径越权或不存在：${paper.source}`);
 
@@ -2022,7 +2130,37 @@ export function apply(ctx, config = {}) {
       job.updatedAt = new Date().toISOString();
     };
 
+    const refreshUsage = () => {
+      const summary = pipeline.summarizeUsages(job.usages, job.model);
+      job.usage = {
+        inputTokens: summary.inputTokens,
+        outputTokens: summary.outputTokens,
+        cacheHitTokens: summary.cacheHitTokens,
+        cacheMissTokens: summary.cacheMissTokens,
+        reasoningTokens: summary.reasoningTokens,
+      };
+      job.estimatedCostCny = summary.estimatedCostCny;
+    };
+    const wait = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+    const waitForOffpeak = async () => {
+      if (job.schedule !== 'offpeak') return;
+      const next = pipeline.nextOffpeakTime(new Date());
+      if (next.getTime() <= Date.now() + 1000) return;
+      job.notBefore = next.toISOString();
+      touch(`等待闲时（${next.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`);
+      note('进入高峰时段，暂停在当前分块边界，闲时自动继续');
+      await wait(next.getTime() - Date.now());
+      job.notBefore = new Date().toISOString();
+    };
+    const isRetryable = (err) => {
+      const message = String(err?.message ?? err);
+      if (/\b(?:400|401|402|403)\b|api\s*key|鉴权|余额|balance|invalid\s+request/iu.test(message)) return false;
+      return /\b(?:408|409|425|429|5\d\d)\b|fetch|network|timeout|timed out|aborted|econn|socket/iu.test(message);
+    };
+
     job.phase = 'running';
+    job.actualStartedAt = new Date().toISOString();
+    job.notBefore = job.actualStartedAt;
     touch('抽取 PDF 文本');
     note('开始抽取 PDF 文本');
     const { md, warning } = await extractPdfText(pdfAbs, job.slug, undefined);
@@ -2030,58 +2168,240 @@ export function apply(ctx, config = {}) {
     job.charsIn = md.length;
     note(`抽取完成，${md.length} 字符`);
 
-    // 清掉抽取器可能的内部标记行（不是原文内容）
-    const clean = md
-      .split('\n')
-      .filter((l) => !/^===\s*(PAGE|SEC)/.test(l.trim()))
-      .join('\n');
+    // 在翻译前直接从抽取稿（包括 META 块）补齐库内元数据。不能只依赖译文：
+    // 否则模型漏译页眉里的作者/期刊/日期后，原始证据就永远丢了。
+    const metadataTools = await import(
+      `${pathToFileURL(join(toolsRoot, 'paper_metadata.mjs')).href}?t=${Date.now()}`
+    );
+    const extractedMetadata = metadataTools.extractMetadataFromText(md, {
+      fallbackTitle: paper.title,
+      slug: paper.slug,
+    });
+    if (extractedMetadata.titleEn) paper.titleEn ??= extractedMetadata.titleEn;
+    if (extractedMetadata.authors) paper.authors ??= extractedMetadata.authors;
+    if (extractedMetadata.year) paper.year ??= extractedMetadata.year;
+    if (extractedMetadata.doi) paper.doi ??= extractedMetadata.doi;
+    if (extractedMetadata.journal || extractedMetadata.issn) {
+      paper.journal ??= {};
+      if (extractedMetadata.journal) paper.journal.name ??= extractedMetadata.journal;
+      if (extractedMetadata.issn) paper.journal.issn ??= extractedMetadata.issn;
+    }
+    const foundFields = ['titleEn', 'authors', 'year', 'doi', 'journal', 'issn']
+      .filter((key) => extractedMetadata[key] != null);
+    if (foundFields.length) note(`从 PDF 元数据/页眉页脚识别：${foundFields.join(', ')}`);
 
-    const chunks = tools.chunkText(clean, config.chunkTokens || 3000);
+    // 出版信息已由本地解析器消费；参考文献、公式、引用、DOI 和 URL 也在本地
+    // 剥离/保护，不再为“不要翻译这些内容”支付模型输入与复制输出费用。
+    touch('本地保护公式与参考文献');
+    const prepared = pipeline.prepareDocument(md);
+    job.preprocessing = prepared.stats;
+    if (prepared.stats.referenceChars) note(`参考文献本地保留，少发送 ${prepared.stats.referenceChars} 字符`);
+    if (prepared.stats.metadataChars) note(`出版元数据本地解析，少发送 ${prepared.stats.metadataChars} 字符`);
+    if (prepared.stats.protectedItems) note(`已保护 ${prepared.stats.protectedItems} 个公式/引用/DOI/URL`);
+
+    const chunks = pipeline.chunkStructured(prepared.text, config.chunkTokens || 6000);
     if (chunks.length === 0) throw new Error('抽取后没有可翻译的内容');
     job.chunkTotal = chunks.length;
-    note(`切成 ${chunks.length} 块，开始逐块翻译`);
+    note(`按章节/段落切成 ${chunks.length} 块（目标 ${config.chunkTokens || 6000} token）`);
 
     const system = tools.buildSystemPrompt({
       roleHint: config.roleHint,
-      extraRules: config.extraRules,
+      extraRules: [
+        config.extraRules,
+        '输入中的 @@DSH_FORMULA_nnnnnn@@、@@DSH_CITATION_nnnnnn@@、@@DSH_DOI_nnnnnn@@、'
+          + '@@DSH_URL_nnnnnn@@ 是本地保护标记，必须逐字、逐个、原位置保留；不得翻译、改写、复制或遗漏。',
+      ].filter(Boolean).join('\n'),
     });
 
+    const cachePaperId = pipeline.chunkCacheKey({
+      source: job.slug,
+      promptVersion: 'paper-cache-directory',
+      model: '',
+    }).slice(0, 24);
+    const cacheDir = join(libraryRoot, '.translation-cache', cachePaperId);
+    await mkdir(cacheDir, { recursive: true });
     const parts = [];
+
+    const readCachedChunk = async (file, key, source) => {
+      if (body.force === true || !existsSync(file)) return null;
+      try {
+        const cached = JSON.parse(await readFile(file, 'utf8'));
+        if (cached.version !== pipeline.PIPELINE_VERSION || cached.key !== key || typeof cached.text !== 'string') return null;
+        const validation = pipeline.validateTranslation(source, cached.text, prepared.placeholders);
+        return validation.ok ? cached.text : null;
+      } catch {
+        return null;
+      }
+    };
+    const writeCachedChunk = async (file, value) => {
+      const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
+      await writeFile(temp, `${JSON.stringify(value)}\n`, 'utf8');
+      try {
+        await rename(temp, file);
+      } catch {
+        // Windows 不允许 rename 覆盖已有目标；force 重译时直接覆盖即可。
+        await writeFile(file, `${JSON.stringify(value)}\n`, 'utf8');
+        try { rmSync(temp, { force: true }); } catch { /* ignore */ }
+      }
+    };
+
     for (let i = 0; i < chunks.length; i += 1) {
       if (body?.cancel === true) throw new Error('已取消');
+      await waitForOffpeak();
       job.chunkIndex = i;
       touch(`翻译第 ${i + 1} / ${chunks.length} 块`);
-      const t0 = Date.now();
-      const { text, usage, truncated } = await tools.callDeepSeek({
-        baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
-        apiKey,
+      const cacheKey = pipeline.chunkCacheKey({
+        source: chunks[i],
+        promptVersion: `${pipeline.PIPELINE_VERSION}\n${system}`,
         model: job.model,
-        system,
-        user: tools.buildUserPrompt({
-          chunk: chunks[i], index: i, total: chunks.length,
-          title: paper.title, source: paper.source,
-        }),
-        maxTokens: job.maxTokens,
-        timeoutMs: config.requestTimeoutMs || 600000,
+        reasoningEffort: job.reasoningEffort,
+        glossaryVersion: [
+          config.glossaryVersion ?? '',
+          paper.titleEn || paper.title || '',
+          paper.source || '',
+        ].join('\n'),
       });
-      if (usage) job.usages.push(usage);
-      parts.push(text.trim());
-      job.charsOut += text.length;
-      note(`第 ${i + 1}/${chunks.length} 块完成（${((Date.now() - t0) / 1000).toFixed(1)}s`
-        + `，${text.length} 字${truncated ? '，⚠ 被 max_tokens 截断' : ''}）`);
-      if (truncated) {
-        job.warning = `${job.warning ? `${job.warning} ` : ''}第 ${i + 1} 块输出被 max_tokens 截断，可能需要重译。`;
+      const cacheFile = join(cacheDir, `${cacheKey}.json`);
+      const cached = await readCachedChunk(cacheFile, cacheKey, chunks[i]);
+      if (cached !== null) {
+        parts.push(cached);
+        job.localCacheHits += 1;
+        note(`第 ${i + 1}/${chunks.length} 块命中本地缓存（本次 0 token）`);
+        continue;
       }
+
+      const attempts = [
+        { model: job.model, reasoningEffort: job.reasoningEffort },
+        { model: job.model, reasoningEffort: 'low' },
+        { model: job.qualityModel, reasoningEffort: 'high' },
+      ].filter((attempt, index, all) => (
+        index === all.findIndex((other) => (
+          other.model === attempt.model && other.reasoningEffort === attempt.reasoningEffort
+        ))
+      ));
+      if (config.enableQualityEscalation === false) attempts.splice(1);
+
+      let accepted = null;
+      let lastValidation = null;
+      let actualAttempt = null;
+      let responseText = '';
+      const t0 = Date.now();
+      for (let qualityIndex = 0; qualityIndex < attempts.length; qualityIndex += 1) {
+        const attempt = attempts[qualityIndex];
+        if (qualityIndex > 0) {
+          job.retryCount += 1;
+          job.upgradedChunks += qualityIndex === 1 ? 1 : 0;
+          note(`第 ${i + 1} 块升级为 ${attempt.model}/${attempt.reasoningEffort} 复核重译`);
+        }
+        const user = tools.buildUserPrompt({
+          chunk: chunks[i], index: i, total: chunks.length,
+          title: paper.titleEn || paper.title, source: paper.source,
+        });
+        let response = null;
+        const transportRetries = Math.max(0, Math.min(3, Number(config.requestRetries ?? 2)));
+        for (let transportIndex = 0; transportIndex <= transportRetries; transportIndex += 1) {
+          const requestedAt = new Date().toISOString();
+          job.apiChunks += 1;
+          try {
+            response = await tools.callDeepSeek({
+              baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
+              apiKey,
+              model: attempt.model,
+              system,
+              user,
+              reasoningEffort: attempt.reasoningEffort,
+              maxTokens: {
+                min: Math.min(2048, job.maxTokens),
+                max: job.maxTokens,
+                inputRatio: 1.65,
+                base: 768,
+              },
+              timeoutMs: config.requestTimeoutMs || 600000,
+            });
+            if (response.usage) {
+              const requestPeriod = pipeline.isPeakShanghai(new Date(requestedAt)) ? 'peak' : 'offpeak';
+              if (job.usages.length === 0) job.pricingPeriod = requestPeriod;
+              else if (job.pricingPeriod !== requestPeriod) job.pricingPeriod = 'mixed';
+              job.usages.push({
+                ...response.usage,
+                requestedAt,
+                model: attempt.model,
+                reasoningEffort: attempt.reasoningEffort,
+              });
+              refreshUsage();
+            }
+            break;
+          } catch (err) {
+            if (transportIndex >= transportRetries || !isRetryable(err)) throw err;
+            job.retryCount += 1;
+            const delay = Math.min(8000, 1000 * (2 ** transportIndex));
+            note(`第 ${i + 1} 块请求失败，${delay / 1000}s 后只重试本块：${err?.message ?? err}`);
+            await wait(delay);
+          }
+        }
+        lastValidation = (() => {
+          // 先做确定性修复（重复的引用标记），再校验：一个多余的 [12] 不值得整块重译。
+          const repaired = pipeline.repairDuplicatePlaceholders(
+            chunks[i], response.text, prepared.placeholders,
+          );
+          if (repaired.repairs.length) {
+            note(`第 ${i + 1} 块去重占位符 ${repaired.repairs.reduce((n, r) => n + r.removed, 0)} 处`);
+          }
+          responseText = repaired.text;
+          return pipeline.validateTranslation(
+            chunks[i], responseText, prepared.placeholders, { truncated: response.truncated },
+          );
+        })();
+        if (lastValidation.ok) {
+          accepted = responseText.trim();
+          actualAttempt = attempt;
+          if (lastValidation.warnings.length) {
+            for (const warning of lastValidation.warnings) {
+              const dropped = /^formula-dropped:(\d+)$/u.exec(warning);
+              if (dropped) job.droppedFormulas += Number(dropped[1]);
+            }
+            note(`第 ${i + 1} 块提示：${lastValidation.warnings.join(', ')}`);
+          }
+          break;
+        }
+        job.validationFailures += 1;
+        note(`第 ${i + 1} 块完整性校验未通过：${lastValidation.errors.join(', ')}`);
+      }
+
+      if (accepted === null) {
+        throw new Error(`第 ${i + 1} 块经分级重译仍未通过完整性校验：${lastValidation?.errors?.join(', ') ?? '未知错误'}`);
+      }
+      parts.push(accepted);
+      await writeCachedChunk(cacheFile, {
+        version: pipeline.PIPELINE_VERSION,
+        key: cacheKey,
+        slug: job.slug,
+        chunk: i,
+        text: accepted,
+        requestedModel: job.model,
+        actualModel: actualAttempt.model,
+        reasoningEffort: actualAttempt.reasoningEffort,
+        createdAt: new Date().toISOString(),
+      });
+      note(`第 ${i + 1}/${chunks.length} 块完成并落盘（${((Date.now() - t0) / 1000).toFixed(1)}s，`
+        + `${accepted.length} 字）`);
     }
     job.chunkIndex = chunks.length;
 
+    const restoredParts = parts.map((part) => pipeline.restoreTechnicalTokens(
+      part, prepared.placeholders,
+    ).trim());
+    job.charsOut = restoredParts.reduce((sum, part) => sum + part.length, 0) + prepared.references.length;
+
     // 合并并写入译稿
     const header = [
-      `# ${paper.title ?? job.slug}`,
+      `# ${paper.titleZh ?? paper.title ?? job.slug}`,
       '',
+      paper.titleEn ? `**原文标题**：${paper.titleEn}` : null,
       paper.authors ? `**作者**：${paper.authors}` : null,
-      paper.year ? `**年份**：${paper.year}` : null,
       paper.journal?.name ? `**期刊**：${paper.journal.name}` : null,
+      paper.year ? `**发表年份**：${paper.year}` : null,
+      paper.doi ? `**DOI**：${paper.doi}` : null,
       paper.source ? `**原文**：\`${paper.source}\`` : null,
       '',
       '> 本文由「文献库」面板直连 DeepSeek API 翻译生成。',
@@ -2091,13 +2411,22 @@ export function apply(ctx, config = {}) {
       '',
     ].filter((x) => x !== null).join('\n');
 
+    let references = prepared.references.trim();
+    if (references && !/^(?:#{1,4}\s*)?(?:references|bibliography|literature\s+cited|参考文献)\s*$/imu.test(
+      references.split('\n').slice(0, 3).join('\n'),
+    )) {
+      references = `## References\n\n${references}`;
+    }
+    const outputBody = [restoredParts.join('\n\n'), references].filter(Boolean).join('\n\n---\n\n');
+
     const outRel = job.outputPath;
     const outAbs = resolveInside(outRel) ?? resolve(join(libraryRoot, 'translations', job.slug, `${job.slug}.md`));
     if (!outAbs.startsWith(resolve(join(libraryRoot, 'translations')) + sep)) {
       throw new Error(`译稿输出路径越权：${outRel}`);
     }
     await mkdir(dirname(outAbs), { recursive: true });
-    await writeFile(outAbs, header + parts.join('\n\n'), 'utf8');
+    const output = header + outputBody;
+    await writeFile(outAbs, output, 'utf8');
     note(`已写入 ${outRel}`);
 
     // 登记为已翻译并刷新索引
@@ -2111,14 +2440,31 @@ export function apply(ctx, config = {}) {
       p.translatedAt = new Date().toISOString();
       p.translateMethod = 'deepseek-api';
       p.translateModel = job.model;
+      p.translationStats = {
+        ...job.usage,
+        estimatedCostCny: job.estimatedCostCny,
+        localCacheHits: job.localCacheHits,
+        apiChunks: job.apiChunks,
+        retryCount: job.retryCount,
+        validationFailures: job.validationFailures,
+        chunkTotal: job.chunkTotal,
+        schedule: job.schedule,
+        finishedAt: new Date().toISOString(),
+      };
       p.hidden = p.hidden === true;
-      const metadata = await import(
-        `${pathToFileURL(join(toolsRoot, 'paper_metadata.mjs')).href}?t=${Date.now()}`
-      );
-      const local = metadata.extractMetadataFromText(header + parts.join('\n\n'), {
+      const local = metadataTools.extractMetadataFromText(output, {
         fallbackTitle: p.title,
         slug: p.slug,
       });
+      if (extractedMetadata.titleEn) p.titleEn ??= extractedMetadata.titleEn;
+      if (extractedMetadata.authors) p.authors ??= extractedMetadata.authors;
+      if (extractedMetadata.year) p.year ??= extractedMetadata.year;
+      if (extractedMetadata.doi) p.doi ??= extractedMetadata.doi;
+      if (extractedMetadata.journal || extractedMetadata.issn) {
+        p.journal ??= {};
+        if (extractedMetadata.journal) p.journal.name ??= extractedMetadata.journal;
+        if (extractedMetadata.issn) p.journal.issn ??= extractedMetadata.issn;
+      }
       if (local.titleZh) {
         p.titleZh = local.titleZh;
         if (!p.title || p.title === p.slug) p.title = local.titleZh;
@@ -2133,9 +2479,11 @@ export function apply(ctx, config = {}) {
     job.phase = 'done';
     touch('完成');
     job.finishedAt = new Date().toISOString();
+    job.notBefore = null;
     ctx.logger?.info?.(
       `literature-library: 翻译完成 ${job.slug}（${chunks.length} 块，`
-      + `入 ${job.charsIn} 字 / 出 ${job.charsOut} 字）→ ${outRel}`,
+      + `本地缓存 ${job.localCacheHits} 块，API 请求 ${job.apiChunks} 次，`
+      + `预计 ¥${job.estimatedCostCny.toFixed(4)}）→ ${outRel}`,
     );
   }
 
@@ -2760,7 +3108,12 @@ export function apply(ctx, config = {}) {
                 baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
                 model: config.model || tools.DEFAULT_MODEL,
                 maxTokens: config.maxTokens || 32000,
-                chunkTokens: config.chunkTokens || 3000,
+                chunkTokens: config.chunkTokens || 6000,
+                reasoningEffort: 'none',
+                qualityModel: config.qualityModel || 'deepseek-v4-pro',
+                translationConcurrency,
+                supportsOffpeakSchedule: true,
+                pricingUpdatedAt: '2026-10-21',
               });
             } catch (err) {
               sendJson(res, 500, { error: 'config-read-failed', message: String(err?.message ?? err) });
@@ -2814,7 +3167,12 @@ export function apply(ctx, config = {}) {
               baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
               model: config.model || tools.DEFAULT_MODEL,
               maxTokens: config.maxTokens || 32000,
-              chunkTokens: config.chunkTokens || 3000,
+              chunkTokens: config.chunkTokens || 6000,
+              reasoningEffort: 'none',
+              qualityModel: config.qualityModel || 'deepseek-v4-pro',
+              translationConcurrency,
+              supportsOffpeakSchedule: true,
+              pricingUpdatedAt: '2026-10-21',
             });
           } catch (err) {
             sendJson(res, 500, { error: 'config-check-failed', message: String(err?.message ?? err) });

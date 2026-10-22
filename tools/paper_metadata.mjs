@@ -30,6 +30,7 @@ function plainMarkdown(value) {
       .replace(/&nbsp;/gi, ' ');
   }
   return text
+    .replace(/^\s*-\s*\[p(?:\d+|meta)\s+[^\]]+\]\s*/i, '')
     .replace(/^\s*>\s?/, '')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -172,6 +173,11 @@ export function extractMetadataFromText(text, { fallbackTitle = '', slug = '' } 
       result.journal = cleanJournalName(match[1]);
       result.evidence.push('labeled-journal');
     }
+    match = /^(.{2,120}?)\s*[|·]\s*(?:vol(?:ume)?\.?|issue|no\.?)\s*\d+/i.exec(line);
+    if (!result.journal && match) {
+      result.journal = cleanJournalName(match[1]);
+      result.evidence.push('running-head-journal');
+    }
     match = /\bISSN\s*[:：]?\s*([0-9]{4}-?[0-9]{3}[0-9Xx])\b/i.exec(line);
     if (!result.issn && match) {
       result.issn = match[1].replace(/^(\d{4})(\d{4})$/, '$1-$2').toUpperCase();
@@ -181,6 +187,18 @@ export function extractMetadataFromText(text, { fallbackTitle = '', slug = '' } 
     if (!result.year && match) {
       result.year = Number(match[1]);
       result.evidence.push('labeled-year');
+    }
+    if (!result.year && /\b(?:received|revised|accepted|published|publication)\b/i.test(line)) {
+      match = /\b((?:19|20)\d{2})\b/.exec(line);
+      if (match) {
+        result.year = Number(match[1]);
+        result.evidence.push('publication-date');
+      }
+    }
+    match = /^PDF\s+Subject\s*[：:]\s*(.+)$/i.exec(line);
+    if (!result.journal && match && /journal|proceedings|transactions|review|letters|science|nature/i.test(match[1])) {
+      result.journal = cleanJournalName(match[1]);
+      result.evidence.push('pdf-subject-journal');
     }
   }
 

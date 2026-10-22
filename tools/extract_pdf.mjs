@@ -114,7 +114,7 @@ function normalizeInline(s) {
  * item 合成 run；间距出现明显跳跃说明跨栏，必须断开——否则左右两栏会被拼成一句。
  */
 function buildRuns(items, debugOpts = {}) {
-  const sorted = items
+  const mapped = items
     .filter((it) => (it.str ?? '').length > 0)
     .map((it) => ({
       str: it.str,
@@ -122,8 +122,8 @@ function buildRuns(items, debugOpts = {}) {
       y: it.transform?.[5] ?? 0,
       size: Math.abs(it.transform?.[3] ?? it.height ?? 0),
       w: it.width ?? 0,
-    }))
-    .sort((a, b) => b.y - a.y || a.x - b.x);
+    }));
+  const sorted = [...mapped].sort((a, b) => b.y - a.y || a.x - b.x);
 
   const runs = [];
   let cur = null;
@@ -140,8 +140,17 @@ function buildRuns(items, debugOpts = {}) {
     const crossColumn = gap > em * 1.4;
     const overlaps = gap < -em * 0.62;
     const reasonable = gap < em * 0.95;
+    // 基线上的两个文本块之间若夹着更小且上下偏移的 glyph，它就是上下标。
+    // 此时绝不能先把两侧基线块合成一个 run，否则稍后只能得到 BiTe_{2}，
+    // 无法恢复正确的 Bi_{2}Te_{3} 顺序。
+    const scriptBetween = mapped.some((s) => s !== it
+      && s.size <= em * 0.86
+      && Math.abs(s.y - it.y) <= em * 0.65
+      && Math.abs(s.y - it.y) >= em * 0.08
+      && s.x >= cur.x1 - em * 0.12
+      && s.x <= it.x + em * 0.12);
 
-    if (sameLine && sameSize && !crossColumn && !overlaps && reasonable) {
+    if (sameLine && sameSize && !crossColumn && !overlaps && reasonable && !scriptBetween) {
       // 诊断：左栏一行与右栏一行在同一基线上，间距极小（本论文栏间距仅约 11pt，
       // 与字距同级），"跨栏须有 1.4em 间隔"这条规则会漏判，从而把两栏拼成一行。
       if (debugOpts?.dumpLayout && debugOpts.pageWidth) {
@@ -283,7 +292,24 @@ function mergeFragments(lines, gutter) {
     return 'S';
   };
 
-  for (const ln of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const ln = lines[lineIndex];
+    const next = lines[lineIndex + 1];
+    // 上标的基线高于正文，按 y 降序时会先于其宿主行出现。若这个小碎片的
+    // x 完全落在下一条基线内，先塞进下一行，避免把公式编号/平方项变成独立段落。
+    const attachesForward = next
+      && ln.size <= next.size * 0.82
+      && Math.abs(ln.y - next.y) <= Math.max(1.2, next.size * 0.58)
+      && ln.runs.every((r) => r.x0 >= next.x0 - 2 && r.x1 <= next.x1 + 2)
+      && /^[\p{L}\p{N}\-+=().,;:]{1,8}$/u.test(ln.runs.map((r) => r.text).join('').trim());
+    if (attachesForward) {
+      next.runs.push(...ln.runs);
+      next.runs.sort((a, b) => a.x0 - b.x0);
+      next.x0 = Math.min(next.x0, ln.x0);
+      next.x1 = Math.max(next.x1, ln.x1);
+      next.text = composeLineText(next.runs);
+      continue;
+    }
     const prev = out[out.length - 1];
     const textOnly = ln.runs.map((r) => r.text).join('').trim();
     const close = prev ? Math.abs(ln.y - prev.y) <= Math.max(1.2, prev.size * 0.55) : false;
@@ -295,7 +321,8 @@ function mergeFragments(lines, gutter) {
       const gap = ln.x0 - prev.x1;
       const tight = gap > -Math.max(1, prev.size) * 0.6 && gap < Math.max(4, prev.size * 0.9);
 
-      if (tiny && wordish && tight && textOnly.length > 0) {
+      const scriptsInside = tiny && ln.runs.every((r) => r.x0 >= prev.x0 - 2 && r.x1 <= prev.x1 + 2);
+      if (tiny && wordish && (tight || scriptsInside) && textOnly.length > 0) {
         let idx = prev.runs.findIndex((r) => r.x0 > ln.x0);
         if (idx < 0) idx = prev.runs.length;
         prev.runs.splice(idx, 0, ...ln.runs);
@@ -674,14 +701,20 @@ function linesToParagraphs(lines, ctx) {
     const text = withScripts(ln);
     if (!text) continue;
 
-    const isHeading = ln.size > bodySize * 1.12 && text.length < 140;
+    const numberedHeading = /^\s*(?:\d+\.)+\d*\s+\p{L}/u.test(text);
+    const isHeading = (ln.size > bodySize * 1.12 || numberedHeading) && text.length < 140;
     const hasRelation = /[=≈≤≥≪≫]/u.test(text);
-    // 公式块判定从严：同时含数学符号与关系运算符，且不是句子的延续片段
-    const isEquation = hasRelation && text.length < 90 && MATH_CHARS.test(text) && !isEquationFragment(ln);
+    const wordCount = (text.match(/[\p{L}]{2,}/gu) ?? []).length;
+    const formulaShape = wordCount <= 7;
+    // 公式块判定从严：短、符号密集或居中的式子才独立；包含一个等号的完整英文句子仍是正文。
+    const isEquation = hasRelation && text.length < 160 && formulaShape
+      && MATH_CHARS.test(text) && !isEquationFragment(ln);
 
-    if (isHeading || isEquation) {
+    const isCaption = /^(?:fig(?:ure)?|table)\s*\d+/iu.test(text);
+
+    if (isHeading || isEquation || isCaption) {
       if (cur) { paras.push(cur); cur = null; }
-      paras.push({ type: isHeading ? 'heading' : 'equation', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size });
+      paras.push({ type: isHeading ? 'heading' : (isEquation ? 'equation' : 'caption'), text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size });
       continue;
     }
 
@@ -744,6 +777,45 @@ function stripRunningHeads(lines, pageHeight, pageNumber, furniture, bodyLineCou
     kept.push(l);
   }
   return { kept, dropped };
+}
+
+/**
+ * 页眉页脚不能简单等同于垃圾：期刊名、DOI、Received/Accepted/Published 日期
+ * 经常只出现在那里。正文仍去掉重复家具，但把高价值行单独保存为元数据候选。
+ */
+function collectPublicationMetadata(pageCache, source) {
+  const strong = /\b(?:doi|issn|received|revised|accepted|published|publication|journal|volume|vol\.|issue|copyright)\b|©|10\.\d{4,9}\//iu;
+  const candidates = [];
+  const add = (text, page, region, score) => {
+    const clean = String(text ?? '').replace(/\s+/gu, ' ').trim();
+    if (clean.length < 3 || clean.length > 500) return;
+    candidates.push({ text: clean, page, region, score });
+  };
+
+  for (const pc of pageCache) {
+    for (const line of pc.lines) {
+      const region = line.y >= pc.height * 0.925 ? 'header'
+        : (line.y <= pc.height * 0.075 ? 'footer' : 'body');
+      if (strong.test(line.text)) add(line.text, pc.p, region, 100);
+      // 第一页上部通常包含标题、作者、单位和期刊抬头；保留有限数量供模型辨认。
+      else if (pc.p === 1 && line.y >= pc.height * 0.78) add(line.text, pc.p, 'first-page-top', 40);
+    }
+  }
+  if (source.title) add(`原文标题: ${source.title}`, 0, 'pdf-metadata', 120);
+  if (source.author) add(`作者: ${source.author}`, 0, 'pdf-metadata', 120);
+  if (source.subject) add(`PDF Subject: ${source.subject}`, 0, 'pdf-metadata', 110);
+  if (source.creationDate) add(`PDF CreationDate: ${source.creationDate}`, 0, 'pdf-metadata', 80);
+
+  const seen = new Set();
+  return candidates
+    .sort((a, b) => b.score - a.score || a.page - b.page)
+    .filter((item) => {
+      const key = item.text.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    })
+    .slice(0, 40)
+    .map(({ score, ...item }) => item);
 }
 
 // ─────────────────── 单页处理 ───────────────────
@@ -826,7 +898,11 @@ async function extract(pdfPath, opts) {
   if (opts.debugCols) console.error(`[debug] numPages=${total}`);
 
   const out = {
-    source: { path: pdfPath, file: basename(pdfPath), pages: total, title: null, author: null },
+    source: {
+      path: pdfPath, file: basename(pdfPath), pages: total,
+      title: null, author: null, subject: null, keywords: null, creationDate: null,
+      metadataCandidates: [],
+    },
     pages: [],
     dropped: [],
     stats: { pagesProcessed: 0, paragraphs: 0, columns: [] },
@@ -946,7 +1022,12 @@ async function extract(pdfPath, opts) {
     const meta = await doc.getMetadata();
     out.source.title = meta?.info?.Title ?? null;
     out.source.author = meta?.info?.Author ?? null;
+    out.source.subject = meta?.info?.Subject ?? null;
+    out.source.keywords = meta?.info?.Keywords ?? null;
+    out.source.creationDate = meta?.info?.CreationDate ?? null;
   } catch { /* 元数据缺失可忽略 */ }
+
+  out.source.metadataCandidates = collectPublicationMetadata(pageCache, out.source);
 
   await task.destroy();
   out.stats.bodySize = Number(bodySize.toFixed(2));
@@ -982,11 +1063,22 @@ function renderMarkdown(result) {
   if (result.source.author) L.push(`> ${result.source.author}`);
   L.push('');
 
+  if (result.source.metadataCandidates?.length) {
+    L.push('===META:BEGIN===');
+    L.push('以下内容来自 PDF 文档属性、第一页顶部或页眉页脚；它们不是正文，但必须用于识别题名、作者、期刊、DOI 与发表日期：');
+    for (const item of result.source.metadataCandidates) {
+      L.push(`- [p${item.page || 'meta'} ${item.region}] ${item.text}`);
+    }
+    L.push('===META:END===');
+    L.push('');
+  }
+
   const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december';
   const NOISE = new RegExp(`^(vol\\.?\\s*\\d+|no\\.?\\s*\\d+|pp?\\.?\\s*\\d+|issn|doi|https?://|www\\.|received|accepted|published|©|\\d{4}\\s+${MONTHS}|${MONTHS}\\s+\\d{4})`, 'iu');
 
   for (const page of result.pages) {
     L.push(`===PAGE ${page.page}===`);
+    L.push(`===LAYOUT:COLUMNS ${page.columns}===`);
     L.push('');
     for (const p of page.paragraphs) {
       const text = p.text.trim();
@@ -995,6 +1087,7 @@ function renderMarkdown(result) {
       if (p.section) L.push(`===SEC:${p.section}===`);
       if (p.type === 'heading') L.push(`## ${text}`);
       else if (p.type === 'equation') L.push(`$$${text}$$`);
+      else if (p.type === 'caption') L.push(`**${text}**`);
       else L.push(text);
       L.push('');
     }

@@ -24,13 +24,92 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.4.4';
+    const PDFJS_REV = '0.6.0';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
     const FONT_SCALE_KEY = 'dsh-literature-library/font-scale';
+    const READING_MEMORY_KEY = 'dsh-literature-library/reading-memory-v1';
+    const TRANSLATION_USAGE_KEY = 'dsh-literature-library/translation-usage-v1';
+    const OFFPEAK_ONLY_KEY = 'dsh-literature-library/offpeak-only';
     const FONT_MIN_PERCENT = 1;
     const FONT_MAX_PERCENT = 1000;
+
+    function loadReadingMemory() {
+      try {
+        const value = JSON.parse(window.localStorage.getItem(READING_MEMORY_KEY) || '{}');
+        return {
+          lastSlug: typeof value.lastSlug === 'string' ? value.lastSlug : null,
+          pdfs: value.pdfs && typeof value.pdfs === 'object' ? value.pdfs : {},
+          markdowns: value.markdowns && typeof value.markdowns === 'object' ? value.markdowns : {},
+        };
+      } catch { return { lastSlug: null, pdfs: {}, markdowns: {} }; }
+    }
+
+    function updateReadingMemory(update) {
+      try {
+        const current = loadReadingMemory();
+        const next = update(current) ?? current;
+        // 只保存数字位置和短锚点，不保存正文；因此可以为文献库中的每篇文章保留记录。
+        const entries = Object.entries(next.pdfs ?? {});
+        const markdownEntries = Object.entries(next.markdowns ?? {});
+        window.localStorage.setItem(READING_MEMORY_KEY, JSON.stringify({
+          lastSlug: next.lastSlug ?? null,
+          pdfs: Object.fromEntries(entries),
+          markdowns: Object.fromEntries(markdownEntries),
+        }));
+      } catch { /* localStorage 不可用时不影响阅读 */ }
+    }
+
+    function savePdfReadingState(slug, value) {
+      if (!slug) return;
+      updateReadingMemory((memory) => ({
+        ...memory,
+        pdfs: {
+          ...memory.pdfs,
+          [slug]: {
+            page: Math.max(1, Math.round(Number(value.page) || 1)),
+            offset: Math.min(1, Math.max(0, Number(value.offset) || 0)),
+            zoom: Math.min(3, Math.max(0.4, Number(value.zoom) || 1)),
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      }));
+    }
+
+    function saveMarkdownReadingState(slug, mode, value) {
+      if (!slug) return;
+      const safeMode = ['preview', 'source', 'edit'].includes(mode) ? mode : 'preview';
+      updateReadingMemory((memory) => {
+        const previous = memory.markdowns?.[slug] ?? {};
+        return {
+          ...memory,
+          markdowns: {
+            ...memory.markdowns,
+            [slug]: {
+              ...previous,
+              mode: safeMode,
+              positions: {
+                ...(previous.positions ?? {}),
+                [safeMode]: {
+                  scrollTop: Math.max(0, Number(value.scrollTop) || 0),
+                  scrollRatio: Math.min(1, Math.max(0, Number(value.scrollRatio) || 0)),
+                  anchorIndex: Number.isInteger(value.anchorIndex) ? Math.max(0, value.anchorIndex) : null,
+                  anchorOffset: Number.isFinite(value.anchorOffset) ? value.anchorOffset : 0,
+                },
+              },
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        };
+      });
+    }
+
+    function markdownReadingState(slug, mode) {
+      const saved = loadReadingMemory().markdowns?.[slug];
+      if (!saved) return null;
+      return saved.positions?.[mode] ?? null;
+    }
 
     function clampFontPercent(value) {
       const n = Math.round(Number(value));
@@ -107,11 +186,15 @@ window.__ModuleLoader__.load({
   --ll-paper-muted: #566170;
   --ll-paper-soft: #f2f4f7;
   --ll-paper-border: #d6dbe2;
+  /* 选区必须是半透明叠色：译文区是白纸黑字，用不透明深蓝底会让文字看不见 */
+  --ll-selection-bg: rgba(100, 181, 255, .34);
+  color-scheme: dark;
   display: flex; height: 100%; min-height: 0; color: var(--ll-text); font-size: calc(13px * var(--ll-font-scale, 1)); overflow: hidden;
   background: var(--ll-bg);
 }
 @media (prefers-color-scheme: light) {
-  .ll-root {
+  /* 宿主没有给出主题信号时才跟随系统；DSH 会写 data-ll-theme 覆盖这里 */
+  .ll-root:not([data-ll-theme]) {
     --ll-accent: #0969da; --ll-success: #18794e; --ll-text: #16191d; --ll-muted: #46505c; --ll-subtle: #66717f;
     --ll-bg: #e5e9ee; --ll-nav-bg: #edf0f3; --ll-nav-head-bg: #dfe4e9; --ll-panel-bg: #f4f6f8;
     --ll-head-bg: #e8ecf0; --ll-reading-bg: #ffffff; --ll-pdf-bg: #d7dde4; --ll-control-bg: #e2e7ec;
@@ -189,6 +272,20 @@ window.__ModuleLoader__.load({
 .ll-progress-failed .ll-progress-fill { background: #d9534f; }
 .ll-progress-queued .ll-progress-fill { opacity: .6; }
 @keyframes ll-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+/* 翻译费用/用量：一行小字，悬停看明细 */
+.ll-translate-status { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; }
+.ll-translate-status .ll-progress { margin-top: 4px; max-width: 100%; }
+.ll-usage {
+  display: block; max-width: 100%; margin-top: 2px; overflow: hidden; text-overflow: ellipsis;
+  color: var(--ll-subtle); font-size: calc(9.5px * var(--ll-font-scale, 1));
+  line-height: 1.35; white-space: nowrap; font-variant-numeric: tabular-nums; cursor: help;
+}
+.ll-offpeak-toggle {
+  display: inline-flex; align-items: center; gap: 3px; min-width: 0; cursor: pointer;
+  color: var(--ll-subtle); font-size: calc(10.5px * var(--ll-font-scale, 1)); white-space: nowrap;
+}
+.ll-offpeak-toggle input { width: 12px; height: 12px; margin: 0; accent-color: var(--ll-accent); }
+.ll-offpeak-toggle.on { color: var(--ll-accent); }
 .ll-head { padding: 8px 12px; border-bottom: 1px solid var(--ll-soft-border); flex: none; display: flex; flex-wrap: wrap; gap: 5px 12px; align-items: flex-start; background: var(--ll-head-bg); }
 .ll-head.ll-head-compact { padding-top: 7px; padding-bottom: 7px; }
 .ll-head-titles { min-width: 0; flex: 1 1 520px; }
@@ -364,7 +461,7 @@ window.__ModuleLoader__.load({
   letter-spacing: .1px;
 }
 @media (prefers-color-scheme: light) {
-  .ll-root {
+  .ll-root:not([data-ll-theme]) {
     --ll-accent: #0b6bcb; --ll-success: #137a4b; --ll-danger: #c0392b;
     --ll-text: #151a20; --ll-muted: #49535f; --ll-subtle: #6b7684;
     --ll-bg: #e7ebef; --ll-nav-bg: #f1f4f7; --ll-nav-head-bg: #e9edf1;
@@ -373,11 +470,37 @@ window.__ModuleLoader__.load({
     --ll-selected-bg: #d3e6fb; --ll-quote-bg: #eef2f5; --ll-soft-border: #c2cbd5;
     --ll-hover: #e7edf3; --ll-pin: #a46600;
     --ll-pdf-toolbar-bg: #eef1f4; --ll-pdf-toolbar-fg: #20252c; --ll-pdf-toolbar-muted: #5c6672;
+    --ll-selection-bg: rgba(9, 105, 218, .22);
   }
 }
+/*
+ * 浅色主题：由 JS 按 DSH 的 body[data-ds-dark-theme] 写到 .ll-root 上。
+ * 不依赖 prefers-color-scheme——否则「DSH 浅色 + 系统深色」时面板仍是深色，
+ * 和整页背景割裂。
+ */
+.ll-root[data-ll-theme="light"] {
+  color-scheme: light;
+  --ll-accent: #0b6bcb; --ll-success: #137a4b; --ll-danger: #c0392b;
+  --ll-text: #151a20; --ll-muted: #49535f; --ll-subtle: #6b7684;
+  --ll-bg: #e7ebef; --ll-nav-bg: #f1f4f7; --ll-nav-head-bg: #e9edf1;
+  --ll-panel-bg: #f6f8fa; --ll-head-bg: #eef2f5; --ll-reading-bg: #ffffff;
+  --ll-pdf-bg: #dce2e8; --ll-control-bg: #e5eaef; --ll-control-hover: #d6dde5;
+  --ll-selected-bg: #d3e6fb; --ll-quote-bg: #eef2f5; --ll-soft-border: #c2cbd5;
+  --ll-hover: #e7edf3; --ll-pin: #a46600;
+  --ll-pdf-toolbar-bg: #eef1f4; --ll-pdf-toolbar-fg: #20252c; --ll-pdf-toolbar-muted: #5c6672;
+  --ll-selection-bg: rgba(9, 105, 218, .22);
+}
+.ll-root[data-ll-theme="dark"] { color-scheme: dark; --ll-selection-bg: rgba(100, 181, 255, .34); }
 .ll-root button, .ll-root input, .ll-root select, .ll-root textarea { font-family: inherit; }
 .ll-root :focus-visible { outline: 2px solid var(--ll-accent); outline-offset: 1px; }
-.ll-root ::selection { background: var(--ll-selected-bg); }
+/*
+ * 选中文字：半透明强调色 + 文字颜色继承。
+ * 旧写法用不透明 --ll-selected-bg，而译文区是白底黑字，选中后变成
+ * 「深蓝底 + 深色字」，完全看不清。
+ */
+.ll-root ::selection { background: var(--ll-selection-bg); color: inherit; }
+.ll-root ::-moz-selection { background: var(--ll-selection-bg); color: inherit; }
+.ll-pane-translation ::selection { background: rgba(11, 107, 203, .24); color: inherit; }
 .ll-nav-shell { box-shadow: inset -1px 0 0 rgba(0, 0, 0, .18); }
 .ll-nav-head {
   padding: 10px 10px 9px;
@@ -622,6 +745,23 @@ window.__ModuleLoader__.load({
   background: #fff; box-shadow: none;
 }
 .ll-pdf-canvas { position: absolute; left: 0; top: 0; display: block; }
+.ll-pdf-text-layer {
+  position: absolute; inset: 0; overflow: hidden; line-height: 1; opacity: 1;
+  transform-origin: 0 0; text-size-adjust: none; forced-color-adjust: none;
+  --min-font-size: 1; --user-unit: 1; --total-scale-factor: var(--scale-factor, 1);
+}
+.ll-pdf-text-layer span, .ll-pdf-text-layer br {
+  position: absolute; color: transparent; white-space: pre; cursor: text;
+  transform-origin: 0 0; user-select: text;
+  --font-height: 0; --scale-x: 1; --rotate: 0deg;
+  font-size: calc(var(--total-scale-factor) * var(--min-font-size) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(calc(1 / var(--min-font-size)));
+}
+.ll-pdf-text-layer .markedContent { display: contents; }
+.ll-pdf-text-layer ::selection { background: rgba(40, 130, 255, .38); }
+.ll-pdf-text-layer .ll-pdf-search-hit { background: rgba(255, 214, 55, .62); color: transparent; border-radius: 2px; }
+.ll-pdf-search { width: 120px; flex: none; }
+.ll-pdf-search-count { color: var(--ll-pdf-toolbar-muted); font-size: calc(10.5px * var(--ll-font-scale, 1)); white-space: nowrap; }
 .ll-pdf-page-no {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: #8a94a0; font-size: calc(12px * var(--ll-font-scale, 1)); letter-spacing: .3px;
@@ -637,6 +777,12 @@ window.__ModuleLoader__.load({
 .ll-tab.on { background: var(--ll-accent); color: #fff; border-color: transparent; }
 .ll-pane-translation .ll-pane-head { background: var(--ll-head-bg); }
 .ll-md { padding: 16px 20px 48px; line-height: 1.78; }
+.ll-md img, .ll-md-image { display: block; max-width: 100%; height: auto; margin: 12px auto; }
+.ll-md a { color: #1769aa; text-decoration: underline; text-underline-offset: 2px; }
+.ll-footnotes { margin-top: 28px; font-size: .92em; color: var(--ll-paper-muted); }
+.ll-footnotes ol { padding-left: 22px; }
+.ll-footnote-ref { line-height: 0; }
+.ll-footnote-back { text-decoration: none !important; }
 .ll-wysiwyg { padding-top: 14px; }
 .ll-empty { padding: 26px 22px; line-height: 1.75; }
 .ll-empty strong { display: block; margin-bottom: 4px; color: var(--ll-text); font-size: calc(13.5px * var(--ll-font-scale, 1)); }
@@ -666,6 +812,36 @@ window.__ModuleLoader__.load({
 .ll-nav-body::-webkit-scrollbar-thumb:hover, .ll-pane-body::-webkit-scrollbar-thumb:hover,
 .ll-pdf-body::-webkit-scrollbar-thumb:hover {
   background: var(--ll-muted); background-clip: content-box;
+}
+/* 专注阅读：只保留当前论文识别信息与核心操作，把垂直空间还给正文。 */
+.ll-root.ll-focus { --ll-pdf-toolbar-h: 29px; }
+.ll-focus .ll-head {
+  min-height: 32px; padding: 4px 8px; gap: 4px 7px;
+  flex-wrap: nowrap; align-items: center;
+}
+.ll-focus .ll-head.ll-head-compact { padding-top: 4px; padding-bottom: 4px; }
+.ll-focus .ll-head-titles { flex: 1 1 auto; min-width: 0; }
+.ll-focus .ll-eyebrow, .ll-focus .ll-title-en, .ll-focus .ll-focus-optional { display: none; }
+.ll-focus .ll-head h1 {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: calc(12.5px * var(--ll-font-scale, 1)); line-height: 1.35;
+}
+.ll-focus .ll-head-actions { gap: 3px; }
+.ll-focus .ll-head-actions > .ll-btn { padding: 2px 7px; font-size: calc(11px * var(--ll-font-scale, 1)); }
+.ll-focus .ll-navpair { height: 24px; }
+.ll-focus .ll-head-details { padding-top: 5px; gap: 4px 8px; }
+.ll-focus .ll-pane-head {
+  height: 28px; min-height: 28px; padding: 0 7px;
+  font-size: calc(11px * var(--ll-font-scale, 1));
+}
+.ll-focus .ll-wordcount { display: none; }
+.ll-focus .ll-pane-tools { padding: 0 6px; gap: 4px; }
+.ll-focus .ll-pane-tools .ll-btn { padding: 1px 6px; font-size: calc(10.5px * var(--ll-font-scale, 1)); }
+.ll-focus .ll-tabs { padding: 0; border-radius: 5px; }
+.ll-focus .ll-tab { padding: 1px 7px; border-radius: 4px; }
+@media (max-width: 900px) {
+  .ll-focus .ll-head h1 { max-width: 42vw; }
+  .ll-focus .ll-pagepos { min-width: 32px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ll-root *, .ll-root *::before, .ll-root *::after {
@@ -779,6 +955,51 @@ window.__ModuleLoader__.load({
     const escapeHtml = (s) => String(s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+    const safeUrl = (value, image = false) => {
+      const raw = String(value ?? '').trim();
+      if (!raw || /[\u0000-\u001f\u007f]/u.test(raw)) return null;
+      if (/^(?:https?:|mailto:|#)/iu.test(raw)) return raw;
+      if (image && /^data:image\/(?:png|gif|jpe?g|webp);base64,/iu.test(raw)) return raw;
+      if (/^library\//iu.test(raw)) return fileUrl(raw);
+      if (!/^[a-z][a-z0-9+.-]*:/iu.test(raw) && !raw.startsWith('//')) return raw;
+      return null;
+    };
+
+    /** 仅保留论文排版需要的安全 HTML；脚本、样式和 on* 属性一律丢弃。 */
+    function sanitizeMarkdownHtml(source) {
+      const allowed = new Set([
+        'p', 'br', 'hr', 'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins', 'mark',
+        'sub', 'sup', 'small', 'kbd', 'code', 'pre', 'blockquote', 'details', 'summary',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td', 'ul', 'ol', 'li', 'a', 'img', 'span',
+      ]);
+      let html = String(source)
+        .replace(/<!--[\s\S]*?-->/gu, '')
+        .replace(/<(script|style|iframe|object|embed|form|input|button|textarea)\b[\s\S]*?<\/\1\s*>/giu, '');
+      html = html.replace(/<\/?([a-z][\w-]*)([^>]*)>/giu, (full, rawTag, rawAttrs) => {
+        const tag = rawTag.toLowerCase();
+        if (!allowed.has(tag)) return escapeHtml(full);
+        if (full.startsWith('</')) return `</${tag}>`;
+        const attrs = [];
+        String(rawAttrs).replace(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gu,
+          (_, rawName, dq, sq, bare) => {
+            const name = rawName.toLowerCase();
+            const value = dq ?? sq ?? bare ?? '';
+            if (name === 'title' || name === 'class' || name === 'colspan' || name === 'rowspan') {
+              attrs.push(`${name}="${escapeHtml(value)}"`);
+            } else if (tag === 'a' && name === 'href') {
+              const url = safeUrl(value);
+              if (url) attrs.push(`href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"`);
+            } else if (tag === 'img' && name === 'src') {
+              const url = safeUrl(value, true);
+              if (url) attrs.push(`src="${escapeHtml(url)}"`);
+            } else if (tag === 'img' && name === 'alt') attrs.push(`alt="${escapeHtml(value)}"`);
+            return '';
+          });
+        return `<${tag}${attrs.length ? ` ${attrs.join(' ')}` : ''}>`;
+      });
+      return html;
+    }
+
     /**
      * 这段 TeX 是否**必须**用独立公式（display mode）渲染。
      *
@@ -820,27 +1041,54 @@ window.__ModuleLoader__.load({
         + `${escapeHtml(tex)}</code>`;
     }
 
-    function renderInline(text, katex) {
+    function renderInline(text, katex, footnoteRefs) {
       const parts = [];
-      const stashMath = (_, tex) => {
-        parts.push(tex);
+      const stash = (html) => {
+        parts.push(html);
         return `\u0000${parts.length - 1}\u0000`;
+      };
+      const stashMath = (_, tex) => {
+        return stash(renderTex(tex, katex, false));
       };
       // 同时兼容常见的 Markdown `$...$` 与 LaTeX `\(...\)` 行内分隔符。
       // 先把公式换成 NUL 占位符，避免后续 Markdown 强调语法误伤 TeX 里的 `*`。
       const withTokens = String(text)
         .replace(/\\\(([^\n]+?)\\\)/g, stashMath)
-        .replace(/\$([^$\n]+?)\$/g, stashMath);
+        .replace(/\$([^$\n]+?)\$/g, stashMath)
+        .replace(/!\[([^\]]*)\]\((\S+?)(?:\s+["']([^"']*)["'])?\)/g, (full, alt, url, title) => {
+          const safe = safeUrl(url, true);
+          return safe ? stash(`<img class="ll-md-image" src="${escapeHtml(safe)}" alt="${escapeHtml(alt)}"${title ? ` title="${escapeHtml(title)}"` : ''} loading="lazy">`) : full;
+        })
+        .replace(/\[([^\]]+)\]\((\S+?)\)/g, (full, label, url) => {
+          const safe = safeUrl(url);
+          return safe ? stash(`<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`) : full;
+        })
+        .replace(/\[\^([^\]]+)\]/g, (full, id) => {
+          if (!footnoteRefs?.has(id)) return full;
+          return stash(`<sup class="ll-footnote-ref"><a href="#ll-fn-${escapeHtml(id)}" id="ll-fnr-${escapeHtml(id)}">${footnoteRefs.get(id)}</a></sup>`);
+        });
       let out = escapeHtml(withTokens);
       out = out.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
       out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
       out = out.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
-      out = out.replace(/\u0000(\d+)\u0000/g, (_, i) => renderTex(parts[Number(i)], katex, false));
+      out = out.replace(/\u0000(\d+)\u0000/g, (_, i) => parts[Number(i)]);
       return out;
     }
 
     function renderMarkdown(src, katex) {
-      const lines = String(src).split(/\r?\n/);
+      const originalLines = String(src).split(/\r?\n/);
+      const footnotes = new Map();
+      const lines = [];
+      for (let n = 0; n < originalLines.length; n += 1) {
+        const def = /^\s*\[\^([^\]]+)\]:\s*(.*)$/u.exec(originalLines[n]);
+        if (!def) { lines.push(originalLines[n]); continue; }
+        const body = [def[2]];
+        while (n + 1 < originalLines.length && /^\s{2,}\S/u.test(originalLines[n + 1])) {
+          n += 1; body.push(originalLines[n].trim());
+        }
+        footnotes.set(def[1], body.join(' '));
+      }
+      const footnoteRefs = new Map([...footnotes.keys()].map((id, index) => [id, index + 1]));
       const html = [];
       let i = 0;
       while (i < lines.length) {
@@ -940,21 +1188,21 @@ window.__ModuleLoader__.load({
           const head = cells(line); i += 2;
           const body = [];
           while (i < lines.length && /^\s*\|/.test(lines[i])) { body.push(cells(lines[i])); i += 1; }
-          html.push('<table><thead><tr>' + head.map((c) => `<th>${renderInline(c, katex)}</th>`).join('') + '</tr></thead><tbody>'
-            + body.map((r) => '<tr>' + r.map((c) => `<td>${renderInline(c, katex)}</td>`).join('') + '</tr>').join('')
+          html.push('<table><thead><tr>' + head.map((c) => `<th>${renderInline(c, katex, footnoteRefs)}</th>`).join('') + '</tr></thead><tbody>'
+            + body.map((r) => '<tr>' + r.map((c) => `<td>${renderInline(c, katex, footnoteRefs)}</td>`).join('') + '</tr>').join('')
             + '</tbody></table>');
           continue;
         }
 
         const heading = /^(#{1,4})\s+(.*)$/.exec(line);
-        if (heading) { const l = heading[1].length; html.push(`<h${l}>${renderInline(heading[2], katex)}</h${l}>`); i += 1; continue; }
+        if (heading) { const l = heading[1].length; html.push(`<h${l}>${renderInline(heading[2], katex, footnoteRefs)}</h${l}>`); i += 1; continue; }
 
         if (/^\s*(?:---+|\*\*\*+)\s*$/.test(line)) { html.push('<hr>'); i += 1; continue; }
 
         if (/^\s*>\s?/.test(line)) {
           const buf = [];
           while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, '')); i += 1; }
-          html.push(`<blockquote>${buf.map((b) => renderInline(b, katex)).join('<br>')}</blockquote>`);
+          html.push(`<blockquote>${buf.map((b) => renderInline(b, katex, footnoteRefs)).join('<br>')}</blockquote>`);
           continue;
         }
 
@@ -965,7 +1213,14 @@ window.__ModuleLoader__.load({
             items.push(lines[i].replace(/^\s*(?:[-*+]|\d+\.)\s+/, '')); i += 1;
           }
           const tag = ordered ? 'ol' : 'ul';
-          html.push(`<${tag}>${items.map((t) => `<li>${renderInline(t, katex)}</li>`).join('')}</${tag}>`);
+          html.push(`<${tag}>${items.map((t) => `<li>${renderInline(t, katex, footnoteRefs)}</li>`).join('')}</${tag}>`);
+          continue;
+        }
+
+        if (/^\s*</u.test(line)) {
+          const buf = [];
+          while (i < lines.length && lines[i].trim() !== '') { buf.push(lines[i]); i += 1; }
+          html.push(sanitizeMarkdownHtml(buf.join('\n')));
           continue;
         }
 
@@ -981,7 +1236,12 @@ window.__ModuleLoader__.load({
          * 以前 renderMarkdown 会在这里原地打转，表现就是整个 DSH 卡死。
          */
         if (i === paragraphStart) { buf.push(lines[i]); i += 1; }
-        html.push(`<p>${renderInline(buf.join(' '), katex)}</p>`);
+        html.push(`<p>${renderInline(buf.join(' '), katex, footnoteRefs)}</p>`);
+      }
+      if (footnotes.size > 0) {
+        html.push('<section class="ll-footnotes"><hr><ol>'
+          + [...footnotes].map(([id, body]) => `<li id="ll-fn-${escapeHtml(id)}">${renderInline(body, katex, footnoteRefs)} <a class="ll-footnote-back" href="#ll-fnr-${escapeHtml(id)}" aria-label="返回正文">↩</a></li>`).join('')
+          + '</ol></section>');
       }
       return html.join('\n');
     }
@@ -995,6 +1255,82 @@ window.__ModuleLoader__.load({
      */
     const MARKDOWN_CACHE_MAX = 8;
     const markdownCache = new Map();
+    let latestLibraryIndex = null;
+    // 只常驻「最近实际打开」的一篇译文。离开文献库再回来时无需重新请求；
+    // 其他文章仍按需重新读取，但各自的浏览位置会从 localStorage 恢复。
+    let latestMarkdownDocument = null;
+
+    function cachedLatestMarkdown(paper) {
+      if (!paper?.slug || !paper.translation) return null;
+      return latestMarkdownDocument?.slug === paper.slug
+        && latestMarkdownDocument.translation === paper.translation
+        && latestMarkdownDocument.revision === (paper.translatedAt ?? paper.translation)
+        ? latestMarkdownDocument : null;
+    }
+
+    function rememberLatestMarkdown(paper, translated) {
+      if (!paper?.slug || !paper.translation) return;
+      latestMarkdownDocument = {
+        slug: paper.slug,
+        translation: paper.translation,
+        revision: paper.translatedAt ?? paper.translation,
+        translated: String(translated ?? ''),
+      };
+    }
+
+    function markdownScrollElement(root, mode) {
+      if (!root) return null;
+      if (mode === 'edit') return root.querySelector('.ll-wysiwyg') ?? root;
+      if (mode === 'source') return root.querySelector('.ll-editor') ?? root;
+      return root;
+    }
+
+    function captureMarkdownPosition(root, mode) {
+      if (!root) return null;
+      if (mode === 'preview' && !root.querySelector('.ll-md')) return null;
+      if (mode === 'edit' && !root.querySelector('.ll-wysiwyg')) return null;
+      if (mode === 'source' && !root.querySelector('.ll-editor')) return null;
+      const scroller = markdownScrollElement(root, mode);
+      if (!scroller) return null;
+      const scrollTop = Math.max(0, Number(scroller.scrollTop) || 0);
+      const maxScroll = Math.max(0, (Number(scroller.scrollHeight) || 0) - (Number(scroller.clientHeight) || 0));
+      const result = {
+        scrollTop,
+        scrollRatio: maxScroll > 0 ? scrollTop / maxScroll : 0,
+        anchorIndex: null,
+        anchorOffset: 0,
+      };
+      if (mode !== 'preview') return result;
+
+      const article = root.querySelector('.ll-md');
+      const children = article ? [...article.children] : [];
+      const viewport = scroller.getBoundingClientRect();
+      const anchorIndex = children.findIndex((node) => node.getBoundingClientRect().bottom > viewport.top + 1);
+      if (anchorIndex < 0) return result;
+      const anchor = children[anchorIndex].getBoundingClientRect();
+      result.anchorIndex = anchorIndex;
+      result.anchorOffset = viewport.top - anchor.top;
+      return result;
+    }
+
+    function restoreMarkdownPosition(root, mode, saved) {
+      const scroller = markdownScrollElement(root, mode);
+      if (!scroller || !saved) return;
+      let target = Math.max(0, Number(saved.scrollTop) || 0);
+      if (mode === 'preview' && Number.isInteger(saved.anchorIndex)) {
+        const children = [...(root.querySelector('.ll-md')?.children ?? [])];
+        const anchor = children[saved.anchorIndex];
+        if (anchor) {
+          const viewport = scroller.getBoundingClientRect();
+          const rect = anchor.getBoundingClientRect();
+          const anchorTop = scroller.scrollTop + rect.top - viewport.top;
+          target = anchorTop + (Number(saved.anchorOffset) || 0);
+        }
+      }
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      if (target > maxScroll && Number(saved.scrollRatio) > 0) target = maxScroll * saved.scrollRatio;
+      scroller.scrollTop = Math.min(maxScroll, Math.max(0, target));
+    }
 
     /** FNV-1a，32 位；只用于判断「文本变没变」，比逐字符比较便宜 */
     function hashText(value) {
@@ -1182,6 +1518,161 @@ window.__ModuleLoader__.load({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.message ?? `HTTP ${res.status}`);
       return data;
+    }
+
+    // ─────────────────── 费用与主题 ───────────────────
+
+    function loadTranslationUsage() {
+      try {
+        const value = JSON.parse(window.localStorage.getItem(TRANSLATION_USAGE_KEY) || '{}');
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      } catch { return {}; }
+    }
+
+    /**
+     * 完成后仍保留每篇最近一次的用量摘要。host 重启后内存任务列表会清空，
+     * 但用户仍应该能在文献条目下查看本地保存的费用记录。
+     */
+    function saveTranslationUsage(value) {
+      try { window.localStorage.setItem(TRANSLATION_USAGE_KEY, JSON.stringify(value)); } catch { /* 忽略 */ }
+    }
+
+    function loadOffpeakOnly() {
+      try { return window.localStorage.getItem(OFFPEAK_ONLY_KEY) === '1'; } catch { return false; }
+    }
+
+    /**
+     * 读取 DSH 当前使用的主题（dark / light）。
+     *
+     * 为什么不用 `prefers-color-scheme`：DSH 的主题是用户偏好（system/dark/light），
+     * 由启动脚本写到 `html[data-ds-theme-source]`，并在 `body` 上用
+     * `data-ds-dark-theme` 切换。只跟随系统偏好的话，用户把 DSH 切成浅色、
+     * 而 Windows 仍是深色时，面板会继续显示深色，和整页背景非常割裂。
+     * 没有 DSH 主题信号时（独立预览或其它宿主）再退回系统偏好。
+     */
+    function readHostTheme() {
+      if (typeof document === 'undefined') return 'dark';
+      const hasHostSignal = Boolean(document.documentElement?.dataset?.dsThemeSource);
+      if (hasHostSignal) {
+        return document.body?.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light';
+      }
+      try {
+        return window.matchMedia?.('(prefers-color-scheme: light)')?.matches ? 'light' : 'dark';
+      } catch { return 'dark'; }
+    }
+
+    function firstFinite(...values) {
+      for (const value of values) {
+        if (value === null || value === undefined || value === '') continue;
+        const number = Number(value);
+        if (Number.isFinite(number) && number >= 0) return number;
+      }
+      return null;
+    }
+
+    function compactNumber(value) {
+      if (!Number.isFinite(value)) return '—';
+      if (value >= 1000000) return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}m`;
+      if (value >= 1000) return `${(value / 1000).toFixed(value >= 100000 ? 0 : 1)}k`;
+      return String(Math.round(value));
+    }
+
+    /** 上海时间的工作日峰时；法定节假日最终以 host/API 返回的价格时段为准。 */
+    function isLikelyDeepSeekPeak(isoTime) {
+      try {
+        const parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: 'Asia/Shanghai', weekday: 'short', hour: '2-digit', hourCycle: 'h23',
+        }).formatToParts(isoTime ? new Date(isoTime) : new Date());
+        const part = (type) => parts.find((item) => item.type === type)?.value;
+        const weekday = part('weekday');
+        const hour = Number(part('hour'));
+        return !['Sat', 'Sun'].includes(weekday) && ((hour >= 9 && hour < 12) || (hour >= 14 && hour < 18));
+      } catch { return true; }
+    }
+
+    /**
+     * 兼容原有 job 字段、DeepSeek 原生 usage 和 Anthropic 兼容层字段。
+     * host 已计算的人民币费用优先；旧 host 则按当前 Flash/Pro 价格给出明确标注的估算。
+     */
+    function translationUsage(job) {
+      const usage = job?.usageTotal ?? job?.usage ?? job?.totals ?? {};
+      const inputDetails = usage.input_tokens_details ?? usage.prompt_tokens_details ?? {};
+      const outputDetails = usage.output_tokens_details ?? usage.completion_tokens_details ?? {};
+      const input = firstFinite(
+        job?.tokensIn, job?.inputTokens, usage.inputTokens, usage.input_tokens, usage.prompt_tokens,
+      ) ?? 0;
+      const output = firstFinite(
+        job?.tokensOut, job?.outputTokens, usage.outputTokens, usage.output_tokens, usage.completion_tokens,
+      ) ?? 0;
+
+      const nativeHit = firstFinite(
+        job?.cacheHitTokens, usage.cacheHitTokens, usage.prompt_cache_hit_tokens,
+        inputDetails.prompt_cache_hit_tokens, inputDetails.cached_tokens,
+      );
+      const anthropicHit = firstFinite(job?.cacheReadTokens, usage.cache_read_input_tokens);
+      const cacheHit = nativeHit ?? anthropicHit;
+      const explicitMiss = firstFinite(
+        job?.cacheMissTokens, usage.cacheMissTokens, usage.prompt_cache_miss_tokens,
+        inputDetails.prompt_cache_miss_tokens, usage.cache_creation_input_tokens,
+      );
+      // Anthropic usage 的 input_tokens 是未命中部分；DeepSeek 原生 prompt_tokens 则是总数。
+      const cacheMiss = explicitMiss ?? (anthropicHit !== null
+        ? input
+        : (nativeHit !== null ? Math.max(0, input - nativeHit) : null));
+
+      const reasoningRaw = firstFinite(
+        job?.reasoningTokens, job?.thinkingTokens, usage.reasoningTokens, usage.thinkingTokens,
+        usage.reasoning_tokens,
+        outputDetails.reasoning_tokens, outputDetails.thinking_tokens,
+      );
+      const reasoningDisabled = job?.reasoningEffort === 'none'
+        || job?.thinkingEnabled === false || job?.thinking === 'disabled';
+      const reasoning = reasoningRaw ?? (reasoningDisabled ? 0 : null);
+      const visibleRaw = firstFinite(
+        job?.visibleOutputTokens, job?.visibleTokens, usage.visibleOutputTokens, usage.visible_output_tokens,
+        outputDetails.visible_tokens,
+      );
+      const visible = visibleRaw ?? (reasoning !== null ? Math.max(0, output - reasoning) : output);
+      const retries = firstFinite(job?.retryCount, job?.retries, usage.retry_count) ?? 0;
+      const thinkingChars = firstFinite(job?.thinkingChars, usage.thinking_chars);
+
+      const estimatedCost = firstFinite(
+        job?.estimatedCostCny, usage.estimatedCostCny, usage.estimated_cost_cny,
+      );
+      const providedCost = estimatedCost ?? firstFinite(
+        job?.costCny, job?.cost?.cny, usage.costCny, usage.cost_cny,
+      );
+      let costCny = providedCost;
+      let costEstimated = estimatedCost !== null || job?.costEstimated === true;
+      let pricingPeriod = job?.pricingPeriod ?? job?.pricePeriod ?? job?.cost?.period ?? null;
+      if (costCny === null && (input > 0 || output > 0)) {
+        const offpeak = pricingPeriod === 'offpeak' || pricingPeriod === 'off-peak'
+          || job?.offpeak === true || job?.offPeak === true
+          || (pricingPeriod !== 'peak' && !isLikelyDeepSeekPeak(job?.startedAt));
+        pricingPeriod = offpeak ? 'offpeak' : 'peak';
+        const pro = String(job?.model ?? '').toLowerCase().includes('pro');
+        const price = pro
+          ? (offpeak ? { hit: 0.15, miss: 4.5, output: 13.5 } : { hit: 0.3, miss: 9, output: 27 })
+          : (offpeak ? { hit: 0.02, miss: 1, output: 4 } : { hit: 0.04, miss: 2, output: 8 });
+        // 没有缓存明细时一律按未命中估算，不把费用低估。
+        const hitForCost = cacheHit ?? 0;
+        const missForCost = cacheMiss ?? input;
+        costCny = ((hitForCost * price.hit) + (missForCost * price.miss) + (output * price.output)) / 1000000;
+        costEstimated = true;
+      }
+
+      return {
+        input, output, cacheHit, cacheMiss, reasoning, visible,
+        visibleKnown: visibleRaw !== null || reasoning !== null,
+        retries, thinkingChars, costCny, costEstimated, pricingPeriod,
+      };
+    }
+
+    function formatCny(value) {
+      if (!Number.isFinite(value)) return '—';
+      if (value < 0.01) return value.toFixed(4);
+      if (value < 1) return value.toFixed(3);
+      return value.toFixed(2);
     }
 
     // ─────────────────── 拖动调宽 ───────────────────
@@ -1474,9 +1965,14 @@ window.__ModuleLoader__.load({
      *
      * 直连任务能给出「第 3 / 12 块」这种真实进度；会话路径只能给出阶段。
      */
+    /**
+     * 翻译进度显示。优先显示**直连 API 任务**（`translate-job`）的真实进度与费用，
+     * 没有直连任务时退回旧的 agent 会话进度。
+     */
     function TranslateProgress({ paper, progress, job, onOpen }) {
       if (job) {
         const phase = job.phase;
+        const metrics = translationUsage(job);
         const label = {
           queued: '排队中',
           running: job.stage || `翻译中 ${job.percent ?? 0}%`,
@@ -1484,32 +1980,73 @@ window.__ModuleLoader__.load({
           failed: `翻译失败：${job.error ?? '未知原因'}`,
         }[phase] ?? phase;
         const cls = `ll-progress ll-progress-${phase === 'done' ? 'done' : phase === 'failed' ? 'failed' : 'running'}`;
-        return h('span', {
-          className: cls,
-          title: [
-            `任务 ${job.jobId}`,
-            `模型 ${job.model}`,
-            job.chunkTotal ? `块 ${job.chunkIndex}/${job.chunkTotal}` : null,
-            `入 ${job.charsIn} 字 / 出 ${job.charsOut} 字`,
-            job.tokensOut ? `tokens in=${job.tokensIn} out=${job.tokensOut}` : null,
-            job.outputPath ? `输出 ${job.outputPath}` : null,
-            job.warning ? `⚠ ${job.warning}` : null,
-          ].filter(Boolean).join('\n'),
-        }, [
-          h('span', { className: 'll-progress-bar', key: 'bar' }, h('span', {
-            className: 'll-progress-fill',
-            style: {
-              width: phase === 'done' ? '100%'
-                : phase === 'failed' ? '100%'
-                  : `${Math.max(4, job.percent ?? 0)}%`,
-            },
-          })),
-          h('span', { className: 'll-progress-text', key: 't' }, label),
-          job.phase === 'done' && onOpen ? h('button', {
-            key: 'open', className: 'll-btn ll-btn-xs', style: { marginLeft: '4px' },
-            title: '选中这篇以查看译文',
-            onClick: (e) => { e.stopPropagation(); onOpen(); },
-          }, '查看') : null,
+        const metricTitle = [
+          `输入 token：${metrics.input.toLocaleString()}`,
+          `缓存命中：${metrics.cacheHit === null ? '后端未返回' : metrics.cacheHit.toLocaleString()}`,
+          `缓存未命中：${metrics.cacheMiss === null ? '后端未返回' : metrics.cacheMiss.toLocaleString()}`,
+          `${metrics.visibleKnown ? '可见译文' : '输出'} token：${metrics.visible.toLocaleString()}`,
+          `thinking/reasoning token：${metrics.reasoning === null ? '后端未返回' : metrics.reasoning.toLocaleString()}`,
+          metrics.thinkingChars !== null && metrics.reasoning === null
+            ? `thinking 字符：${metrics.thinkingChars.toLocaleString()}` : null,
+          `重试：${metrics.retries} 次`,
+          metrics.costCny !== null
+            ? `${metrics.costEstimated ? '预估' : '计费'}：¥${formatCny(metrics.costCny)}${metrics.pricingPeriod ? `（${metrics.pricingPeriod === 'peak' ? '峰时' : '闲时'}）` : ''}`
+            : null,
+          // 本地预处理省下的输入：参考文献、元数据、重复页眉不再发给模型
+          job.preprocessing?.referenceChars
+            ? `参考文献本地保留：${job.preprocessing.referenceChars.toLocaleString()} 字符`
+            : null,
+          job.preprocessing?.metadataChars
+            ? `出版元数据本地解析：${job.preprocessing.metadataChars.toLocaleString()} 字符`
+            : null,
+          job.preprocessing?.protectedItems
+            ? `受保护的公式/引用/DOI/URL：${job.preprocessing.protectedItems} 处`
+            : null,
+          job.preprocessing?.removedFurnitureLines
+            ? `去除重复页眉页脚：${job.preprocessing.removedFurnitureLines} 行`
+            : null,
+          `本地分块缓存复用：${job.localCacheHits ?? 0} 块`,
+          job.droppedFormulas
+            ? `未保留的公式残片：${job.droppedFormulas} 处（抽取碎片，已按警告记录）`
+            : null,
+        ].filter(Boolean);
+        const title = [
+          `任务 ${job.jobId}`,
+          `模型 ${job.model}`,
+          job.chunkTotal ? `块 ${job.chunkIndex}/${job.chunkTotal}` : null,
+          `入 ${job.charsIn} 字 / 出 ${job.charsOut} 字`,
+          ...metricTitle,
+          job.outputPath ? `输出 ${job.outputPath}` : null,
+          job.warning ? `⚠ ${job.warning}` : null,
+        ].filter(Boolean).join('\n');
+        const hasUsage = metrics.input > 0 || metrics.output > 0 || metrics.retries > 0 || metrics.costCny !== null;
+        const usageLabel = [
+          metrics.costCny !== null ? `${metrics.costEstimated ? '约' : ''}¥${formatCny(metrics.costCny)}` : '¥—',
+          `入 ${compactNumber(metrics.input)}`,
+          `缓 ${compactNumber(metrics.cacheHit)}/未 ${compactNumber(metrics.cacheMiss)}`,
+          `${metrics.visibleKnown ? '译' : '出'} ${compactNumber(metrics.visible)}/思 ${compactNumber(metrics.reasoning)}`,
+          `重 ${metrics.retries}`,
+          job.localCacheHits ? `复用 ${job.localCacheHits}` : null,
+        ].filter(Boolean).join(' · ');
+
+        return h('span', { className: 'll-translate-status', title }, [
+          h('span', { className: cls, key: 'progress' }, [
+            h('span', { className: 'll-progress-bar', key: 'bar' }, h('span', {
+              className: 'll-progress-fill',
+              style: {
+                width: phase === 'done' ? '100%'
+                  : phase === 'failed' ? '100%'
+                    : `${Math.max(4, job.percent ?? 0)}%`,
+              },
+            })),
+            h('span', { className: 'll-progress-text', key: 't' }, label),
+            job.phase === 'done' && onOpen ? h('button', {
+              key: 'open', className: 'll-btn ll-btn-xs', style: { marginLeft: '4px' },
+              title: '选中这篇以查看译文',
+              onClick: (e) => { e.stopPropagation(); onOpen(); },
+            }, '查看') : null,
+          ]),
+          hasUsage ? h('span', { className: 'll-usage', key: 'usage' }, usageLabel) : null,
         ]);
       }
 
@@ -1930,11 +2467,14 @@ window.__ModuleLoader__.load({
      * 页码变化时不会把 200 多页全部重渲染一遍。
      */
     const PdfPage = React.memo(function PdfPage({
-      doc, pageNumber, width, ratio, onMeasure, registerRef, rootRef,
+      doc, pdfjs, pageNumber, width, ratio, onMeasure, registerRef, rootRef,
+      searchQuery, searchPage,
     }) {
       const wrapRef = React.useRef(null);
       const canvasRef = React.useRef(null);
+      const textRef = React.useRef(null);
       const renderTaskRef = React.useRef(null);
+      const textTaskRef = React.useRef(null);
       const [active, setActive] = React.useState(pageNumber === 1);
       const [rendered, setRendered] = React.useState(false);
       const [error, setError] = React.useState(null);
@@ -2003,6 +2543,24 @@ window.__ModuleLoader__.load({
             renderTaskRef.current = renderTask;
             await renderTask.promise;
             if (renderTaskRef.current === renderTask) renderTaskRef.current = null;
+            const textLayer = textRef.current;
+            if (textLayer && pdfjs?.TextLayer) {
+              try {
+                textLayer.replaceChildren();
+                textLayer.style.setProperty('--scale-factor', String(scale));
+                const textTask = new pdfjs.TextLayer({
+                  textContentSource: pageObj.streamTextContent({ includeMarkedContent: true }),
+                  container: textLayer,
+                  viewport,
+                });
+                textTaskRef.current = textTask;
+                await textTask.render();
+                if (textTaskRef.current === textTask) textTaskRef.current = null;
+              } catch (textErr) {
+                // 没有文字层的扫描件仍应正常显示 canvas；只失去选择与搜索高亮。
+                if (textErr?.name !== 'AbortException') console.warn('PDF 文字层渲染失败', textErr);
+              }
+            }
             if (!cancelled) { setRendered(true); setError(null); }
           } catch (err) {
             if (!cancelled && err?.name !== 'RenderingCancelledException') {
@@ -2014,8 +2572,19 @@ window.__ModuleLoader__.load({
         return () => {
           cancelled = true;
           try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
+          try { textTaskRef.current?.cancel(); } catch { /* ignore */ }
         };
-      }, [active, doc, pageNumber, width, onMeasure]);
+      }, [active, doc, pdfjs, pageNumber, width, onMeasure]);
+
+      React.useEffect(() => {
+        const layer = textRef.current;
+        if (!layer) return;
+        const needle = String(searchQuery ?? '').trim().toLocaleLowerCase();
+        for (const span of layer.querySelectorAll('span')) {
+          span.classList.toggle('ll-pdf-search-hit', pageNumber === searchPage
+            && !!needle && span.textContent.toLocaleLowerCase().includes(needle));
+        }
+      }, [rendered, searchQuery, searchPage, pageNumber]);
 
       const height = Math.max(24, Math.round(width * (ratio || PDF_PAGE_DEFAULT_RATIO)));
       return h('div', {
@@ -2026,6 +2595,7 @@ window.__ModuleLoader__.load({
         style: { width: `${Math.round(width)}px`, height: `${height}px` },
       }, [
         h('canvas', { key: 'c', ref: canvasRef, className: 'll-pdf-canvas' }),
+        h('div', { key: 't', ref: textRef, className: 'll-pdf-text-layer textLayer' }),
         !rendered
           ? h('span', { key: 'n', className: 'll-pdf-page-no' },
             error ? `第 ${pageNumber} 页渲染失败` : `第 ${pageNumber} 页`)
@@ -2040,8 +2610,9 @@ window.__ModuleLoader__.load({
      * 直接滚 `.ll-pdf-body`，不再需要点「上一页/下一页」。工具条的页码会
      * 随滚动实时更新；输入页码/点翻页按钮则会平滑滚到对应页。
      */
-    function PdfViewer({ address, title, switching }) {
+    function PdfViewer({ address, title, switching, documentKey }) {
       const [doc, setDoc] = React.useState(null);
+      const [pdfjs, setPdfjs] = React.useState(null);
       const [numPages, setNumPages] = React.useState(0);
       const [page, setPage] = React.useState(1);
       const [zoom, setZoom] = React.useState(1);
@@ -2053,9 +2624,18 @@ window.__ModuleLoader__.load({
       const [pageInput, setPageInput] = React.useState('1');
       const [baseRatio, setBaseRatio] = React.useState(PDF_PAGE_DEFAULT_RATIO);
       const [ratios, setRatios] = React.useState({});
+      const [searchInput, setSearchInput] = React.useState('');
+      const [searchQuery, setSearchQuery] = React.useState('');
+      const [searchResults, setSearchResults] = React.useState([]);
+      const [searchAt, setSearchAt] = React.useState(-1);
+      const [searching, setSearching] = React.useState(false);
+      const textCacheRef = React.useRef(new Map());
       const scrollRef = React.useRef(null);
       const pageRefs = React.useRef(new Map());
       const pageRef = React.useRef(1);
+      const zoomRef = React.useRef(zoom);
+      const restoreRef = React.useRef(null);
+      const persistTimerRef = React.useRef(null);
 
       // 容器宽度（拖动分隔条/窗口缩放都会触发重新适配）
       React.useEffect(() => {
@@ -2079,12 +2659,19 @@ window.__ModuleLoader__.load({
       // 换文章：销毁旧文档，加载新文档
       React.useEffect(() => {
         setFallback(false);
-        setPage(1);
-        setPageInput('1');
-        setZoom(1);
+        setPdfjs(null);
+        const saved = documentKey ? loadReadingMemory().pdfs?.[documentKey] : null;
+        const savedPage = Math.max(1, Math.round(Number(saved?.page) || 1));
+        const savedZoom = Math.min(3, Math.max(0.4, Number(saved?.zoom) || 1));
+        restoreRef.current = saved ? { page: savedPage, offset: Number(saved.offset) || 0 } : null;
+        setPage(savedPage);
+        setPageInput(String(savedPage));
+        setZoom(savedZoom);
         setRatios({});
         setBaseRatio(PDF_PAGE_DEFAULT_RATIO);
-        pageRef.current = 1;
+        setSearchQuery(''); setSearchResults([]); setSearchAt(-1); setSearching(false);
+        textCacheRef.current.clear();
+        pageRef.current = savedPage;
         pageRefs.current.clear();
         if (!address) {
           setDoc(null); setNumPages(0); setPhase('idle'); setError(null); setProgress(null);
@@ -2120,11 +2707,12 @@ window.__ModuleLoader__.load({
               return;
             }
             setDoc(loaded);
+            setPdfjs(pdfjs);
             setNumPages(loaded.numPages || 0);
             setPhase('ready');
             setProgress(null);
             requestAnimationFrame(() => {
-              if (scrollRef.current) scrollRef.current.scrollTop = 0;
+              if (scrollRef.current && !restoreRef.current) scrollRef.current.scrollTop = 0;
             });
           } catch (err) {
             if (!cancelled) {
@@ -2140,7 +2728,7 @@ window.__ModuleLoader__.load({
           // 别调用 doc.destroy()（PDF.js 6 已没有这个方法）。
           try { task?.destroy(); } catch { /* ignore */ }
         };
-      }, [address]);
+      }, [address, documentKey]);
 
       const setCurrentPage = React.useCallback((n) => {
         pageRef.current = n;
@@ -2170,7 +2758,17 @@ window.__ModuleLoader__.load({
           const pageEl = node?.closest?.('[data-pdf-page]');
           if (pageEl) {
             const n = Number(pageEl.getAttribute('data-pdf-page'));
-            if (Number.isFinite(n) && n >= 1 && n !== pageRef.current) setCurrentPage(n);
+            if (Number.isFinite(n) && n >= 1) {
+              if (n !== pageRef.current) setCurrentPage(n);
+              if (documentKey) {
+                if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+                const offset = Math.min(1, Math.max(0,
+                  (el.scrollTop - pageEl.offsetTop) / Math.max(1, pageEl.offsetHeight)));
+                persistTimerRef.current = setTimeout(() => {
+                  savePdfReadingState(documentKey, { page: n, offset, zoom: zoomRef.current });
+                }, 180);
+              }
+            }
           }
         };
         const onScroll = () => { if (!raf) raf = requestAnimationFrame(update); };
@@ -2180,7 +2778,7 @@ window.__ModuleLoader__.load({
           el.removeEventListener('scroll', onScroll);
           if (raf) cancelAnimationFrame(raf);
         };
-      }, [doc, numPages, setCurrentPage]);
+      }, [doc, numPages, setCurrentPage, documentKey]);
 
       React.useEffect(() => { setPageInput(String(page)); }, [page]);
 
@@ -2213,14 +2811,58 @@ window.__ModuleLoader__.load({
         goTo(n, 'smooth');
       };
 
+      const runSearch = React.useCallback(async (rawQuery) => {
+        const query = String(rawQuery ?? '').trim();
+        setSearchQuery(query); setSearchResults([]); setSearchAt(-1);
+        if (!doc || !query) return;
+        setSearching(true);
+        const needle = query.toLocaleLowerCase();
+        const found = [];
+        try {
+          for (let n = 1; n <= doc.numPages; n += 1) {
+            let text = textCacheRef.current.get(n);
+            if (text == null) {
+              const pageObj = await doc.getPage(n);
+              const content = await pageObj.getTextContent();
+              text = content.items.map((item) => item.str ?? '').join(' ');
+              textCacheRef.current.set(n, text);
+            }
+            if (text.toLocaleLowerCase().includes(needle)) found.push(n);
+          }
+          setSearchResults(found);
+          if (found.length > 0) { setSearchAt(0); goTo(found[0]); }
+        } finally { setSearching(false); }
+      }, [doc, goTo]);
+
+      const stepSearch = (delta) => {
+        if (searchResults.length === 0) { runSearch(searchInput); return; }
+        const next = (searchAt + delta + searchResults.length) % searchResults.length;
+        setSearchAt(next); goTo(searchResults[next]);
+      };
+
+      const printPdf = () => {
+        if (!address) return;
+        const frame = document.createElement('iframe');
+        frame.style.position = 'fixed'; frame.style.width = '1px'; frame.style.height = '1px';
+        frame.style.opacity = '0'; frame.style.pointerEvents = 'none'; frame.src = address;
+        frame.onload = () => {
+          try { frame.contentWindow?.focus(); frame.contentWindow?.print(); } catch { window.open(address, '_blank', 'noopener'); }
+          setTimeout(() => frame.remove(), 60000);
+        };
+        document.body.appendChild(frame);
+      };
+
       // 缩放后停留在当前页，而不是跳回第一页
-      const zoomRef = React.useRef(zoom);
       React.useEffect(() => {
         if (zoomRef.current === zoom) return undefined;
         zoomRef.current = zoom;
+        if (documentKey) {
+          const old = loadReadingMemory().pdfs?.[documentKey] ?? {};
+          savePdfReadingState(documentKey, { page: pageRef.current, offset: old.offset, zoom });
+        }
         const raf = requestAnimationFrame(() => scrollToPage(pageRef.current, 'auto'));
         return () => cancelAnimationFrame(raf);
-      }, [zoom, scrollToPage]);
+      }, [zoom, scrollToPage, documentKey]);
 
       // body 已经去掉左右 padding：100% 时页面正好铺满栏宽，不再有四周黑边
       const pageWidth = width > 0 ? Math.round(Math.max(240, width) * zoom) : 0;
@@ -2228,6 +2870,29 @@ window.__ModuleLoader__.load({
         () => Array.from({ length: numPages }, (_, i) => i + 1),
         [numPages],
       );
+
+      // 文档与占位尺寸都准备好后，恢复到该文献上次阅读页及页内偏移。
+      React.useEffect(() => {
+        const saved = restoreRef.current;
+        if (!doc || pageWidth <= 0 || !saved) return undefined;
+        let raf2 = 0;
+        const raf1 = requestAnimationFrame(() => {
+          raf2 = requestAnimationFrame(() => {
+            const el = scrollRef.current;
+            const node = pageRefs.current.get(Math.min(numPages || 1, saved.page));
+            if (el && node) {
+              el.scrollTop = Math.max(0, node.offsetTop + saved.offset * node.offsetHeight);
+              setCurrentPage(Math.min(numPages || 1, saved.page));
+              restoreRef.current = null;
+            }
+          });
+        });
+        return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
+      }, [doc, numPages, pageWidth, setCurrentPage]);
+
+      React.useEffect(() => () => {
+        if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+      }, []);
 
       const toolbar = h('div', { className: 'll-pane-tools ll-pdf-tools' }, [
         h('button', {
@@ -2249,6 +2914,18 @@ window.__ModuleLoader__.load({
           title: '下一页', 'aria-label': '下一页', onClick: () => goTo(pageRef.current + 1),
         }, '›'),
         h('span', { key: 'sp', className: 'll-spacer' }),
+        h('input', {
+          key: 'search', className: 'll-input ll-pdf-search', value: searchInput,
+          disabled: !doc || searching, placeholder: searching ? '搜索中…' : '搜索原文',
+          'aria-label': '搜索 PDF 原文',
+          onChange: (e) => setSearchInput(e.target.value),
+          onKeyDown: (e) => { if (e.key === 'Enter') { e.preventDefault(); runSearch(searchInput); } },
+        }),
+        h('button', { key: 'sf', className: 'll-icon-btn', disabled: !doc || searching, title: '查找', onClick: () => runSearch(searchInput) }, '⌕'),
+        h('button', { key: 'sprev', className: 'll-icon-btn', disabled: searchResults.length === 0, title: '上一个匹配', onClick: () => stepSearch(-1) }, '↑'),
+        h('button', { key: 'snext', className: 'll-icon-btn', disabled: searchResults.length === 0, title: '下一个匹配', onClick: () => stepSearch(1) }, '↓'),
+        h('span', { key: 'sc', className: 'll-pdf-search-count' }, searching ? '…' : (searchQuery ? `${Math.max(0, searchAt + 1)}/${searchResults.length}` : '')),
+        h('button', { key: 'print', className: 'll-btn ll-btn-xs', disabled: !doc, title: '打印原文', onClick: printPdf }, '打印'),
         h('button', {
           key: 'zo', className: 'll-icon-btn', disabled: !doc, title: '缩小', 'aria-label': '缩小',
           onClick: () => setZoom((z) => Math.max(0.4, Math.round((z - 0.15) * 100) / 100)),
@@ -2292,12 +2969,15 @@ window.__ModuleLoader__.load({
               }, pages.map((n) => h(PdfPage, {
                 key: n,
                 doc,
+                pdfjs,
                 pageNumber: n,
                 width: pageWidth,
                 ratio: ratios[n] ?? baseRatio,
                 onMeasure: handleMeasure,
                 registerRef: registerPage,
                 rootRef: scrollRef,
+                searchQuery,
+                searchPage: searchResults[searchAt],
               })));
 
       return h('div', { className: 'll-pdf-viewer' }, [
@@ -2709,11 +3389,25 @@ window.__ModuleLoader__.load({
       const [fontPercent, setFontPercent] = React.useState(loadFontPercent);
       const containerRef = React.useRef(null);
       const dragRef = React.useRef(null);
+      const initialReadingRef = React.useRef(loadReadingMemory());
+      const initialSlug = initialReadingRef.current.lastSlug;
+      const initialPaper = latestLibraryIndex?.papers?.find((paper) => paper.slug === initialSlug) ?? null;
+      const initialCachedDoc = cachedLatestMarkdown(initialPaper);
+      const markdownPaneRef = React.useRef(null);
+      const markdownReadingRef = React.useRef({ slug: initialSlug, mode: 'preview', ready: false });
+      const markdownSaveTimerRef = React.useRef(null);
 
-      const [state, setState] = React.useState({ phase: 'loading', index: null, error: null, selected: null });
-      const [katex, setKatex] = React.useState(null);
+      const [state, setState] = React.useState({
+        phase: latestLibraryIndex ? 'ready' : 'loading',
+        index: latestLibraryIndex,
+        error: null,
+        selected: initialSlug,
+      });
+      const [katex, setKatex] = React.useState(() => window.katex ?? null);
       // doc.slug 记录「这份译文属于哪篇」，避免切换瞬间把上一篇的内容显示到新标题下
-      const [doc, setDoc] = React.useState({ phase: 'idle', slug: null, translated: null, error: null });
+      const [doc, setDoc] = React.useState(initialCachedDoc
+        ? { phase: 'ready', slug: initialCachedDoc.slug, translated: initialCachedDoc.translated, error: null }
+        : { phase: 'idle', slug: initialSlug, translated: null, error: null });
       const [scanDir, setScanDir] = React.useState('library/papers');
       const [selectedFolder, setSelectedFolder] = React.useState(null);
       const [busy, setBusy] = React.useState(null);
@@ -2743,11 +3437,96 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = React.useState({});
       // 直连 DeepSeek API 的翻译任务与配置
       const [jobs, setJobs] = React.useState([]);
+      const [jobHistory, setJobHistory] = React.useState(loadTranslationUsage);
+      const [offpeakOnly, setOffpeakOnly] = React.useState(loadOffpeakOnly);
+      const [jobPollEpoch, setJobPollEpoch] = React.useState(0);
+      const [batchState, setBatchState] = React.useState({
+        phase: 'idle', current: 0, total: 0, completed: 0, failed: 0, title: '',
+      });
+      const batchCancelRef = React.useRef(false);
+      const notifiedDone = React.useRef(new Set());
       const [apiConfig, setApiConfig] = React.useState(null);
       const [configOpen, setConfigOpen] = React.useState(false);
       const [updateOpen, setUpdateOpen] = React.useState(false);
       // 插件版本（由 host 的 /version 从 package.json 读取）
       const [versionInfo, setVersionInfo] = React.useState(null);
+      // 跟随 DSH 的真实主题（body[data-ds-dark-theme]），而不是系统偏好
+      const [themeMode, setThemeMode] = React.useState(readHostTheme);
+      React.useEffect(() => {
+        const update = () => setThemeMode(readHostTheme());
+        update();
+        const body = document.body;
+        const observer = typeof MutationObserver === 'function' && body
+          ? new MutationObserver(update)
+          : null;
+        observer?.observe(body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
+        const media = typeof window !== 'undefined' && window.matchMedia
+          ? window.matchMedia('(prefers-color-scheme: dark)')
+          : null;
+        media?.addEventListener?.('change', update);
+        return () => {
+          observer?.disconnect();
+          media?.removeEventListener?.('change', update);
+        };
+      }, []);
+
+      /**
+       * 把已结束任务的关键指标留在 localStorage 里。
+       * host 重启后内存任务表会清空，但用户仍应能在条目下看到上一次性价记录。
+       */
+      function rememberFinishedJobs(incoming) {
+        const finished = (incoming ?? []).filter((j) => j.phase === 'done' || j.phase === 'failed');
+        if (finished.length === 0) return;
+        setJobHistory((previous) => {
+          const next = { ...previous };
+          for (const job of finished) {
+            if (!job?.slug) continue;
+            next[job.slug] = { ...job, savedAt: new Date().toISOString() };
+          }
+          return next;
+        });
+      }
+
+      function replaceJobs(incoming) {
+        setJobs(incoming ?? []);
+        rememberFinishedJobs(incoming);
+      }
+
+      function upsertJob(incoming) {
+        if (!incoming?.jobId) return;
+        setJobs((previous) => {
+          const rest = previous.filter((j) => j.jobId !== incoming.jobId);
+          return [incoming, ...rest].sort((a, b) => (
+            String(b.startedAt ?? b.updatedAt ?? '').localeCompare(String(a.startedAt ?? a.updatedAt ?? ''))
+          ));
+        });
+        if (incoming.phase === 'done' || incoming.phase === 'failed') {
+          rememberFinishedJobs([incoming]);
+        }
+      }
+
+      // 用量历史变化即落盘：重启 host / 卸下面板后仍能看到上一次的费用
+      React.useEffect(() => { saveTranslationUsage(jobHistory); }, [jobHistory]);
+
+      const persistCurrentMarkdown = React.useCallback((slug, readingMode) => {
+        const current = markdownReadingRef.current;
+        const targetSlug = slug ?? current.slug;
+        const targetMode = readingMode ?? current.mode;
+        if (!targetSlug || !current.ready) return;
+        if (markdownSaveTimerRef.current) {
+          clearTimeout(markdownSaveTimerRef.current);
+          markdownSaveTimerRef.current = null;
+        }
+        const position = captureMarkdownPosition(markdownPaneRef.current, targetMode);
+        if (position) saveMarkdownReadingState(targetSlug, targetMode, position);
+      }, []);
+
+      const selectPaper = React.useCallback((slug) => {
+        if (!slug) return;
+        // 点击发生时旧文章的 DOM 仍在，先同步落盘，避免切换占位页覆盖精确位置。
+        persistCurrentMarkdown();
+        setState((s) => ({ ...s, selected: slug }));
+      }, [persistCurrentMarkdown]);
 
       const toggleCollapse = React.useCallback((path) => {
         setCollapsed((prev) => {
@@ -2765,6 +3544,13 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         try { window.localStorage.setItem(FONT_PERCENT_KEY, String(fontPercent)); } catch { /* 忽略 */ }
       }, [fontPercent]);
+
+      React.useEffect(() => {
+        try { window.localStorage.setItem(OFFPEAK_ONLY_KEY, offpeakOnly ? '1' : '0'); } catch { /* 忽略 */ }
+      }, [offpeakOnly]);
+
+      // 面板卸载时停止继续提交批量队列（已提交的后台任务不受影响）
+      React.useEffect(() => () => { batchCancelRef.current = true; }, []);
 
       // Ctrl/Cmd + 放大，Ctrl/Cmd - 缩小，Ctrl/Cmd 0 复位。
       // 用 capture 抢在浏览器页面缩放/DSH 全局快捷键之前处理。
@@ -2793,14 +3579,21 @@ window.__ModuleLoader__.load({
         (async () => {
           try {
             const index = await fetchIndex(ac.signal);
+            latestLibraryIndex = index;
             setState((s) => ({
               phase: 'ready', index, error: null,
               selected: s.selected && index.papers?.some((p) => p.slug === s.selected)
                 ? s.selected
-                : (index.papers?.[0]?.slug ?? null),
+                : (() => {
+                  const remembered = loadReadingMemory().lastSlug;
+                  return index.papers?.some((p) => p.slug === remembered)
+                    ? remembered : (index.papers?.[0]?.slug ?? null);
+                })(),
             }));
           } catch (err) {
-            setState({ phase: 'error', index: null, error: String(err?.message ?? err), selected: null });
+            if (!latestLibraryIndex) {
+              setState({ phase: 'error', index: null, error: String(err?.message ?? err), selected: null });
+            }
           }
         })();
         return () => ac.abort();
@@ -2808,6 +3601,11 @@ window.__ModuleLoader__.load({
 
       const papers = state.index?.papers ?? [];
       const selected = papers.find((p) => p.slug === state.selected) ?? null;
+
+      React.useEffect(() => {
+        if (!state.selected) return;
+        updateReadingMemory((memory) => ({ ...memory, lastSlug: state.selected }));
+      }, [state.selected]);
 
       /*
        * 选中项立刻更新（侧栏高亮/标题不等加载），但**内容**等停稳后再换：
@@ -2829,12 +3627,20 @@ window.__ModuleLoader__.load({
           setDoc({ phase: 'idle', slug, translated: null, error: null });
           return undefined;
         }
+        const cached = cachedLatestMarkdown(activePaper);
+        if (cached) {
+          setDoc({ phase: 'ready', slug, translated: cached.translated, error: null });
+          return undefined;
+        }
         const ac = new AbortController();
         setDoc({ phase: 'loading', slug, translated: null, error: null });
         (async () => {
           try {
             const text = await fetchText(activePaper.translation, ac.signal);
-            if (!ac.signal.aborted) setDoc({ phase: 'ready', slug, translated: text, error: null });
+            if (!ac.signal.aborted) {
+              rememberLatestMarkdown(activePaper, text);
+              setDoc({ phase: 'ready', slug, translated: text, error: null });
+            }
           } catch (err) {
             if (!ac.signal.aborted) setDoc({ phase: 'error', slug, translated: null, error: String(err?.message ?? err) });
           }
@@ -2875,10 +3681,56 @@ window.__ModuleLoader__.load({
         else { setText(''); setDirty(false); setCopied(false); }
       }, [doc.phase, doc.translated]);
       React.useEffect(() => {
-        setMode('preview');
+        const rememberedMode = loadReadingMemory().markdowns?.[selected?.slug]?.mode;
+        setMode(['preview', 'source', 'edit'].includes(rememberedMode) ? rememberedMode : 'preview');
         setMetaOpen(false);
         setDetailsOpen(false);
       }, [selected?.slug]);
+
+      // Markdown 阅读位置：预览用“可见块 + 块内偏移”精确定位，源码/编辑模式保存自身滚动条。
+      React.useEffect(() => {
+        markdownReadingRef.current = { slug: activeSlug, mode, ready: docReady };
+        if (!activeSlug || !docReady || !markdownPaneRef.current) return undefined;
+
+        const root = markdownPaneRef.current;
+        const scroller = markdownScrollElement(root, mode);
+        if (!scroller) return undefined;
+        const saved = markdownReadingState(activeSlug, mode);
+        let innerFrame = null;
+        const outerFrame = requestAnimationFrame(() => {
+          innerFrame = requestAnimationFrame(() => restoreMarkdownPosition(root, mode, saved));
+        });
+
+        const onScroll = () => {
+          if (markdownSaveTimerRef.current) clearTimeout(markdownSaveTimerRef.current);
+          markdownSaveTimerRef.current = setTimeout(() => {
+            persistCurrentMarkdown(activeSlug, mode);
+          }, 160);
+        };
+        scroller.addEventListener('scroll', onScroll, { passive: true });
+        return () => {
+          cancelAnimationFrame(outerFrame);
+          if (innerFrame !== null) cancelAnimationFrame(innerFrame);
+          scroller.removeEventListener('scroll', onScroll);
+          if (markdownSaveTimerRef.current) {
+            clearTimeout(markdownSaveTimerRef.current);
+            markdownSaveTimerRef.current = null;
+          }
+          const position = captureMarkdownPosition(root, mode);
+          if (position) saveMarkdownReadingState(activeSlug, mode, position);
+        };
+      }, [activeSlug, docReady, mode, katex, persistCurrentMarkdown]);
+
+      React.useEffect(() => {
+        const flush = () => persistCurrentMarkdown();
+        window.addEventListener('pagehide', flush);
+        window.addEventListener('beforeunload', flush);
+        return () => {
+          flush();
+          window.removeEventListener('pagehide', flush);
+          window.removeEventListener('beforeunload', flush);
+        };
+      }, [persistCurrentMarkdown]);
 
       // 拖动
       const width = () => containerRef.current?.getBoundingClientRect().width ?? 1000;
@@ -2903,6 +3755,7 @@ window.__ModuleLoader__.load({
             baseContent: doc.translated ?? '',
           });
           setDoc((d) => ({ ...d, translated: text }));
+          rememberLatestMarkdown(selected, text);
           setDirty(false);
           setNotice({ kind: 'ok', text: `已保存译稿（${r.bytes} 字节）→ ${r.path}` });
         } catch (err) {
@@ -2996,18 +3849,27 @@ window.__ModuleLoader__.load({
        * 路径可控得多——那条路径实测提示词根本进不去。
        */
       async function doTranslate(p) {
+        if (batchState.phase === 'running' || batchState.phase === 'stopping') {
+          setNotice({ kind: 'err', text: '批量串行队列正在执行，请先停止后续提交再单独翻译。' });
+          return;
+        }
         setBusy(p.slug); setNotice(null);
         try {
-          const r = await postJson('/translate-job', { slug: p.slug });
+          const schedule = offpeakOnly ? 'offpeak' : 'now';
+          const r = await postJson('/translate-job', { slug: p.slug, schedule });
           setNotice({
             kind: 'ok',
             text: r.reused
               ? `《${r.title}》已经有一个翻译任务在跑，继续跟进它的进度。`
-              : `已开始翻译《${r.title}》（模型 ${r.model}，共 ${r.chunkTotal || '?'} 块）。进度见条目下方。`,
+              : (schedule === 'offpeak'
+                ? `《${r.title}》已进入闲时队列；进入低价时段后自动翻译。`
+                : `已开始翻译《${r.title}》（模型 ${r.model}，共 ${r.chunkTotal || '?'} 块）。进度见条目下方。`),
           });
+          upsertJob(r);
+          setJobPollEpoch((value) => value + 1);
           // 立刻拉一次任务列表，让进度条马上出现
           const list = await fetch(`${ROUTE_PREFIX}/translate-job`).then((x) => x.json()).catch(() => null);
-          if (list?.jobs) setJobs(list.jobs);
+          if (list?.jobs) replaceJobs(list.jobs);
         } catch (err) {
           const msg = err.message ?? String(err);
           setNotice({
@@ -3025,9 +3887,11 @@ window.__ModuleLoader__.load({
           const res = await fetch(`${ROUTE_PREFIX}/translate-job`);
           if (!res.ok) return;
           const data = await res.json();
-          setJobs(data.jobs ?? []);
+          const incoming = data.jobs ?? [];
+          setJobs(incoming);
+          rememberFinishedJobs(incoming);
           // 有任务刚从 running 变成 done → 重新拉索引，让「已翻译」标签与译文出现
-          const doneJob = (data.jobs ?? []).find((j) => j.phase === 'done');
+          const doneJob = incoming.find((j) => j.phase === 'done');
           if (doneJob && doneJob.finishedAt && !notifiedDone.current.has(doneJob.jobId)) {
             notifiedDone.current.add(doneJob.jobId);
             setTick((t) => t + 1);
@@ -3086,8 +3950,7 @@ window.__ModuleLoader__.load({
         [papers],
       );
 
-      // 已通知过完成的任务，避免重复刷新索引
-      const notifiedDone = React.useRef(new Set());
+      // 已通知过完成的任务，避免重复刷新索引（声明在面板状态区，供 refreshJobs 使用）
 
       /**
        * 直连翻译任务的轮询。
@@ -3126,7 +3989,7 @@ window.__ModuleLoader__.load({
         })();
 
         return () => { cancelled = true; if (timer) clearTimeout(timer); };
-      }, []);
+      }, [jobPollEpoch]);
 
       // 查一次 API 配置，顶部显示「直连翻译是否就绪」
       React.useEffect(() => {
@@ -3155,11 +4018,11 @@ window.__ModuleLoader__.load({
         return () => { cancelled = true; };
       }, []);
 
-      /** 某篇文献当前的直连翻译任务（取最近一条） */
+      /** 某篇文献当前的直连翻译任务（取最近一条，失败后回退到本地保存的历史） */
       const jobOf = React.useCallback((p) => {
         const mine = jobs.filter((j) => j.slug === p.slug);
-        return mine.length ? mine[0] : null;
-      }, [jobs]);
+        return mine.length ? mine[0] : (jobHistory[p.slug] ?? null);
+      }, [jobs, jobHistory]);
 
       const progressOf = React.useCallback(
         (p) => (p.translateSession ? progress[p.translateSession] : null),
@@ -3246,6 +4109,36 @@ window.__ModuleLoader__.load({
 
       const hiddenCount = papers.filter((p) => p.hidden === true).length;
       const runningCount = jobs.filter((j) => j.phase === 'running' || j.phase === 'queued').length;
+      const batchActive = batchState.phase === 'running' || batchState.phase === 'stopping';
+
+      /** 等一篇文献翻译结束（done/failed）。批量队列用它保证同一时刻只跑一篇。 */
+      async function waitForTranslateJob(jobId) {
+        let transientFailures = 0;
+        while (!batchCancelRef.current) {
+          try {
+            const res = await fetch(`${ROUTE_PREFIX}/translate-job?id=${encodeURIComponent(jobId)}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const job = await res.json();
+            upsertJob(job);
+            transientFailures = 0;
+            if (job.phase === 'done' || job.phase === 'failed') return job;
+          } catch (err) {
+            transientFailures += 1;
+            // 短暂网络波动不应中断整条队列；连续失败才上报。
+            if (transientFailures >= 8) {
+              throw new Error(`连续 ${transientFailures} 次无法读取任务 ${jobId}：${err.message}`);
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, transientFailures ? 5000 : 2500));
+        }
+        return null;
+      }
+
+      function stopTranslateBatch() {
+        batchCancelRef.current = true;
+        setBatchState((stateValue) => ({ ...stateValue, phase: 'stopping' }));
+        setNotice({ kind: 'ok', text: '已停止提交后续文献；已提交的当前任务仍会在后台完成。' });
+      }
 
       /**
        * 翻译所有**可见**且未翻译的文献。
@@ -3266,27 +4159,60 @@ window.__ModuleLoader__.load({
           });
           return;
         }
+        const schedule = offpeakOnly ? 'offpeak' : 'now';
         if (!window.confirm(
-          `将依次翻译 ${pending.length} 篇**可见且未翻译**的文献。\n`
+          `将依次翻译 ${pending.length} 篇可见且未翻译的文献。\n`
           + (skippedHidden ? `（已隐藏的 ${skippedHidden} 篇会跳过）\n` : '')
-          + '\n每篇都会调用 DeepSeek API（消耗 token），一篇启动后再启动下一篇。\n'
-          + '耗时较长，可以随时关掉页面，任务仍在后台继续。\n\n确认开始？',
+          + `\n调度：${schedule === 'offpeak' ? '仅 DeepSeek 闲时（峰时先排队）' : '立即执行'}。\n`
+          + '客户端会等当前一篇完成后再提交下一篇，不再并发启动。\n'
+          + '已提交的文献可在后台完成；若关闭此面板，尚未提交的后续文献会停止。\n\n确认开始？',
         )) return;
-
-        setNotice({ kind: 'ok', text: `已排队 ${pending.length} 篇（跳过隐藏 ${skippedHidden} 篇），正在逐篇启动…` });
-        let started = 0;
-        for (const p of pending) {
+        batchCancelRef.current = false;
+        setBatchState({
+          phase: 'running', current: 0, total: pending.length, completed: 0, failed: 0, title: '',
+        });
+        setNotice({
+          kind: 'ok',
+          text: `已建立 ${pending.length} 篇的串行队列（跳过隐藏 ${skippedHidden} 篇），同一时刻只翻译一篇。`,
+        });
+        let completed = 0;
+        let failed = 0;
+        let stopped = false;
+        for (let index = 0; index < pending.length; index += 1) {
+          const p = pending[index];
+          if (batchCancelRef.current) { stopped = true; break; }
+          setBatchState({
+            phase: 'running', current: index + 1, total: pending.length, completed, failed,
+            title: chinesePaperTitle(p),
+          });
           try {
-            await postJson('/translate-job', { slug: p.slug });
-            started += 1;
+            const launched = await postJson('/translate-job', { slug: p.slug, schedule });
+            upsertJob(launched);
+            setJobPollEpoch((value) => value + 1);
+            if (!launched.jobId) throw new Error('后端未返回 jobId，无法等待本篇完成');
+            const result = await waitForTranslateJob(launched.jobId);
+            if (result === null) { stopped = true; break; }
+            if (result.phase === 'done') {
+              completed += 1;
+              setTick((value) => value + 1);
+            } else {
+              failed += 1;
+            }
           } catch (err) {
-            setNotice({ kind: 'err', text: `第 ${started + 1} 篇启动失败（${p.slug}）：${err.message}` });
+            failed += 1;
+            setNotice({ kind: 'err', text: `第 ${index + 1} 篇（${p.slug}）失败：${err.message}` });
             break;
           }
-          await new Promise((r) => setTimeout(r, 300));
         }
         await refreshJobs();
-        setNotice({ kind: 'ok', text: `已启动 ${started} 篇翻译任务，进度见各条目下方。` });
+        const left = pending.length - completed - failed;
+        setBatchState({ phase: 'idle', current: 0, total: 0, completed, failed, title: '' });
+        setNotice({
+          kind: failed ? 'err' : 'ok',
+          text: `${stopped ? '已停止后续提交；' : ''}完成 ${completed} 篇`
+            + (failed ? `，失败 ${failed} 篇` : '')
+            + (left > 0 ? `，未处理 ${left} 篇` : '') + '。',
+        });
       }
 
       /**
@@ -3404,7 +4330,7 @@ window.__ModuleLoader__.load({
                 : h(TreeNode, {
                   node: tree, depth: 0, parentPath: '', selected: state.selected,
                   collapsed, toggleCollapse,
-                  onSelect: (slug) => setState((s) => ({ ...s, selected: slug })),
+                  onSelect: selectPaper,
                   onTranslate: doTranslate, onMutate: doMutate, onArrange: doArrange,
                   translating: busy, showHidden,
                   progressOf, jobOf, onContextMenu: setMenu,
@@ -3413,8 +4339,9 @@ window.__ModuleLoader__.load({
                 });
 
       return h('div', {
-        className: 'll-root',
+        className: `ll-root${focusMode ? ' ll-focus' : ''}`,
         ref: containerRef,
+        'data-ll-theme': themeMode,
         style: { '--ll-font-scale': String(fontPercent / 100) },
       }, [
         // 第 1 段：目录树 + 列表
@@ -3444,7 +4371,7 @@ window.__ModuleLoader__.load({
                   if (e.key === 'Escape') { e.preventDefault(); setQuery(''); }
                   if (e.key === 'Enter') {
                     const first = orderedPapers[0];
-                    if (first) setState((s) => ({ ...s, selected: first.slug }));
+                    if (first) selectPaper(first.slug);
                   }
                 },
               }),
@@ -3526,6 +4453,16 @@ window.__ModuleLoader__.load({
                 : '需要 DEEPSEEK_API_KEY：点右侧「配置」填写',
             }, apiConfig?.ready ? apiConfig.model : '未配置 API'),
             h('span', { className: 'll-spacer', key: 'sp' }),
+            h('label', {
+              key: 'offpeak', className: `ll-offpeak-toggle${offpeakOnly ? ' on' : ''}`,
+              title: '开启后请求 host 仅在 DeepSeek 闲时执行：工作日北京时间 09:00–12:00、14:00–18:00 之外，以及周末/法定节假日。闲时单价约为峰时的一半。',
+            }, [
+              h('input', {
+                key: 'i', type: 'checkbox', checked: offpeakOnly, disabled: batchActive,
+                onChange: (event) => setOffpeakOnly(event.target.checked),
+              }),
+              h('span', { key: 's' }, '闲时'),
+            ]),
             h('button', {
               key: 'cfg', className: 'll-btn ll-btn-xs',
               title: '配置 DeepSeek API key（写入 ~/.dsh/.credentials.yaml，自动备份）',
@@ -3544,12 +4481,17 @@ window.__ModuleLoader__.load({
             }, busy === 'fill' ? '补全中…' : '补全信息'),
             h('button', {
               key: 'all', className: 'll-btn ll-btn-xs',
-              disabled: busy !== null || !apiConfig?.ready || runningCount > 0,
-              title: runningCount > 0
-                ? `已有 ${runningCount} 个任务在跑`
-                : '把当前可见且未翻译的文献排队翻译（隐藏的会跳过，一次启动一篇）',
-              onClick: doTranslateAll,
-            }, runningCount > 0 ? `翻译中 ${runningCount}` : '翻译未译'),
+              disabled: batchState.phase === 'stopping'
+                || (!batchActive && (busy !== null || !apiConfig?.ready || runningCount > 0)),
+              title: batchActive
+                ? `当前第 ${batchState.current}/${batchState.total} 篇：${batchState.title || '准备中'}。点击后不再提交后续文献，当前后台任务不会被取消。`
+                : (runningCount > 0
+                  ? `已有 ${runningCount} 个任务在跑`
+                  : '把当前可见且未翻译的文献串行翻译：等上一篇完成后再提交下一篇'),
+              onClick: batchActive ? stopTranslateBatch : doTranslateAll,
+            }, batchActive
+              ? `停止后续 ${batchState.current}/${batchState.total}`
+              : (runningCount > 0 ? `翻译中 ${runningCount}` : '翻译未译')),
           ]),
           h('div', { className: 'll-nav-body', key: 'b' }, navBody),
           // 版本号常驻左栏底部：升级后不用翻文档就能确认运行的是哪一版
@@ -3620,7 +4562,7 @@ window.__ModuleLoader__.load({
                   key: 'prev', className: 'll-icon-btn', disabled: !prevPaper,
                   title: prevPaper ? `上一篇：${chinesePaperTitle(prevPaper)}` : '已经是第一篇',
                   'aria-label': '上一篇',
-                  onClick: () => { if (prevPaper) setState((s) => ({ ...s, selected: prevPaper.slug })); },
+                  onClick: () => { if (prevPaper) selectPaper(prevPaper.slug); },
                 }, '‹'),
                 h('span', {
                   key: 'pos', className: 'll-pagepos',
@@ -3630,11 +4572,11 @@ window.__ModuleLoader__.load({
                   key: 'next', className: 'll-icon-btn', disabled: !nextPaper,
                   title: nextPaper ? `下一篇：${chinesePaperTitle(nextPaper)}` : '已经是最后一篇',
                   'aria-label': '下一篇',
-                  onClick: () => { if (nextPaper) setState((s) => ({ ...s, selected: nextPaper.slug })); },
+                  onClick: () => { if (nextPaper) selectPaper(nextPaper.slug); },
                 }, '›'),
               ]),
               h('button', {
-                key: 'pin', className: `ll-icon-btn${selected.pinned ? ' on' : ''}`,
+                key: 'pin', className: `ll-icon-btn ll-focus-optional${selected.pinned ? ' on' : ''}`,
                 disabled: busy !== null,
                 'aria-pressed': selected.pinned === true,
                 title: selected.pinned ? '取消置顶' : '置顶到本文件夹顶部',
@@ -3645,8 +4587,12 @@ window.__ModuleLoader__.load({
               h('button', {
                 key: 'focus', className: 'll-btn ll-btn-xs',
                 title: focusMode ? '恢复左侧文献列表' : '隐藏左侧列表，让译文和 PDF 占满宽度',
-                onClick: () => setFocusMode((v) => !v),
-              }, focusMode ? '退出专注' : '专注阅读'),
+                onClick: () => setFocusMode((v) => {
+                  const next = !v;
+                  if (next) { setDetailsOpen(false); setMetaOpen(false); }
+                  return next;
+                }),
+              }, focusMode ? '退出' : '专注阅读'),
               h('button', {
                 key: 'details', className: 'll-btn ll-btn-xs ll-details-toggle',
                 title: detailsOpen ? '收起作者、期刊与 DOI 信息' : '展开作者、期刊与 DOI 信息',
@@ -3655,7 +4601,7 @@ window.__ModuleLoader__.load({
                   if (detailsOpen) setMetaOpen(false);
                   setDetailsOpen(!detailsOpen);
                 },
-              }, detailsOpen ? '收起详情 ︿' : '论文详情 ﹀'),
+              }, focusMode ? (detailsOpen ? '收起' : '详情') : (detailsOpen ? '收起详情 ︿' : '论文详情 ﹀')),
             ]),
             detailsOpen ? h('div', { className: 'll-head-details', key: 'details-panel' }, [
               h('span', { className: 'll-byline', key: 'o' }, [selected.authors || '作者未知', paperPublicationYear(selected)].join(' · ')),
@@ -3720,7 +4666,10 @@ window.__ModuleLoader__.load({
                     h('button', {
                       key: id,
                       className: `ll-tab${mode === id ? ' on' : ''}`,
-                      onClick: () => setMode(id),
+                      onClick: () => {
+                        persistCurrentMarkdown(activeSlug, mode);
+                        setMode(id);
+                      },
                     }, label)),
                 ]) : null,
                 katex === null && (mode === 'preview' || mode === 'edit') && docReady
@@ -3741,7 +4690,7 @@ window.__ModuleLoader__.load({
                   key: 'tr', className: 'll-btn', disabled: busy !== null, onClick: () => doTranslate(selected),
                 }, busy === selected.slug ? '投递中…' : '翻译这篇') : null,
               ]),
-              h('div', { className: 'll-pane-body', key: 'b' },
+              h('div', { className: 'll-pane-body', key: 'b', ref: markdownPaneRef },
                 contentSwitching || docStale
                   ? h('div', { className: 'll-status' }, contentSwitching ? '正在切换文献…' : '正在读取译文…')
                   : doc.phase === 'loading'
@@ -3788,7 +4737,7 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'll-pane-title', key: 't' }, '原文 PDF'),
                 h('span', { className: 'll-spacer', key: 'sp' }),
                 pdfOpenUrl
-                  ? h('a', { key: 'a', href: pdfOpenUrl, target: '_blank', rel: 'noreferrer' }, '新窗口打开 →')
+                  ? h('a', { key: 'a', href: pdfOpenUrl, target: '_blank', rel: 'noreferrer' }, focusMode ? '新窗口 ↗' : '新窗口打开 →')
                   : null,
               ]),
               !selected.source
@@ -3799,6 +4748,7 @@ window.__ModuleLoader__.load({
                 : h(PdfViewer, {
                   key: pdfAddress || 'pending',
                   address: pdfAddress,
+                  documentKey: selected.slug,
                   title: selected.title ?? selected.slug,
                   switching: pdfSwitching || !pdfPaper,
                 }),
@@ -3836,7 +4786,7 @@ window.__ModuleLoader__.load({
           menu,
           busy,
           onClose: () => setMenu(null),
-          onOpen: (p) => setState((s) => ({ ...s, selected: p.slug })),
+          onOpen: (p) => selectPaper(p.slug),
           onTranslate: (p) => doTranslate(p),
           onMutate: doMutate,
           onArrange: doArrange,
