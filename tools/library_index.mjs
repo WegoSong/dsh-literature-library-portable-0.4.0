@@ -108,6 +108,8 @@ export function buildIndex(db) {
       translateSession: p.translateSession ?? null,
       translateStatus: p.translateStatus ?? null,
       translateStartedAt: p.translateStartedAt ?? null,
+      // 最近一次直连翻译的真实用量与预计费用，供重启后继续展示。
+      translationStats: p.translationStats ?? null,
       importedFrom: p.importedFrom ?? null,
       note: p.note,
       journal: p.journal ?? null,

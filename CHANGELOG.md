@@ -14,6 +14,15 @@
 
 ---
 
+## 0.6.1 — 2026-10-22
+
+### 修复（打包事故）
+
+- **修正安装包取错源**：`build_market_bundle.mjs` / `build_portable_package.mjs` 原来从工作区根目录 `tools/` 拷贝工具脚本（那是开发工具，早已与运行时模块分叉），而且清单里漏了 `translation_pipeline.mjs`。0.6.0 的一键更新因此把插件里的 `deepseek_translate.mjs` 换成了不认 `maxTokens` 对象的旧版，翻译直接返回 `422 max_tokens: invalid type: map`。现在两个脚本都按目录枚举 `plugin/literature-library/tools/*.mjs`，缺失翻译流水线时直接拒绝打包。
+- **max_tokens 本地兜底**：`callDeepSeek` 在发请求前断言 `max_tokens` 是正整数；若调用方或旧模块传了对象，会抛出可读的中文错误，而不是把 422 抛给用户。
+- **新增安装包回归测试** `tools/test_package_contents.mjs`：逐字节对比插件目录与市场 bundle / tgz（含 `tools/` 全量文件），并断言 `translation_pipeline.mjs` 存在、`resolveMaxTokens` 可用、`files` 覆盖 `tools/**/*.mjs`。
+- 已从插件更新器的自动备份 `updates/backup-0.5.3-2026-10-22T02-15-41-205Z` 恢复被覆盖的 6 个工具脚本（`deepseek_translate.mjs` 含 `resolveMaxTokens`，18,727 字节）。
+
 ## 0.6.0 — 2026-10-22
 
 ### 翻译降本（不降低精度）

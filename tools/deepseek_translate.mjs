@@ -23,6 +23,150 @@ import { homedir } from 'node:os';
 
 export const DEFAULT_BASE_URL = 'https://api.deepseek.com/anthropic';
 export const DEFAULT_MODEL = 'deepseek-flash';
+export const DEFAULT_MAX_TOKENS = 32000;
+
+const REASONING_EFFORTS = new Set(['none', 'low', 'high', 'max']);
+const DEFAULT_REASONING_RESERVE = Object.freeze({
+  none: 0,
+  low: 2048,
+  high: 8192,
+  max: 16000,
+});
+
+/**
+ * 把不同调用方使用的「是否思考」参数统一成 DeepSeek 的 effort。
+ *
+ * `reasoningEffort` 是首选参数；`effort`、`thinking` 是兼容别名。翻译任务
+ * 默认关闭思考，避免模型生成随后会被丢弃、但仍然计费的 thinking token。
+ */
+export function resolveReasoningEffort({ reasoningEffort, effort, thinking } = {}) {
+  let value = reasoningEffort ?? effort;
+
+  if (value == null) {
+    if (typeof thinking === 'string') value = thinking;
+    else if (thinking && typeof thinking === 'object') {
+      value = thinking.effort
+        ?? (thinking.type === 'enabled' ? 'low' : thinking.type === 'disabled' ? 'none' : null);
+    } else if (thinking === true) value = 'low';
+    else value = 'none';
+  }
+
+  if (value === false || value === 'off' || value === 'disabled') value = 'none';
+  if (value === true || value === 'on' || value === 'enabled') value = 'low';
+  const normalized = String(value).trim().toLowerCase();
+  if (!REASONING_EFFORTS.has(normalized)) {
+    throw new TypeError(`不支持的 reasoningEffort：${value}（可用 none/low/high/max）`);
+  }
+  return normalized;
+}
+
+/**
+ * 解析输出 token 上限。
+ *
+ * 旧调用可继续传数字；需要按块动态设定时可传 `"auto"`，或传：
+ * `{ min, max, inputRatio, base, reasoningReserve }`。动态值只限制异常输出，
+ * API 仍然按实际 token 计费。
+ */
+export function resolveMaxTokens(maxTokens = DEFAULT_MAX_TOKENS, {
+  user = '',
+  reasoningEffort = 'none',
+} = {}) {
+  if (typeof maxTokens === 'number') {
+    if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
+      throw new TypeError(`maxTokens 必须是正数，收到：${maxTokens}`);
+    }
+    return Math.max(1, Math.floor(maxTokens));
+  }
+
+  if (typeof maxTokens === 'function') {
+    const estimatedInputTokens = estimateTokens(user);
+    return resolveMaxTokens(maxTokens({ estimatedInputTokens, reasoningEffort }), {
+      user,
+      reasoningEffort,
+    });
+  }
+
+  if (maxTokens !== 'auto' && (!maxTokens || typeof maxTokens !== 'object')) {
+    throw new TypeError('maxTokens 必须是正数、"auto"、自动配置对象或计算函数');
+  }
+
+  const config = maxTokens === 'auto' ? {} : maxTokens;
+  const min = Number(config.min ?? config.minTokens ?? 2048);
+  const max = Number(config.max ?? config.maxTokens ?? DEFAULT_MAX_TOKENS);
+  const inputRatio = Number(config.inputRatio ?? config.ratio ?? 1.5);
+  const base = Number(config.base ?? config.baseTokens ?? 768);
+  const reserveSetting = config.reasoningReserve ?? config.reasoningReserveTokens;
+  const reserve = Number(
+    reserveSetting && typeof reserveSetting === 'object'
+      ? reserveSetting[reasoningEffort] ?? DEFAULT_REASONING_RESERVE[reasoningEffort]
+      : reserveSetting ?? DEFAULT_REASONING_RESERVE[reasoningEffort],
+  );
+
+  if (![min, max, inputRatio, base, reserve].every(Number.isFinite)
+      || min <= 0 || max < min || inputRatio <= 0 || base < 0 || reserve < 0) {
+    throw new TypeError('maxTokens 自动配置无效：需要 0 < min <= max、inputRatio > 0，且 base/reserve >= 0');
+  }
+
+  const estimated = Math.ceil(estimateTokens(user) * inputRatio + base + reserve);
+  return Math.floor(Math.min(max, Math.max(min, estimated)));
+}
+
+function tokenCount(...values) {
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const count = Number(value);
+    if (Number.isFinite(count) && count >= 0) return Math.floor(count);
+  }
+  return null;
+}
+
+/**
+ * 统一 DeepSeek 原生、Anthropic 兼容层和 OpenAI 风格的 usage 字段。
+ * 未识别字段会原样保留，便于以后兼容服务端新增的统计项。
+ */
+export function normalizeUsage(rawUsage, { reasoningEffort = 'none' } = {}) {
+  if (!rawUsage || typeof rawUsage !== 'object') return null;
+
+  const inputTokens = tokenCount(rawUsage.input_tokens, rawUsage.prompt_tokens);
+  const outputTokens = tokenCount(rawUsage.output_tokens, rawUsage.completion_tokens);
+  const cacheHitTokens = tokenCount(
+    rawUsage.prompt_cache_hit_tokens,
+    rawUsage.cache_read_input_tokens,
+    rawUsage.prompt_tokens_details?.cached_tokens,
+    rawUsage.input_tokens_details?.cache_read_tokens,
+    rawUsage.input_tokens_details?.cached_tokens,
+  );
+  const cacheMissTokens = tokenCount(
+    rawUsage.prompt_cache_miss_tokens,
+    rawUsage.cache_creation_input_tokens,
+    rawUsage.prompt_tokens_details?.cache_miss_tokens,
+    rawUsage.input_tokens_details?.cache_miss_tokens,
+  );
+  const reportedThinkingTokens = tokenCount(
+    rawUsage.thinking_tokens,
+    rawUsage.output_tokens_details?.thinking_tokens,
+    rawUsage.completion_tokens_details?.thinking_tokens,
+  );
+  const reportedReasoningTokens = tokenCount(
+    rawUsage.reasoning_tokens,
+    rawUsage.output_tokens_details?.reasoning_tokens,
+    rawUsage.completion_tokens_details?.reasoning_tokens,
+    reportedThinkingTokens,
+  );
+  const reasoningTokens = reportedReasoningTokens
+    ?? (reasoningEffort === 'none' ? 0 : null);
+  const thinkingTokens = reportedThinkingTokens ?? reasoningTokens;
+
+  return {
+    ...rawUsage,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    prompt_cache_hit_tokens: cacheHitTokens,
+    prompt_cache_miss_tokens: cacheMissTokens,
+    reasoning_tokens: reasoningTokens,
+    thinking_tokens: thinkingTokens,
+  };
+}
 
 /** DSH home（与插件其它部分保持同一套规则） */
 function dshHome() {
@@ -72,7 +216,10 @@ export async function resolveApiKey(config = {}) {
  * @param opts.model - 模型 id
  * @param opts.system - 系统提示词
  * @param opts.user - 用户内容
- * @param opts.maxTokens - 输出上限
+ * @param opts.maxTokens - 输出上限数字，或 `"auto"` / 自动配置对象 / 计算函数
+ * @param opts.reasoningEffort - `none`（默认）、`low`、`high` 或 `max`
+ * @param opts.effort - `reasoningEffort` 的兼容别名
+ * @param opts.thinking - 是否启用思考的兼容参数
  * @param opts.timeoutMs - 单次请求超时
  * @param opts.signal - 取消信号
  * @returns `{ text, usage }`
@@ -83,11 +230,37 @@ export async function callDeepSeek({
   model = DEFAULT_MODEL,
   system,
   user,
-  maxTokens = 32000,
+  maxTokens = DEFAULT_MAX_TOKENS,
+  reasoningEffort,
+  effort,
+  thinking,
   timeoutMs = 300000,
   signal,
 } = {}) {
   const url = `${String(baseUrl).replace(/\/+$/u, '')}/v1/messages`;
+  const resolvedReasoningEffort = resolveReasoningEffort({ reasoningEffort, effort, thinking });
+  const resolvedMaxTokens = resolveMaxTokens(maxTokens, {
+    user,
+    reasoningEffort: resolvedReasoningEffort,
+  });
+  /*
+   * 兜底：API 要求 max_tokens 是 u32。调用方可以传对象（按块动态计算），
+   * 但这里必须已经换算成整数；一旦不是，就在本地报出可读错误，
+   * 而不是让服务端返回 422 "invalid type: map" 这种难懂的信息。
+   * （0.6.0 的安装包曾误把旧版工具打进插件，旧版不做换算，正好触发了这条。）
+   */
+  if (!Number.isInteger(resolvedMaxTokens) || resolvedMaxTokens <= 0) {
+    throw new TypeError(
+      `max_tokens 必须是正整数，收到 ${JSON.stringify(resolvedMaxTokens)}；`
+      + '请检查 resolveMaxTokens 是否被旧版工具脚本覆盖。',
+    );
+  }
+  const thinkingConfig = resolvedReasoningEffort === 'none'
+    ? { thinking: { type: 'disabled' } }
+    : {
+        thinking: { type: 'enabled' },
+        output_config: { effort: resolvedReasoningEffort },
+      };
   const ac = new AbortController();
   const onAbort = () => ac.abort();
   if (signal) {
@@ -107,9 +280,10 @@ export async function callDeepSeek({
       },
       body: JSON.stringify({
         model,
-        max_tokens: maxTokens,
+        max_tokens: resolvedMaxTokens,
         system,
         messages: [{ role: 'user', content: user }],
+        ...thinkingConfig,
       }),
     });
 
@@ -147,7 +321,7 @@ export async function callDeepSeek({
       if (data?.stop_reason === 'max_tokens') {
         throw new Error(
           `API 在推理阶段就用完了 max_tokens（推理 ${thinkingChars} 字，无正文输出）。`
-          + `当前 maxTokens=${maxTokens}，请调大后重试。`,
+          + `当前 maxTokens=${resolvedMaxTokens}，请调大后重试。`,
         );
       }
       throw new Error(`API 返回里没有正文（stop_reason=${data?.stop_reason ?? '?'}）`);
@@ -155,9 +329,11 @@ export async function callDeepSeek({
     return {
       text,
       thinkingChars,
-      usage: data?.usage ?? null,
+      usage: normalizeUsage(data?.usage, { reasoningEffort: resolvedReasoningEffort }),
       truncated: data?.stop_reason === 'max_tokens',
       stopReason: data?.stop_reason ?? null,
+      reasoningEffort: resolvedReasoningEffort,
+      maxTokens: resolvedMaxTokens,
     };
   } finally {
     clearTimeout(timer);
@@ -228,7 +404,13 @@ export function chunkText(text, maxTokensPerChunk = 3000) {
   return chunks;
 }
 
-/** 翻译任务的系统提示词：把用户的九条硬性要求固化为可复用的指令 */
+/**
+ * 翻译任务的系统提示词：把用户的九条硬性要求固化为可复用的指令。
+ *
+ * 这段文字会随每一块发送，但**不要为了省 token 删减约束**。实测 DeepSeek 的
+ * 自动前缀缓存会命中这段相同前缀（缓存价约为未命中的 1/50），压缩措辞每块只省
+ * 几十个 token，却可能让模型漏掉某条硬性要求，得不偿失。
+ */
 export function buildSystemPrompt({ roleHint, extraRules } = {}) {
   const role = roleHint
     || '你是一位专业的热物性/传感器/自供电/机械/材料/热物理/计算机等方向的人员。';
@@ -242,15 +424,13 @@ export function buildSystemPrompt({ roleHint, extraRules } = {}) {
     '2. 保持中心思想不变。',
     '3. 输出时不要保留原有的一页双栏格式，改为正常的中文论文格式。',
     '4. 遇到图片只需保留图片的标注并翻译它，跳过图片内容本身。',
-    '5. 参考文献列表不翻译，但参考文献在文中的引用标注（如 [1]、[2-4]）必须保留。',
+    '5. 参考文献列表已由程序在本地剥离；正文里的引用保护标记必须原样保留。',
     '6. 由于页面划分而被截断的段落，要连通后翻译。',
     '7. 保留文献中的上下标和物理符号格式。',
     '8. 公式必须用 LaTeX 表示，并确保可以被 KaTeX 正确渲染：',
     '   行内公式用 $...$，独立公式用 $$...$$；不要输出图片形式的公式。',
     '9. 只输出译文本身，不要加任何说明、前言、道歉或「以下是翻译」之类的话。',
-    '10. `===META:BEGIN===` 到 `===META:END===` 是从 PDF 属性、第一页及页眉页脚抢救出的出版信息。',
-    '   必须综合这些候选，在译稿开头依次输出：**原文标题**、**作者**、**期刊**、**发表日期**、',
-    '   **DOI**（能确认什么写什么，不能确认就省略；不要把候选列表逐条翻译成正文）。',
+    '10. 出版元数据由程序在本地生成，不要自行添加题名、作者、期刊、日期或 DOI 头部。',
     '11. `[原文第 n 页]` 与 `[本页版面：n 栏]` 仅用于恢复阅读顺序，不要出现在最终译文。',
     '',
     // 这一段是**实测踩坑后补的**：批量翻译的译文里有 6 条公式渲染失败，
@@ -282,12 +462,10 @@ export function buildSystemPrompt({ roleHint, extraRules } = {}) {
 
 /** 单块的用户提示词 */
 export function buildUserPrompt({ chunk, index, total, title, source }) {
-  const head = total > 1
-    ? `这是《${title ?? source}》的第 ${index + 1} / ${total} 部分，请只翻译这一部分。`
-    : `请翻译以下文献内容（《${title ?? source}》）。`;
   return [
-    head,
-    index === 0 ? '首先读取出版元数据块，并把能确认的题名、作者、期刊、发表日期和 DOI 写入译稿顶部。' : '',
+    `文献：《${title ?? source}》`,
+    '请准确翻译下面的正文片段；只输出该片段的译文，并逐字保留所有 @@DSH_*@@ 保护标记。',
+    total > 1 ? `片段：${index + 1} / ${total}` : '',
     '',
     '----- 原文开始 -----',
     chunk,
