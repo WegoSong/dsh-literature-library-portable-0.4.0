@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.2';
+    const PDFJS_REV = '0.6.3';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -34,6 +34,11 @@ window.__ModuleLoader__.load({
     const OFFPEAK_ONLY_KEY = 'dsh-literature-library/offpeak-only';
     const FONT_MIN_PERCENT = 1;
     const FONT_MAX_PERCENT = 1000;
+    const FONT_RANGES = [
+      { id: 'normal', label: '1–200%', min: 1, max: 200 },
+      { id: 'large', label: '201–500%', min: 201, max: 500 },
+      { id: 'huge', label: '501–1000%', min: 501, max: 1000 },
+    ];
 
     function loadReadingMemory() {
       try {
@@ -115,6 +120,17 @@ window.__ModuleLoader__.load({
       const n = Math.round(Number(value));
       if (!Number.isFinite(n)) return 100;
       return Math.min(FONT_MAX_PERCENT, Math.max(FONT_MIN_PERCENT, n));
+    }
+
+    function fontRangeFor(value) {
+      const percent = clampFontPercent(value);
+      return FONT_RANGES.find((range) => percent >= range.min && percent <= range.max) ?? FONT_RANGES[0];
+    }
+
+    function saveFontPercent(value) {
+      const percent = clampFontPercent(value);
+      try { window.localStorage.setItem(FONT_PERCENT_KEY, String(percent)); } catch { /* 忽略 */ }
+      return percent;
     }
     /**
      * 切换文献后的「停稳」时间。
@@ -501,7 +517,7 @@ window.__ModuleLoader__.load({
 .ll-root ::selection { background: var(--ll-selection-bg); color: inherit; }
 .ll-root ::-moz-selection { background: var(--ll-selection-bg); color: inherit; }
 .ll-pane-translation ::selection { background: rgba(11, 107, 203, .24); color: inherit; }
-.ll-nav-shell { box-shadow: inset -1px 0 0 rgba(0, 0, 0, .18); }
+.ll-nav-shell { box-shadow: inset -1px 0 0 rgba(0, 0, 0, .18); container-type: inline-size; }
 .ll-nav-head {
   padding: 10px 10px 9px;
   gap: 7px;
@@ -545,10 +561,10 @@ window.__ModuleLoader__.load({
 }
 .ll-btn:active:not(:disabled) { transform: translateY(.5px); }
 .ll-icon-btn {
-  flex: none; width: 22px; height: 22px; padding: 0;
+  flex: none; width: 20px; height: 20px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border: 0; border-radius: 5px; background: none;
-  color: var(--ll-muted); font: inherit; font-size: calc(12px * var(--ll-font-scale, 1)); line-height: 1;
+  color: var(--ll-muted); font: inherit; font-size: 11px; line-height: 1;
   cursor: pointer; transition: background .12s ease, color .12s ease;
 }
 .ll-icon-btn:hover:not(:disabled) { background: var(--ll-control-hover); color: var(--ll-text); }
@@ -583,8 +599,15 @@ window.__ModuleLoader__.load({
   color: var(--ll-muted); white-space: nowrap;
 }
 .ll-font-range {
-  width: 84px; height: 14px; margin: 0; padding: 0;
+  width: 64px; height: 12px; margin: 0; padding: 0;
   accent-color: var(--ll-accent); cursor: pointer;
+}
+.ll-font-range::-webkit-slider-thumb { width: 12px; height: 12px; }
+.ll-font-band {
+  width: 70px; min-width: 0; box-sizing: border-box; padding: 0 2px;
+  color: var(--ll-text); background: var(--ll-control-bg);
+  border: 1px solid var(--ll-soft-border); border-radius: 4px;
+  font: inherit; font-size: 10px; line-height: 1.4;
 }
 .ll-font-num {
   width: 52px; box-sizing: border-box;
@@ -658,6 +681,10 @@ window.__ModuleLoader__.load({
 .ll-item:focus-within .ll-item-actions .ll-icon-btn { display: inline-flex; }
 .ll-item:hover .ll-item-actions .ll-icon-btn.ll-item-more,
 .ll-item:focus-within .ll-item-actions .ll-icon-btn.ll-item-more { opacity: 1; }
+.ll-item[draggable="true"] { cursor: grab; }
+.ll-item.ll-dragging { opacity: .38; cursor: grabbing; }
+.ll-item.ll-drop-before { box-shadow: inset 0 2px 0 var(--ll-accent); }
+.ll-item.ll-drop-after { box-shadow: inset 0 -2px 0 var(--ll-accent); }
 .ll-item-hidden { opacity: .48; }
 .ll-progress { margin-top: 4px; }
 .ll-progress-bar { width: 62px; height: 3px; }
@@ -842,6 +869,21 @@ window.__ModuleLoader__.load({
 @media (max-width: 900px) {
   .ll-focus .ll-head h1 { max-width: 42vw; }
   .ll-focus .ll-pagepos { min-width: 32px; }
+}
+@container (max-width: 250px) {
+  .ll-nav-head { padding: 7px 7px 6px; gap: 5px; }
+  .ll-nav-title { gap: 4px; }
+  .ll-nav-title > svg { width: 13px; height: 13px; }
+  .ll-count-pill { margin-left: 0; padding: 0 4px; }
+  .ll-nav-title .ll-btn { padding-left: 5px; padding-right: 5px; }
+  .ll-treebar, .ll-toolbar { padding-left: 6px; padding-right: 6px; gap: 3px; }
+  .ll-treebar .ll-btn, .ll-toolbar .ll-btn { padding-left: 5px; padding-right: 5px; }
+  .ll-item { padding-right: 6px; }
+  .ll-item-main { padding-right: 18px; }
+  .ll-nav-foot { padding: 4px 6px; gap: 3px; }
+  .ll-font-size { width: 100%; display: grid; grid-template-columns: auto 70px minmax(36px, 1fr) 42px auto; }
+  .ll-font-range { width: 100%; }
+  .ll-nav-foot-hint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ll-root *, .ll-root *::before, .ll-root *::after {
@@ -1685,10 +1727,14 @@ window.__ModuleLoader__.load({
           // 兼容旧键名：早期版本用 pdfPct 表示左栏（PDF）宽度，现在是中栏译文宽度
           const trPct = typeof v.trPct === 'number' ? v.trPct
             : (typeof v.pdfPct === 'number' ? v.pdfPct : 50);
-          if (typeof v.navPct === 'number') return { navPct: v.navPct, trPct };
+          if (typeof v.navPct === 'number') {
+            // v2 将旧默认值 22% 一次性迁移到 18%；用户手动设置的其他宽度保持不变。
+            const navPct = v.version === 2 ? v.navPct : (v.navPct === 22 ? 18 : v.navPct);
+            return { version: 2, navPct, trPct };
+          }
         }
       } catch { /* 忽略 */ }
-      return { navPct: 22, trPct: 52 };
+      return { version: 2, navPct: 18, trPct: 52 };
     }
 
     /** 插件字号（只放大文字，不改变 PDF 画布缩放） */
@@ -1939,8 +1985,7 @@ window.__ModuleLoader__.load({
         item(p.pinned ? 'unpin' : 'pin', p.pinned ? '取消置顶' : '置顶到本文件夹顶部', () => {
           onArrange({ action: p.pinned ? 'unpin' : 'pin', slug: p.slug });
         }, { disabled: busy !== null }),
-        item('up', '上移一位', () => menu.move?.(-1), { disabled: busy !== null || !menu.canMoveUp }),
-        item('down', '下移一位', () => menu.move?.(1), { disabled: busy !== null || !menu.canMoveDown }),
+        h('div', { className: 'll-hint', key: 'drag-tip', style: { padding: '4px 10px' } }, '排序：直接拖动文献条目'),
         h('div', { className: 'll-menu-sep', key: 's1' }),
         hidden
           ? item('show', '取消隐藏', () => onMutate({ action: 'unhide', slug: p.slug }, '已取消隐藏'))
@@ -2107,6 +2152,7 @@ window.__ModuleLoader__.load({
       progressOf, jobOf, onContextMenu, papers, allPapers,
       selectedFolder, onSelectFolder,
     }) {
+      const [paperDrag, setPaperDrag] = React.useState(null);
       const path = nodePath(node, parentPath);
       const isCollapsed = collapsed.has(path);
       const kids = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -2122,22 +2168,17 @@ window.__ModuleLoader__.load({
        */
       const fullOwn = sortPapers(allPapers.filter((p) => paperGroupKey(p) === path));
 
-      /**
-       * 上移 / 下移一篇文献：把**本文件夹的完整新顺序**发给 host 重新编号。
-       * 只在「同为置顶 / 同为普通」的可见相邻项之间交换——置顶项始终留在最前，
-       * 避免用户点了上移却因为置顶规则看起来「没动」。
-       */
-      const movePaper = (paper, dir) => {
-        const index = own.findIndex((p) => p.slug === paper.slug);
-        const target = index + dir;
-        if (index < 0 || target < 0 || target >= own.length) return;
-        if ((own[target].pinned === true) !== (paper.pinned === true)) return;
-
+      /** 在同一文件夹、同一置顶分组内拖放；未显示的条目仍保留原有相对顺序。 */
+      const dropPaper = (paper, targetPaper, after) => {
+        if (!paper || !targetPaper || paper.slug === targetPaper.slug) return;
+        if ((paper.pinned === true) !== (targetPaper.pinned === true)) return;
         const list = fullOwn.map((p) => p.slug);
         const from = list.indexOf(paper.slug);
-        const to = list.indexOf(own[target].slug);
+        let to = list.indexOf(targetPaper.slug);
         if (from < 0 || to < 0) return;
-        [list[from], list[to]] = [list[to], list[from]];
+        list.splice(from, 1);
+        if (from < to) to -= 1;
+        list.splice(to + (after ? 1 : 0), 0, paper.slug);
         onArrange({ action: 'order', folder: path, slugs: list });
       };
 
@@ -2198,23 +2239,35 @@ window.__ModuleLoader__.load({
 
       if (!isCollapsed) {
         for (const p of own) {
-          const index = own.findIndex((x) => x.slug === p.slug);
-          const canMoveUp = index > 0 && (own[index - 1].pinned === true) === (p.pinned === true);
-          const canMoveDown = index >= 0 && index < own.length - 1
-            && (own[index + 1].pinned === true) === (p.pinned === true);
-
-          /** 右键与「⋯」共用：把上移/下移的可用状态一起带进菜单 */
           const openPaperMenu = (x, y) => onContextMenu({
-            x, y, kind: 'paper', paper: p, canMoveUp, canMoveDown,
-            move: (dir) => movePaper(p, dir),
+            x, y, kind: 'paper', paper: p,
           });
 
           rows.push(h('div', {
             key: p.slug,
-            className: `ll-item${p.slug === selected ? ' active' : ''}${p.hidden ? ' ll-item-hidden' : ''}`,
+            className: `ll-item${p.slug === selected ? ' active' : ''}${p.hidden ? ' ll-item-hidden' : ''}${paperDrag?.slug === p.slug ? ' ll-dragging' : ''}${paperDrag?.over === p.slug ? ` ll-drop-${paperDrag.after ? 'after' : 'before'}` : ''}`,
             style: { paddingLeft: `${12 + depth * 10}px` },
             role: 'button',
             tabIndex: 0,
+            draggable: translating === null,
+            onDragStart: (e) => {
+              e.dataTransfer.effectAllowed = 'move';
+              e.dataTransfer.setData('text/plain', p.slug);
+              setPaperDrag({ slug: p.slug, paper: p, over: null, after: false });
+            },
+            onDragOver: (e) => {
+              if (!paperDrag || (paperDrag.paper.pinned === true) !== (p.pinned === true)) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              const rect = e.currentTarget.getBoundingClientRect();
+              setPaperDrag((current) => ({ ...current, over: p.slug, after: e.clientY >= rect.top + rect.height / 2 }));
+            },
+            onDrop: (e) => {
+              e.preventDefault();
+              if (paperDrag) dropPaper(paperDrag.paper, p, paperDrag.after);
+              setPaperDrag(null);
+            },
+            onDragEnd: () => setPaperDrag(null),
             onClick: () => onSelect(p.slug),
             onKeyDown: (e) => {
               if (e.target !== e.currentTarget) return;
@@ -2266,7 +2319,7 @@ window.__ModuleLoader__.load({
                 onOpen: () => onSelect(p.slug),
               }),
             ]),
-            // 置顶 / 上移 / 下移 / 更多。hover 或选中时出现，避免平时挤占标题宽度。
+            // 置顶 / 更多。排序直接拖动整条文献。
             h('div', { className: 'll-item-actions', key: 'acts' }, [
               h('button', {
                 key: 'pin', className: `ll-icon-btn${p.pinned ? ' on' : ''}`,
@@ -2279,18 +2332,8 @@ window.__ModuleLoader__.load({
                 },
               }, h(PinIcon, { size: 12 })),
               h('button', {
-                key: 'up', className: 'll-icon-btn', disabled: translating !== null || !canMoveUp,
-                title: '上移一位', 'aria-label': '上移一位',
-                onClick: (e) => { e.stopPropagation(); movePaper(p, -1); },
-              }, '↑'),
-              h('button', {
-                key: 'down', className: 'll-icon-btn', disabled: translating !== null || !canMoveDown,
-                title: '下移一位', 'aria-label': '下移一位',
-                onClick: (e) => { e.stopPropagation(); movePaper(p, 1); },
-              }, '↓'),
-              h('button', {
                 key: 'more', className: 'll-icon-btn ll-item-more',
-                title: '更多操作：翻译 / 置顶 / 上移下移 / 隐藏 / 移除（也可以直接右键）',
+                title: '更多操作：翻译 / 置顶 / 隐藏 / 移除（排序请直接拖动）',
                 onClick: (e) => {
                   e.stopPropagation();
                   const r = e.currentTarget.getBoundingClientRect();
@@ -3390,6 +3433,9 @@ window.__ModuleLoader__.load({
     function LiteraturePanel({ remote }) {
       const [layout, setLayout] = React.useState(loadLayout);
       const [fontPercent, setFontPercent] = React.useState(loadFontPercent);
+      const updateFontPercent = React.useCallback((value) => {
+        setFontPercent((current) => saveFontPercent(typeof value === 'function' ? value(current) : value));
+      }, []);
       const containerRef = React.useRef(null);
       const dragRef = React.useRef(null);
       const initialReadingRef = React.useRef(loadReadingMemory());
@@ -3562,18 +3608,18 @@ window.__ModuleLoader__.load({
           if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
           if (e.key === '+' || e.key === '=') {
             e.preventDefault(); e.stopPropagation();
-            setFontPercent((p) => clampFontPercent(p + 10));
+            updateFontPercent((p) => p + 10);
           } else if (e.key === '-' || e.key === '_') {
             e.preventDefault(); e.stopPropagation();
-            setFontPercent((p) => clampFontPercent(p - 10));
+            updateFontPercent((p) => p - 10);
           } else if (e.key === '0') {
             e.preventDefault(); e.stopPropagation();
-            setFontPercent(100);
+            updateFontPercent(100);
           }
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
-      }, []);
+      }, [updateFontPercent]);
 
       // 索引
       React.useEffect(() => {
@@ -4511,15 +4557,23 @@ window.__ModuleLoader__.load({
             h('span', { key: 'sp', className: 'll-spacer' }),
             h('label', {
               key: 'fs', className: 'll-font-size',
-              title: '拖动滑块，或输入 1–1000；Ctrl + / Ctrl - 调整，Ctrl 0 复位',
+              title: '先选择范围档位，再拖动微调；设置会立即保存，重启 DSH 后仍保留',
             }, [
               h('span', { key: 'l' }, '字号'),
+              h('select', {
+                key: 'band', className: 'll-font-band', value: fontRangeFor(fontPercent).id,
+                'aria-label': '字号范围',
+                onChange: (e) => {
+                  const range = FONT_RANGES.find((item) => item.id === e.target.value) ?? FONT_RANGES[0];
+                  updateFontPercent(Math.min(range.max, Math.max(range.min, fontPercent)));
+                },
+              }, FONT_RANGES.map((range) => h('option', { key: range.id, value: range.id }, range.label))),
               h('input', {
                 key: 'r', className: 'll-font-range', type: 'range',
-                min: FONT_MIN_PERCENT, max: FONT_MAX_PERCENT, step: 1,
+                min: fontRangeFor(fontPercent).min, max: fontRangeFor(fontPercent).max, step: 1,
                 value: fontPercent,
                 'aria-label': '字号滑块',
-                onChange: (e) => setFontPercent(clampFontPercent(e.target.value)),
+                onChange: (e) => updateFontPercent(e.target.value),
               }),
               h('input', {
                 key: 'n', className: 'll-font-num', type: 'number',
@@ -4528,7 +4582,7 @@ window.__ModuleLoader__.load({
                 'aria-label': '字号百分比',
                 onChange: (e) => {
                   if (e.target.value === '') return;
-                  setFontPercent(clampFontPercent(e.target.value));
+                  updateFontPercent(e.target.value);
                 },
               }),
               h('span', { key: 'p' }, '%'),
@@ -4540,7 +4594,7 @@ window.__ModuleLoader__.load({
         !focusMode ? h(Divider, {
           key: 'd1',
           onDrag: { start: startDrag('nav'), move: moveDrag, end: endDrag },
-          onDoubleClick: () => setLayout((l) => ({ ...l, navPct: 24 })),
+          onDoubleClick: () => setLayout((l) => ({ ...l, navPct: 18 })),
         }) : null,
 
         // 第 2 段：文献区
