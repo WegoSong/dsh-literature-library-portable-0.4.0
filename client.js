@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.3';
+    const PDFJS_REV = '0.6.4';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -2504,6 +2504,19 @@ window.__ModuleLoader__.load({
      * 浏览器内置阅读器（只在用户明确点击时创建，避免自动切换时再次卡死）。
      */
     const PDF_PAGE_DEFAULT_RATIO = 1.414;
+    const PDF_PRELOAD_MARGIN = '65% 0px 65% 0px';
+
+    /**
+     * Canvas 内存约等于 width × height × 4。高 DPI + 300% 缩放时，旧实现单页
+     * 可超过 150 MB；根据设备内存限制单页像素，宁可极端缩放时略微软一点，
+     * 也不能让几个预加载页拖垮整个 DSH 渲染进程。
+     */
+    function pdfCanvasPixelBudget() {
+      const memory = Number(window.navigator?.deviceMemory);
+      if (Number.isFinite(memory) && memory <= 4) return 2_500_000;
+      if (Number.isFinite(memory) && memory <= 8) return 4_000_000;
+      return 6_000_000;
+    }
 
     /**
      * 连续滚动中的一页。
@@ -2521,6 +2534,7 @@ window.__ModuleLoader__.load({
       const textRef = React.useRef(null);
       const renderTaskRef = React.useRef(null);
       const textTaskRef = React.useRef(null);
+      const pageProxyRef = React.useRef(null);
       const [active, setActive] = React.useState(pageNumber === 1);
       const [rendered, setRendered] = React.useState(false);
       const [error, setError] = React.useState(null);
@@ -2541,8 +2555,8 @@ window.__ModuleLoader__.load({
           if (entry) setActive(entry.isIntersecting);
         }, {
           root: rootRef.current,
-          // 提前一屏半开始渲染，滚轮快速滚动时不易看到空白
-          rootMargin: '150% 0px 150% 0px',
+          // 上下各提前约 2/3 屏：兼顾快速滚动与笔记本内存占用。
+          rootMargin: PDF_PRELOAD_MARGIN,
           threshold: 0.01,
         });
         io.observe(el);
@@ -2551,10 +2565,17 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         if (!active || !doc || width <= 0) {
+          try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
+          try { textTaskRef.current?.cancel(); } catch { /* ignore */ }
+          renderTaskRef.current = null;
+          textTaskRef.current = null;
           if (canvasRef.current) {
             canvasRef.current.width = 0;
             canvasRef.current.height = 0;
           }
+          textRef.current?.replaceChildren();
+          try { pageProxyRef.current?.cleanup?.(); } catch { /* ignore */ }
+          pageProxyRef.current = null;
           setRendered(false);
           return undefined;
         }
@@ -2564,16 +2585,20 @@ window.__ModuleLoader__.load({
             try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
             renderTaskRef.current = null;
             const pageObj = await doc.getPage(pageNumber);
-            if (cancelled) return;
+            if (cancelled) { try { pageObj.cleanup?.(); } catch { /* ignore */ } return; }
+            pageProxyRef.current = pageObj;
             const base = pageObj.getViewport({ scale: 1 });
             const scale = width / base.width;
             const viewport = pageObj.getViewport({ scale });
             onMeasure(pageNumber, viewport.height / viewport.width);
             const canvas = canvasRef.current;
             if (!canvas) return;
-            const dpr = Math.min(window.devicePixelRatio || 1, 2);
-            canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
-            canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+            const nativeDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+            const cssPixels = Math.max(1, viewport.width * viewport.height);
+            const budgetScale = Math.sqrt(pdfCanvasPixelBudget() / cssPixels);
+            const outputScale = Math.max(0.5, Math.min(nativeDpr, budgetScale));
+            canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
+            canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
             canvas.style.width = `${Math.floor(viewport.width)}px`;
             canvas.style.height = `${Math.floor(viewport.height)}px`;
             const ctx = canvas.getContext('2d', { alpha: false });
@@ -2584,7 +2609,7 @@ window.__ModuleLoader__.load({
             const renderTask = pageObj.render({
               canvasContext: ctx,
               viewport,
-              transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+              transform: outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null,
             });
             renderTaskRef.current = renderTask;
             await renderTask.promise;
@@ -2621,6 +2646,15 @@ window.__ModuleLoader__.load({
           try { textTaskRef.current?.cancel(); } catch { /* ignore */ }
         };
       }, [active, doc, pdfjs, pageNumber, width, onMeasure]);
+
+      React.useEffect(() => () => {
+        try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
+        try { textTaskRef.current?.cancel(); } catch { /* ignore */ }
+        if (canvasRef.current) { canvasRef.current.width = 0; canvasRef.current.height = 0; }
+        textRef.current?.replaceChildren();
+        try { pageProxyRef.current?.cleanup?.(); } catch { /* ignore */ }
+        pageProxyRef.current = null;
+      }, []);
 
       React.useEffect(() => {
         const layer = textRef.current;
@@ -2740,7 +2774,9 @@ window.__ModuleLoader__.load({
               iccUrl: `${PDFJS_BASE}/iccs/`,
               rangeChunkSize: 1 << 18,
               disableAutoFetch: true,
-              disableStream: false,
+              // disableAutoFetch 只有关闭流式整文件下载时才真正生效；否则大型论文
+              // 仍会在后台逐步读完整份文件并常驻 worker 内存。
+              disableStream: true,
             });
             task.onProgress = (p) => {
               if (!cancelled && p && p.total) setProgress({ loaded: p.loaded, total: p.total });
