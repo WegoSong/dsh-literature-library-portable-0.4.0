@@ -2040,6 +2040,7 @@ export function apply(ctx, config = {}) {
       retryCount: 0,
       validationFailures: 0,
       droppedFormulas: 0,
+      budgetRetries: 0,
       upgradedChunks: 0,
       log: [],
     };
@@ -2112,6 +2113,7 @@ export function apply(ctx, config = {}) {
       retriedChunks: job.upgradedChunks ?? 0,
       validationFailures: job.validationFailures ?? 0,
       droppedFormulas: job.droppedFormulas ?? 0,
+      budgetRetries: job.budgetRetries ?? 0,
       validation: { failures: job.validationFailures ?? 0 },
       upgradedChunks: job.upgradedChunks ?? 0,
       preprocessing: job.preprocessing ?? null,
@@ -2270,16 +2272,16 @@ export function apply(ctx, config = {}) {
         continue;
       }
 
-      const attempts = [
-        { model: job.model, reasoningEffort: job.reasoningEffort },
-        { model: job.model, reasoningEffort: 'low' },
-        { model: job.qualityModel, reasoningEffort: 'high' },
-      ].filter((attempt, index, all) => (
-        index === all.findIndex((other) => (
-          other.model === attempt.model && other.reasoningEffort === attempt.reasoningEffort
-        ))
-      ));
-      if (config.enableQualityEscalation === false) attempts.splice(1);
+      /*
+       * 升级链：同模型重采样 → 同模型再试 → 更贵的 qualityModel，全程不主动开思考。
+       * 思考 token 与正文共用 max_tokens，长块上很容易把预算吃光、一个正文都不输出。
+       */
+      const attempts = pipeline.buildTranslationAttempts({
+        model: job.model,
+        qualityModel: job.qualityModel,
+        reasoningEffort: job.reasoningEffort,
+        qualityEscalation: config.enableQualityEscalation !== false,
+      });
 
       let accepted = null;
       let lastValidation = null;
@@ -2297,13 +2299,38 @@ export function apply(ctx, config = {}) {
           chunk: chunks[i], index: i, total: chunks.length,
           title: paper.titleEn || paper.title, source: paper.source,
         });
-        let response = null;
         const transportRetries = Math.max(0, Math.min(3, Number(config.requestRetries ?? 2)));
-        for (let transportIndex = 0; transportIndex <= transportRetries; transportIndex += 1) {
+        let response = null;
+        let transportAttempt = 0;
+        let budgetAttempt = 0;
+        /*
+         * 预算重试只有在「上限还能真的变大」时才有意义：inputRatio 翻倍后仍被
+         * job.maxTokens 截住的话，再试只是白烧钱。这里先算出下一档的实际上限。
+         */
+        const estimatedInput = Math.max(1, tools.estimateTokens(user));
+        const capFor = (level) => Math.min(
+          job.maxTokens,
+          Math.ceil(estimatedInput * pipeline.nextOutputRatio(level) + 768),
+        );
+        const canEnlarge = (currentCap) => capFor(budgetAttempt + 1) > Number(currentCap ?? 0) + 128;
+        const recordUsage = (usage, requestedAt) => {
+          if (!usage) return;
+          const requestPeriod = pipeline.isPeakShanghai(new Date(requestedAt)) ? 'peak' : 'offpeak';
+          if (job.usages.length === 0) job.pricingPeriod = requestPeriod;
+          else if (job.pricingPeriod !== requestPeriod) job.pricingPeriod = 'mixed';
+          job.usages.push({
+            ...usage,
+            requestedAt,
+            model: attempt.model,
+            reasoningEffort: attempt.reasoningEffort,
+          });
+          refreshUsage();
+        };
+        while (response === null) {
           const requestedAt = new Date().toISOString();
           job.apiChunks += 1;
           try {
-            response = await tools.callDeepSeek({
+            const result = await tools.callDeepSeek({
               baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
               apiKey,
               model: attempt.model,
@@ -2313,28 +2340,45 @@ export function apply(ctx, config = {}) {
               maxTokens: {
                 min: Math.min(2048, job.maxTokens),
                 max: job.maxTokens,
-                inputRatio: 1.65,
+                inputRatio: pipeline.nextOutputRatio(budgetAttempt),
                 base: 768,
               },
               timeoutMs: config.requestTimeoutMs || 600000,
             });
-            if (response.usage) {
-              const requestPeriod = pipeline.isPeakShanghai(new Date(requestedAt)) ? 'peak' : 'offpeak';
-              if (job.usages.length === 0) job.pricingPeriod = requestPeriod;
-              else if (job.pricingPeriod !== requestPeriod) job.pricingPeriod = 'mixed';
-              job.usages.push({
-                ...response.usage,
-                requestedAt,
-                model: attempt.model,
-                reasoningEffort: attempt.reasoningEffort,
-              });
-              refreshUsage();
+            recordUsage(result.usage, requestedAt);
+            /*
+             * 输出被截断（正文写满 max_tokens）或思考把预算吃光，都不是致命错误：
+             * 上限还能变大时先放大重试同一块；已经顶到 job.maxTokens 就交给校验，
+             * 由下一档（更强的模型）处理或给出明确失败原因，避免空转烧钱。
+             */
+            if (result.truncated && budgetAttempt < pipeline.MAX_BUDGET_RETRIES
+                && canEnlarge(result.maxTokens)) {
+              budgetAttempt += 1;
+              job.retryCount += 1;
+              job.budgetRetries = (job.budgetRetries ?? 0) + 1;
+              note(`第 ${i + 1} 块输出被截断，放大输出上限后重试（第 ${budgetAttempt} 次）`);
+              continue;
             }
-            break;
+            response = result;
           } catch (err) {
-            if (transportIndex >= transportRetries || !isRetryable(err)) throw err;
+            if (err?.usage) recordUsage(err.usage, requestedAt);
+            if (err?.code === 'max_tokens') {
+              if (budgetAttempt < pipeline.MAX_BUDGET_RETRIES && canEnlarge(err.maxTokens)) {
+                budgetAttempt += 1;
+                job.retryCount += 1;
+                job.budgetRetries = (job.budgetRetries ?? 0) + 1;
+                note(`第 ${i + 1} 块输出预算不足（推理 ${err.thinkingChars ?? 0} 字），放大上限后重试`);
+                continue;
+              }
+              throw new Error(
+                `第 ${i + 1} 块在 maxTokens=${err.maxTokens} 下仍无正文输出且已到上限；`
+                + '请提高 maxTokens 或减小 chunkTokens 后重试。',
+              );
+            }
+            if (transportAttempt >= transportRetries || !isRetryable(err)) throw err;
+            transportAttempt += 1;
             job.retryCount += 1;
-            const delay = Math.min(8000, 1000 * (2 ** transportIndex));
+            const delay = Math.min(8000, 1000 * (2 ** (transportAttempt - 1)));
             note(`第 ${i + 1} 块请求失败，${delay / 1000}s 后只重试本块：${err?.message ?? err}`);
             await wait(delay);
           }
@@ -2369,7 +2413,14 @@ export function apply(ctx, config = {}) {
       }
 
       if (accepted === null) {
-        throw new Error(`第 ${i + 1} 块经分级重译仍未通过完整性校验：${lastValidation?.errors?.join(', ') ?? '未知错误'}`);
+        const reasons = lastValidation?.errors ?? [];
+        // 截断是最常见、也最容易误读的失败原因：明确告诉用户该调哪里
+        const hint = reasons.includes('truncated')
+          ? `（输出被 max_tokens=${job.maxTokens} 截断；请提高 maxTokens 或减小 chunkTokens）`
+          : '';
+        throw new Error(
+          `第 ${i + 1} 块经分级重译仍未通过完整性校验：${reasons.join(', ') || '未知错误'}${hint}`,
+        );
       }
       parts.push(accepted);
       await writeCachedChunk(cacheFile, {

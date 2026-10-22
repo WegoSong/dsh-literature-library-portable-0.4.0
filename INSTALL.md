@@ -2,7 +2,7 @@
 
 本文从 **DSH 已经安装好、能打开 Web 界面** 开始，带你安装「DSH 文献库」插件（`dsh-literature-library`），并完成第一次导入和翻译配置。
 
-- 插件版本：**0.6.1**（翻译降本 + 主题跟随）
+- 插件版本：**0.6.2**（翻译降本 + 主题跟随）
 - 仓库：<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0>
 - 适用：DSH Web `0.2.1-rc.2` 到 `0.3.0` 之前（市场索引声明 `>=0.2.1-rc.2 <0.3.0`）
 - 平台：Windows 10/11、macOS、Linux
@@ -164,7 +164,7 @@ https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 
 如果那台电脑访问 GitHub 不稳定，先下载：
 
-<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.6.1/dsh-literature-library-0.6.1.tgz>
+<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.6.2/dsh-literature-library-0.6.2.tgz>
 
 把 `.tgz` 复制到目标电脑，然后：
 
@@ -172,7 +172,7 @@ https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 2. 填 tarball 的绝对路径，例如：
 
 ```text
-D:\dsh-literature-library-0.6.1.tgz
+D:\dsh-literature-library-0.6.2.tgz
 ```
 
 3. 点 **安装**，等待完成。
@@ -191,7 +191,7 @@ dsh plugin add "git+https://github.com/WegoSong/dsh-literature-library-portable-
 或本地 tarball：
 
 ```bash
-dsh plugin add "D:/dsh-literature-library-0.6.1.tgz"
+dsh plugin add "D:/dsh-literature-library-0.6.2.tgz"
 ```
 
 安装完成后重启 DSH Web。
@@ -297,10 +297,10 @@ DEEPSEEK_API_KEY
 左栏底部会显示：
 
 ```text
-v0.6.1  PDF.js
+v0.6.2  PDF.js
 ```
 
-如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.6.1，需要确认安装并重启 DSH。
+如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.6.2，需要确认安装并重启 DSH。
 
 ---
 
@@ -340,7 +340,7 @@ C:\Users\<用户名>\.dsh\profiles\web\cordis.patch.yml
 
 删除这一整条 `literature-library` 行，避免安装新包后出现两个文献库面板。
 
-然后安装 0.6.1，再在同一个 `cordis.patch.yml` 末尾加：
+然后安装 0.6.2，再在同一个 `cordis.patch.yml` 末尾加：
 
 ```yaml
 - id: literature-library
@@ -388,7 +388,7 @@ Copy-Item -Recurse "E:\Wego\我的日常\自建项目\文献翻译插件\library
 1. 从 Release、另一台电脑或 U 盘拿到新版本的 `.tgz`，例如：
 
    ```text
-   dsh-literature-library-0.6.1.tgz
+   dsh-literature-library-0.6.2.tgz
    ```
 
 2. 任选一种：
@@ -414,7 +414,7 @@ Copy-Item -Recurse "E:\Wego\我的日常\自建项目\文献翻译插件\library
 
 - 失败自动回滚；只覆盖程序文件，不删除 `library/`。
 
-> **0.4.1 及更早版本没有「更新」按钮**，需要先手动安装一次 0.4.2 或 0.6.1
+> **0.4.1 及更早版本没有「更新」按钮**，需要先手动安装一次 0.4.2 或 0.6.2
 > （方式 A/B/C 均可）。之后才能使用更新入口。
 >
 > 更新包必须是 `npm pack` 生成的 `.tgz`，且版本号高于当前版本；不会接受降级或同名版本。

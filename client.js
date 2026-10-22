@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.1';
+    const PDFJS_REV = '0.6.2';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -2006,6 +2006,9 @@ window.__ModuleLoader__.load({
             ? `去除重复页眉页脚：${job.preprocessing.removedFurnitureLines} 行`
             : null,
           `本地分块缓存复用：${job.localCacheHits ?? 0} 块`,
+          job.budgetRetries
+            ? `输出上限不足而放大重试：${job.budgetRetries} 次`
+            : null,
           job.droppedFormulas
             ? `未保留的公式残片：${job.droppedFormulas} 处（抽取碎片，已按警告记录）`
             : null,

@@ -319,10 +319,20 @@ export async function callDeepSeek({
 
     if (!text.trim()) {
       if (data?.stop_reason === 'max_tokens') {
-        throw new Error(
-          `API 在推理阶段就用完了 max_tokens（推理 ${thinkingChars} 字，无正文输出）。`
-          + `当前 maxTokens=${resolvedMaxTokens}，请调大后重试。`,
+        /*
+         * 输出预算被用完（思考或正文）。这不是「数据坏了」，而是「这一档
+         * max_tokens 不够」，调用方应当加大预算重试同一块，而不是让整篇失败。
+         * 因此带上 code，便于 index.js 区分处理。
+         */
+        const error = new Error(
+          `输出预算用完，没有正文（推理 ${thinkingChars} 字；当前 maxTokens=${resolvedMaxTokens}）。`,
         );
+        error.code = 'max_tokens';
+        error.thinkingChars = thinkingChars;
+        error.maxTokens = resolvedMaxTokens;
+        // 这一次请求仍然计费，把 usage 带出去让任务统计能算准
+        error.usage = normalizeUsage(data?.usage, { reasoningEffort: resolvedReasoningEffort });
+        throw error;
       }
       throw new Error(`API 返回里没有正文（stop_reason=${data?.stop_reason ?? '?'}）`);
     }

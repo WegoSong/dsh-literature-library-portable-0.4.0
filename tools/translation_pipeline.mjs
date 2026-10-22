@@ -10,8 +10,49 @@
 
 import { createHash } from 'node:crypto';
 
-export const PIPELINE_VERSION = 'cost-quality-v3';
+export const PIPELINE_VERSION = 'cost-quality-v4';
 export const DEFAULT_CHUNK_TOKENS = 6000;
+/**
+ * 输出上限相对输入的比例（传给 resolveMaxTokens 的 inputRatio）。
+ * 中文译文 token 数通常略少于英文原文，1.65 已留余量；真正需要放大的是
+ * 「输出被截断」与「思考吃光预算」，见 nextOutputRatio()。
+ */
+export const BASE_OUTPUT_RATIO = 1.65;
+/** 一块最多因为输出预算不足而放大几次上限 */
+export const MAX_BUDGET_RETRIES = 2;
+
+/**
+ * 翻译某一块的尝试顺序。
+ *
+ * 翻译路径**不再主动引入思考**：公式已由占位符保护，思考收益有限，而思考
+ * token 与正文共用 max_tokens，长块上很容易把预算吃光、一个正文都不输出
+ * （0.6.0 的实盘就是第二档 low 思考用掉一万 token 直接失败）。
+ * 现在：同模型重采样一次，再不行才换更贵的 qualityModel，全程保持调用方
+ * 指定的 reasoningEffort（默认 none）。
+ */
+export function buildTranslationAttempts({
+  model = 'deepseek-flash',
+  qualityModel = 'deepseek-v4-pro',
+  reasoningEffort = 'none',
+  qualityEscalation = true,
+} = {}) {
+  if (!qualityEscalation) return [{ model, reasoningEffort }];
+  const attempts = [
+    { model, reasoningEffort },
+    { model, reasoningEffort },
+  ];
+  if (qualityModel && qualityModel !== model) attempts.push({ model: qualityModel, reasoningEffort });
+  return attempts;
+}
+
+/**
+ * 输出预算不足时的放大系数：1.65 → 3.3 → 6.6。
+ * 只放大 inputRatio，max_tokens 的绝对上限仍由 job.maxTokens 兜住。
+ */
+export function nextOutputRatio(budgetAttempt = 0) {
+  const level = Math.max(0, Math.min(MAX_BUDGET_RETRIES, Number(budgetAttempt) || 0));
+  return BASE_OUTPUT_RATIO * (2 ** level);
+}
 /**
  * 分块时，遇到章节标题最多提前多少比例收尾。
  *
