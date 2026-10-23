@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.4';
+    const PDFJS_REV = '0.6.5';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -2014,12 +2014,12 @@ window.__ModuleLoader__.load({
      * 翻译进度显示。优先显示**直连 API 任务**（`translate-job`）的真实进度与费用，
      * 没有直连任务时退回旧的 agent 会话进度。
      */
-    function TranslateProgress({ paper, progress, job, onOpen }) {
+    function TranslateProgress({ paper, progress, job, onOpen, onStartNow, startingNow }) {
       if (job) {
         const phase = job.phase;
         const metrics = translationUsage(job);
         const label = {
-          queued: '排队中',
+          queued: job.stage || '排队中',
           running: job.stage || `翻译中 ${job.percent ?? 0}%`,
           done: '翻译完成',
           failed: `翻译失败：${job.error ?? '未知原因'}`,
@@ -2088,6 +2088,12 @@ window.__ModuleLoader__.load({
               },
             })),
             h('span', { className: 'll-progress-text', key: 't' }, label),
+            job.schedule === 'offpeak' && ['queued', 'running'].includes(phase) && onStartNow
+              ? h('button', {
+                key: 'now', className: 'll-btn ll-btn-xs', disabled: startingNow,
+                title: '取消该任务的闲时限制，按当前时段价格翻译；有任务执行时等待空位',
+                onClick: (e) => { e.stopPropagation(); onStartNow(job); },
+              }, startingNow ? '切换中…' : '立即翻译') : null,
             job.phase === 'done' && onOpen ? h('button', {
               key: 'open', className: 'll-btn ll-btn-xs', style: { marginLeft: '4px' },
               title: '选中这篇以查看译文',
@@ -2150,7 +2156,7 @@ window.__ModuleLoader__.load({
       node, depth, parentPath, selected, collapsed, toggleCollapse,
       onSelect, onTranslate, onMutate, onArrange, translating, showHidden,
       progressOf, jobOf, onContextMenu, papers, allPapers,
-      selectedFolder, onSelectFolder,
+      selectedFolder, onSelectFolder, onStartNow, startingJob,
     }) {
       const [paperDrag, setPaperDrag] = React.useState(null);
       const path = nodePath(node, parentPath);
@@ -2317,6 +2323,7 @@ window.__ModuleLoader__.load({
               h(TranslateProgress, {
                 key: 'pr', paper: p, progress: progressOf(p), job: jobOf(p),
                 onOpen: () => onSelect(p.slug),
+                onStartNow, startingNow: startingJob === jobOf(p)?.jobId,
               }),
             ]),
             // 置顶 / 更多。排序直接拖动整条文献。
@@ -2350,7 +2357,7 @@ window.__ModuleLoader__.load({
             selected, collapsed, toggleCollapse,
             onSelect, onTranslate, onMutate, onArrange, translating, showHidden,
             progressOf, jobOf, onContextMenu, papers, allPapers,
-            selectedFolder, onSelectFolder,
+            selectedFolder, onSelectFolder, onStartNow, startingJob,
           }));
         }
       }
@@ -3522,6 +3529,7 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = React.useState({});
       // 直连 DeepSeek API 的翻译任务与配置
       const [jobs, setJobs] = React.useState([]);
+      const [startingJob, setStartingJob] = React.useState(null);
       const [jobHistory, setJobHistory] = React.useState(loadTranslationUsage);
       const [offpeakOnly, setOffpeakOnly] = React.useState(loadOffpeakOnly);
       const [jobPollEpoch, setJobPollEpoch] = React.useState(0);
@@ -3964,6 +3972,18 @@ window.__ModuleLoader__.load({
               : `启动翻译失败：${msg}`,
           });
         } finally { setBusy(null); }
+      }
+
+      async function doStartNow(job) {
+        setStartingJob(job.jobId);
+        try {
+          const updated = await postJson('/translate-job', { action: 'start-now', jobId: job.jobId });
+          upsertJob(updated);
+          setJobPollEpoch((value) => value + 1);
+          setNotice({ kind: 'ok', text: `《${updated.title}》已取消闲时限制，按当前时段价格翻译；若有其他任务正在执行，将等待空位。` });
+        } catch (err) {
+          setNotice({ kind: 'err', text: `切换立即翻译失败：${err.message ?? err}` });
+        } finally { setStartingJob(null); }
       }
 
       /** 重新拉一次任务列表（翻译完成后刷新索引，标签才会变成「已翻译」） */
@@ -4421,6 +4441,7 @@ window.__ModuleLoader__.load({
                   progressOf, jobOf, onContextMenu: setMenu,
                   papers: filteredPapers, allPapers: papers,
                   selectedFolder, onSelectFolder: setSelectedFolder,
+                  onStartNow: doStartNow, startingJob,
                 });
 
       return h('div', {

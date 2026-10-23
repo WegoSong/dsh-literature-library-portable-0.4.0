@@ -760,9 +760,32 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  function enqueueTranslation({ execute, onError, notBefore = Date.now() }) {
-    translationQueue.push({ execute, onError, notBefore, enqueuedAt: Date.now() });
+  function enqueueTranslation({ jobId, execute, onError, notBefore = Date.now() }) {
+    translationQueue.push({ jobId, execute, onError, notBefore, enqueuedAt: Date.now() });
     pumpTranslationQueue();
+  }
+
+  async function startTranslationNow(id) {
+    const job = translateJobs.get(id);
+    if (!job) throw Object.assign(new Error('没有找到该翻译任务'), { status: 404 });
+    if (!['queued', 'running'].includes(job.phase)) {
+      throw Object.assign(new Error('任务已经结束，无法修改调度'), { status: 409 });
+    }
+    const pipeline = await import(pathToFileURL(join(toolsRoot, 'translation_pipeline.mjs')).href);
+    job.schedule = 'now';
+    job.notBefore = new Date().toISOString();
+    job.updatedAt = job.notBefore;
+    if (!job.usages.length) job.pricingPeriod = pipeline.isPeakShanghai(new Date()) ? 'peak' : 'offpeak';
+    if (job.phase === 'queued') {
+      const entry = translationQueue.find((item) => item.jobId === id);
+      if (entry) entry.notBefore = Date.now();
+      job.stage = '等待队列（立即翻译）';
+    } else if (job.wakeOffpeak) {
+      job.stage = '继续翻译';
+      job.wakeOffpeak();
+    }
+    pumpTranslationQueue();
+    return { ok: true, reused: true, ...publicJob(id, job) };
   }
 
   // 「一键翻译」需要从 DSH 内核里取 createUserMessage / SessionId，这里先定位内核
@@ -1962,6 +1985,7 @@ export function apply(ctx, config = {}) {
    * @param body - `{ slug, model?, maxTokens?, force? }`
    */
   async function handleTranslateJob(body) {
+    if (body.action === 'start-now') return startTranslationNow(body.jobId);
     const slug = typeof body.slug === 'string' ? body.slug.trim() : '';
     if (slug === '') throw Object.assign(new Error('缺少 slug'), { status: 400 });
 
@@ -1973,6 +1997,7 @@ export function apply(ctx, config = {}) {
     // 同一篇已经有任务在跑 → 直接返回那个任务，避免重复烧 token
     for (const [id, job] of translateJobs) {
       if (job.slug === slug && (job.phase === 'running' || job.phase === 'queued')) {
+        if (body.schedule === 'now' && job.schedule === 'offpeak') return startTranslationNow(id);
         return { ok: true, reused: true, ...publicJob(id, job) };
       }
     }
@@ -2049,6 +2074,7 @@ export function apply(ctx, config = {}) {
 
     // 统一进队列，不在请求处理线程中等待整篇论文完成。
     enqueueTranslation({
+      jobId,
       notBefore: requestedStart.getTime(),
       execute: () => runTranslateJob(job, paper, tools, pipeline, key, body),
       onError: (err) => {
@@ -2151,7 +2177,16 @@ export function apply(ctx, config = {}) {
       job.notBefore = next.toISOString();
       touch(`等待闲时（${next.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`);
       note('进入高峰时段，暂停在当前分块边界，闲时自动继续');
-      await wait(next.getTime() - Date.now());
+      await new Promise((resolveWait) => {
+        let timer;
+        const wake = () => {
+          clearTimeout(timer);
+          if (job.wakeOffpeak === wake) job.wakeOffpeak = null;
+          resolveWait();
+        };
+        job.wakeOffpeak = wake;
+        timer = setTimeout(wake, Math.max(0, next.getTime() - Date.now()));
+      });
       job.notBefore = new Date().toISOString();
     };
     const isRetryable = (err) => {
