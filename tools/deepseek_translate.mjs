@@ -20,6 +20,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import {blockPayload} from './block_transport.mjs';
 
 export const DEFAULT_BASE_URL = 'https://api.deepseek.com/anthropic';
 export const DEFAULT_MODEL = 'deepseek-flash';
@@ -474,14 +475,15 @@ export function buildSystemPrompt({ roleHint, extraRules } = {}) {
 }
 
 /** 单块的用户提示词 */
-export function buildUserPrompt({ chunk, index, total, title, source }) {
+export function buildUserPrompt({ chunk, index, total, title, source, structured=false }) {
   return [
     `文献：《${title ?? source}》`,
       '请逐段准确翻译下面的正文片段；按原顺序保留段落、标题层级和编号，逐字保留所有 @@DSH_*@@ 保护标记，每个恰好一次。',
     total > 1 ? `片段：${index + 1} / ${total}` : '',
+    structured ? '本次原文为 JSON blocks 数组。逐个翻译 text，返回 {"blocks":[{"id":"原编号","text":"完整译文"}]}。id 必须完整且不重复；不要输出 @@DSH_BLOCK@@ 边界，由程序重建。text 中其他保护标记必须原样保留，标题保留 # 层级。' : '',
     '',
     '----- 原文开始 -----',
-    chunk,
+    structured ? JSON.stringify(blockPayload(chunk)) : chunk,
     '----- 原文结束 -----',
   ].filter(Boolean).join('\n');
 }

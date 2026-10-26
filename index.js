@@ -29,6 +29,8 @@ import { createRequire } from 'node:module';
 import { homedir as osHomedir } from 'node:os';
 import { gunzipSync, zstdDecompressSync } from 'node:zlib';
 import { createLayoutWorkflow } from './tools/layout_workflow.mjs';
+import {BLOCK_PROTOCOL,blockPayload,decodeBlockResponse} from './tools/block_transport.mjs';
+import {classifyTaskFailure} from './tools/task_diagnostics.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -1977,6 +1979,7 @@ export function apply(ctx, config = {}) {
         '--name', slug,
         '--asset-prefix', relative(workspaceRoot, outDir).split(sep).join('/'),
         '--file-route', `${prefix}/file`,
+        '--native-cache',join(libraryRoot,'.native-cache'),
         '--no-json',
         ...extraArgs,
       ], { stdio: ['ignore','ignore','pipe'], cwd: workspaceRoot });
@@ -1990,7 +1993,8 @@ export function apply(ctx, config = {}) {
       child.on('error', (err) => rejectPromise(new Error(`抽取进程启动失败：${err.message}`)));
       child.on('close', (code) => {
         if (signal) signal.removeEventListener('abort', onAbort);
-        if (code !== 0) rejectPromise(new Error(`抽取失败（退出码 ${code}）${diagnostics.trim() ? `：${diagnostics.trim()}` : ''}`));
+        if (code !== 0) rejectPromise(Object.assign(new Error(`抽取失败（退出码 ${code}）${diagnostics.trim() ? `：${diagnostics.trim()}` : ''}`),
+          { recoveryLayoutPath: join(outDir,`${slug}.layout.json`) }));
         else resolvePromise();
       });
     });
@@ -2128,6 +2132,7 @@ export function apply(ctx, config = {}) {
       onError: (err) => {
         job.phase = 'failed';
         job.error = String(err?.message ?? err);
+        job.failure=classifyTaskFailure(err);
         job.stage = '失败（已保存完成的分块，下次可续传）';
         job.finishedAt = new Date().toISOString();
         job.updatedAt = job.finishedAt;
@@ -2156,6 +2161,7 @@ export function apply(ctx, config = {}) {
       updatedAt: job.updatedAt,
       finishedAt: job.finishedAt,
       error: job.error,
+      failure: job.failure ?? null,
       warning: job.warning,
       outputPath: job.outputPath,
       model: job.model,
@@ -2191,6 +2197,7 @@ export function apply(ctx, config = {}) {
       validation: { failures: job.validationFailures ?? 0 },
       upgradedChunks: job.upgradedChunks ?? 0,
       preprocessing: job.preprocessing ?? null,
+      transport: job.transport ?? null,
       layout: job.layout ?? null,
       failureReport: job.failureReport ?? null,
       log: job.log.slice(-8),
@@ -2285,6 +2292,7 @@ export function apply(ctx, config = {}) {
     // 剥离/保护，不再为“不要翻译这些内容”支付模型输入与复制输出费用。
     touch('本地保护公式与参考文献');
     const prepared = pipeline.prepareDocument(md);
+    job.transport=config.structuredTranslation===false?'legacy':BLOCK_PROTOCOL;
     job.preprocessing = prepared.stats;
     if (prepared.stats.referenceChars) note(`参考文献本地保留，少发送 ${prepared.stats.referenceChars} 字符`);
     if (prepared.stats.metadataChars) note(`出版元数据本地解析，少发送 ${prepared.stats.metadataChars} 字符`);
@@ -2359,7 +2367,8 @@ export function apply(ctx, config = {}) {
       await waitForOffpeak();
       job.chunkIndex = i;
       touch(`翻译第 ${i + 1} / ${chunks.length} 块`);
-      const cacheKey = pipeline.chunkCacheKey({
+      if(blockPayload(chunks[i]).blocks.length===0){parts.push(chunks[i]);note(`第 ${i+1} 块仅含本地保护内容，无需模型请求`);continue;}
+      const cacheArgs = {
         source: chunks[i],
         promptVersion: `${pipeline.PIPELINE_VERSION}\n${system}`,
         model: job.model,
@@ -2369,9 +2378,14 @@ export function apply(ctx, config = {}) {
           paper.titleEn || paper.title || '',
           paper.source || '',
         ].join('\n'),
-      });
+      };
+      const legacyKey=pipeline.chunkCacheKey(cacheArgs);
+      const cacheKey=pipeline.chunkCacheKey({...cacheArgs,promptVersion:`${cacheArgs.promptVersion}\n${job.transport}`});
       const cacheFile = join(cacheDir, `${cacheKey}.json`);
-      const cached = await readCachedChunk(cacheFile, cacheKey, chunks[i]);
+      // Prior accepted text remains useful: validate it against the current
+      // source/ownership rules rather than invalidating every successful chunk.
+      const cached = await readCachedChunk(cacheFile, cacheKey, chunks[i])
+        ?? await readCachedChunk(join(cacheDir,`${legacyKey}.json`),legacyKey,chunks[i]);
       if (cached !== null) {
         parts.push(cached);
         job.localCacheHits += 1;
@@ -2405,6 +2419,7 @@ export function apply(ctx, config = {}) {
         const user = tools.buildUserPrompt({
           chunk: chunks[i], index: i, total: chunks.length,
           title: paper.titleEn || paper.title, source: paper.source,
+          structured:job.transport===BLOCK_PROTOCOL,
         });
         const transportRetries = Math.max(0, Math.min(3, Number(config.requestRetries ?? 2)));
         let response = null;
@@ -2492,7 +2507,8 @@ export function apply(ctx, config = {}) {
         }
         lastValidation = (() => {
           // 先做确定性修复（重复的引用标记），再校验：一个多余的 [12] 不值得整块重译。
-          const equivalent = pipeline.repairEquivalentPlaceholders(chunks[i], response.text, prepared.placeholders);
+          const decoded=job.transport===BLOCK_PROTOCOL?decodeBlockResponse(chunks[i],response.text):{text:response.text,errors:[]};
+          const equivalent = pipeline.repairEquivalentPlaceholders(chunks[i], decoded.text, prepared.placeholders);
           const repaired = pipeline.repairDuplicatePlaceholders(
             chunks[i], equivalent.text, prepared.placeholders,
           );
@@ -2500,9 +2516,10 @@ export function apply(ctx, config = {}) {
             note(`第 ${i + 1} 块去重占位符 ${repaired.repairs.reduce((n, r) => n + r.removed, 0)} 处`);
           }
           responseText = repaired.text;
-          return pipeline.validateTranslation(
+          const validation=pipeline.validateTranslation(
             chunks[i], responseText, prepared.placeholders, { truncated: response.truncated },
           );
+          validation.errors.push(...decoded.errors);validation.ok=validation.errors.length===0;return validation;
         })();
         if (lastValidation.ok) {
           accepted = responseText.trim();
@@ -2619,7 +2636,7 @@ export function apply(ctx, config = {}) {
     let translatedBody = restoredParts.join('\n\n');
     const translatedTitle = /^#\s+(.+)$/mu.exec(translatedBody)?.[1];
     if (translatedTitle) translatedBody = translatedBody.replace(/^#\s+.+\n*/mu, '').trim();
-    job.charsOut = restoredParts.reduce((sum, part) => sum + part.length, 0) + prepared.references.length;
+    job.charsOut = restoredParts.reduce((sum, part) => sum + part.length, 0) + (prepared.referenceSections?.length ? 0 : prepared.references.length);
 
     // 合并并写入译稿
     const header = [
@@ -2639,7 +2656,7 @@ export function apply(ctx, config = {}) {
       '',
     ].filter((x) => x !== null).join('\n');
 
-    let references = prepared.references.trim();
+    let references = prepared.referenceSections?.length ? '' : prepared.references.trim();
     if (references && !/^(?:#{1,4}\s*)?(?:references|bibliography|literature\s+cited|参考文献)\s*$/imu.test(
       references.split('\n').slice(0, 3).join('\n'),
     )) {

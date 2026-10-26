@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.12';
+    const PDFJS_REV = '0.7.0';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -963,6 +963,137 @@ window.__ModuleLoader__.load({
   --ll-font-scale: 1; font: 13px/1.6 system-ui,sans-serif;
 }
 .ll-root .ll-pane-body .ll-empty strong { font-size: 14px; line-height: 1.4; }
+
+/* 0.7 reader shell: controls, reading scale and editing geometry are separate. */
+.ll-root { --ll-font-scale:1; font:13px/1.45 system-ui,sans-serif; letter-spacing:0; position:relative; box-sizing:border-box; }
+.ll-root[data-ll-theme="dark"] {
+ --ll-bg:#101010; --ll-nav-bg:#101010; --ll-nav-head-bg:#171717; --ll-panel-bg:#151515;
+ --ll-head-bg:#171717; --ll-control-bg:#242424; --ll-control-hover:#303030;
+ --ll-selected-bg:#282828; --ll-soft-border:#3b3b3b; --ll-text:#f4f4f4; --ll-muted:#bcbcbc; --ll-subtle:#a0a0a0;
+}
+.ll-root :is(button,input,select,textarea) { box-sizing:border-box; }
+.ll-root :is(.ll-nav-shell,.ll-head,.ll-pane-head,.ll-pane-tools,.ll-modal,.ll-menu,.ll-layout-controls) { font:12px/1.4 system-ui,sans-serif; }
+.ll-root .ll-pane-translation :is(.ll-md,.ll-editor,.ll-wysiwyg) { --ll-font-scale:var(--ll-reading-scale,1); font-size:calc(14px * var(--ll-reading-scale,1)); }
+.ll-root .ll-md p { font-size:inherit; line-height:1.75; }
+.ll-root .ll-md { color:var(--ll-paper-text); }
+.ll-root .ll-nav-head { padding:10px; gap:10px; border:0; }
+.ll-root .ll-nav-title { flex-wrap:nowrap; font-size:14px; }
+.ll-root .ll-nav-title > span { white-space:nowrap; }
+.ll-root .ll-nav-shell { min-width:200px; }
+.ll-root .ll-nav-actions { display:flex; gap:6px; padding:0 10px 10px; }
+.ll-root .ll-nav-actions .ll-btn { flex:1; min-width:0; padding:5px 4px; font-size:12px; }
+.ll-root .ll-item.active { background:var(--ll-selected-bg); box-shadow:none; }
+.ll-root .ll-item-meta,.ll-root .ll-item-journal,.ll-root .ll-item-pub,.ll-root .ll-progress,.ll-root .ll-usage { font-size:11px; }
+.ll-root .ll-count-pill,.ll-root .ll-tag { font-size:11px; }
+.ll-root .ll-head { padding:8px 12px; gap:6px 12px; max-height:170px; }
+.ll-root .ll-head h1 { font-size:16px; line-height:1.4; }
+.ll-root .ll-head-actions { align-items:center; gap:6px; }
+.ll-root .ll-reader-select { max-width:112px; height:28px; padding:2px 5px; font:12px system-ui,sans-serif; background:var(--ll-control-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; }
+.ll-root .ll-pane-head { height:32px; min-height:32px; }
+.ll-root .ll-pane-tools { min-height:32px; height:32px; }
+.ll-root .ll-btn { border-radius:6px; box-shadow:none; }
+.ll-root .ll-tab.on { background:var(--ll-selected-bg); color:var(--ll-text); border-color:var(--ll-soft-border); }
+.ll-root .ll-primary { background:var(--ll-text); color:var(--ll-bg); min-height:32px; padding:5px 12px; }
+.ll-root .ll-nav-foot { flex-wrap:wrap; gap:6px; padding:8px 10px; }
+.ll-root .ll-nav-foot .ll-nav-foot-tag { font-size:11px; }
+.ll-root .ll-tools-dialog { width:min(680px,94vw); height:auto; max-height:86vh; }
+.ll-root .ll-modal-head h2 { font:600 16px/1.4 system-ui,sans-serif; margin:0; }
+.ll-root .ll-tool-tabs { display:flex; gap:6px; padding:8px 12px; flex-wrap:wrap; flex:none; }
+.ll-root .ll-tool-tabs .ll-tab { min-height:30px; font-size:13px!important; padding:4px 8px; }
+.ll-root .ll-tool-section { padding:12px 16px 20px; display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+.ll-root .ll-tool-section h3 { width:100%; font:600 15px/1.4 system-ui,sans-serif; margin:0; }
+.ll-root .ll-tool-section p { width:100%; font:13px/1.65 system-ui,sans-serif!important; margin:0; color:var(--ll-muted); }
+.ll-root .ll-tool-section > .ll-scan { width:100%; display:flex; gap:8px; }
+.ll-root .ll-tool-section .ll-treebar { width:100%; padding:8px 0; background:transparent; border:0; flex-wrap:wrap; }
+.ll-root .ll-tool-section .ll-toolbar { display:flex; width:100%; flex-wrap:wrap; padding:0; gap:12px; background:transparent; border:0; }
+.ll-root .ll-tool-section .ll-toolbar .ll-spacer { display:none; }
+.ll-root .ll-tool-section .ll-layout-mode { flex:1 1 100%; max-width:100%; height:32px; }
+.ll-root .ll-tool-section .ll-media-options { flex:1 1 100%; gap:10px 16px; }
+.ll-root .ll-tool-section .ll-font-size { display:flex; flex:1 1 100%; align-items:center; gap:8px; }
+.ll-root .ll-tool-section .ll-font-band { width:110px; }
+.ll-root .ll-tool-section .ll-font-range { flex:1; width:100px; }
+.ll-root .ll-tool-section .ll-font-num { width:70px; min-width:70px; }
+.ll-root .ll-tool-section :is(input:not([type="checkbox"]):not([type="range"]),select) { height:32px; padding:4px 6px; }
+.ll-root .ll-modal :is(button,input,select,label) { font-size:13px!important; }
+.ll-root .ll-modal-bg { z-index:80; }
+.ll-root .ll-menu { max-width:min(360px,calc(100vw - 16px)); max-height:calc(100vh - 16px); overflow:auto; z-index:90; }
+.ll-root .ll-menu-item { min-height:32px; }
+.ll-root .ll-layout-controls { max-height:min(34%,220px); flex:none; overflow:auto; font:12px/1.4 system-ui,sans-serif; }
+.ll-root .ll-layout-controls p { font:12px/1.5 system-ui,sans-serif!important; margin:4px 0!important; }
+.ll-root .ll-region-label { font:11px/1.2 system-ui,sans-serif!important; }
+.ll-root .ll-reader-select,.ll-root .ll-icon-btn { flex-shrink:0; }
+.ll-root.ll-reader-translation .ll-pane-pdf,.ll-root.ll-reader-pdf .ll-pane-translation,
+.ll-root:not(.ll-reader-split) .ll-split > .ll-divider { display:none; }
+.ll-root:not(.ll-reader-split) .ll-split > .ll-pane { flex:1 1 100%!important; min-width:0; }
+.ll-root .ll-mobilebar { display:none; }
+@media (max-width:1000px) {
+ .ll-root .ll-nav-shell { min-width:180px; }
+ .ll-root .ll-head-actions { flex-wrap:wrap; }
+ .ll-root .ll-title-en { display:none; }
+ .ll-root .ll-pane-pdf .ll-pdf-search { max-width:125px; }
+}
+@media (max-width:700px) {
+ .ll-root { padding-top:44px; }
+ .ll-root .ll-mobilebar { display:flex; align-items:center; gap:10px; position:absolute; top:0; left:0; right:0; height:44px; padding:6px 10px; background:var(--ll-head-bg); z-index:30; }
+ .ll-root .ll-mobilebar > span { flex:1; text-align:center; font-size:14px; }
+ .ll-root .ll-mobilebar .ll-btn { min-height:32px; }
+ .ll-root .ll-nav-shell { display:none; }
+ .ll-root.ll-nav-open .ll-nav-shell { display:flex; position:absolute; z-index:40; left:0; top:44px; bottom:0; width:min(300px,88vw); box-shadow:8px 0 20px #0004; }
+ .ll-root > .ll-divider { display:none; }
+ .ll-root .ll-main-shell { flex:1 1 100%!important; min-width:0; width:100%; }
+ .ll-root .ll-head { max-height:150px; padding:8px 10px; }
+ .ll-root .ll-head h1 { font-size:14px; }
+ .ll-root .ll-head-actions { width:100%; justify-content:space-between; gap:4px; }
+ .ll-root .ll-head-actions > .ll-focus-optional,.ll-root .ll-navpair { display:none; }
+ .ll-root .ll-pane-tools { flex-wrap:nowrap; }
+ .ll-root .ll-pdf-tools { overflow-x:auto; }
+ .ll-root.ll-reader-split .ll-pane-pdf,.ll-root.ll-reader-split .ll-split > .ll-divider { display:none; }
+ .ll-root.ll-reader-split .ll-pane-translation { flex:1 1 100%!important; }
+ .ll-root .ll-modal-bg { padding:8px; box-sizing:border-box; }
+ .ll-root .ll-tools-dialog { max-height:90vh; }
+ .ll-root .ll-tool-tabs { gap:2px; padding:6px; }
+ .ll-root .ll-tool-tabs .ll-tab { padding:6px; font-size:12px!important; }
+ .ll-root .ll-tool-section { padding:12px; }
+ .ll-root .ll-tool-section .ll-font-size { flex-wrap:wrap; }
+}
+/* DSH may embed this panel in a narrow host without resizing the window. */
+.ll-root.ll-compact { padding-top:44px; }
+ .ll-root.ll-compact .ll-mobilebar { display:flex; align-items:center; gap:10px; position:absolute; top:0; left:0; right:0; height:44px; padding:6px 10px; background:var(--ll-head-bg); z-index:30; }
+ .ll-root.ll-compact .ll-mobilebar > span { flex:1; text-align:center; font-size:14px; }
+ .ll-root.ll-compact .ll-mobilebar .ll-btn { min-height:32px; }
+ .ll-root.ll-compact .ll-nav-shell { display:none; }
+ .ll-root.ll-compact.ll-nav-open .ll-nav-shell { display:flex; position:absolute; z-index:40; left:0; top:44px; bottom:0; width:min(300px,88vw); box-shadow:8px 0 20px #0004; }
+ .ll-root.ll-compact > .ll-divider { display:none; }
+ .ll-root.ll-compact .ll-main-shell { flex:1 1 100%!important; min-width:0; width:100%; }
+ .ll-root.ll-compact .ll-head { max-height:150px; padding:8px 10px; }
+ .ll-root.ll-compact .ll-head h1 { font-size:14px; }
+ .ll-root.ll-compact .ll-head-actions { width:100%; justify-content:space-between; gap:4px; }
+ .ll-root.ll-compact .ll-head-actions > .ll-focus-optional,.ll-root.ll-compact .ll-navpair { display:none; }
+ .ll-root.ll-compact .ll-pane-tools { flex-wrap:nowrap; }
+ .ll-root.ll-compact .ll-pdf-tools { overflow-x:auto; }
+ .ll-root.ll-compact.ll-reader-split .ll-pane-pdf,.ll-root.ll-compact.ll-reader-split .ll-split > .ll-divider { display:none; }
+ .ll-root.ll-compact.ll-reader-split .ll-pane-translation { flex:1 1 100%!important; }
+ .ll-root.ll-compact .ll-modal-bg { padding:8px; box-sizing:border-box; }
+ .ll-root.ll-compact .ll-tools-dialog { max-height:90vh; }
+ .ll-root.ll-compact .ll-tool-tabs { gap:2px; padding:6px; }
+ .ll-root.ll-compact .ll-tool-tabs .ll-tab { padding:6px; font-size:12px!important; }
+ .ll-root.ll-compact .ll-tool-section { padding:12px; }
+ .ll-root.ll-compact .ll-tool-section .ll-font-size { flex-wrap:wrap; }
+.ll-root .ll-job-diagnostic { max-width:100%; font-size:11px; }
+.ll-root .ll-job-diagnostic summary { cursor:pointer; }
+.ll-root .ll-job-diagnostic pre { max-height:120px; max-width:100%; white-space:pre-wrap; overflow:auto; font:11px/1.5 monospace; }
+.ll-root .ll-pane-head { padding-right:18px; }
+.ll-root .ll-pdf-tools { padding-right:18px; position:relative; overflow:visible; }
+.ll-root .ll-pdf-extras { position:static; flex:none; }
+.ll-root .ll-pdf-extras-panel { position:absolute; top:calc(100% + 5px); right:0; z-index:35; width:250px; display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:12px; background:var(--ll-nav-bg); border:1px solid var(--ll-soft-border); border-radius:6px; color:var(--ll-text); }
+.ll-root .ll-pdf-extras-panel .ll-pdf-search { width:100%; max-width:100%; }
+.ll-root .ll-pdf-pages,.ll-root .ll-pdf-zoom,.ll-root .ll-page-input { font-variant-numeric:tabular-nums; }
+.ll-root .ll-pdf-tools { gap:3px; }
+.ll-root .ll-pdf-tools .ll-page-input { width:36px; }
+.ll-root .ll-pane-head { padding-left:16px; }
+.ll-root.ll-compact .ll-head,.ll-root.ll-compact .ll-mobilebar { padding-left:16px; padding-right:16px; }
+.ll-root .ll-count-pill { font-size:11px; }
+
 `;
 
     function injectCss() {
@@ -1812,7 +1943,7 @@ window.__ModuleLoader__.load({
           }
         }
       } catch { /* 忽略 */ }
-      return { version: 2, navPct: 18, trPct: 52 };
+      return { version: 2, navPct: 16, trPct: 52 };
     }
 
     /** 插件字号（只放大文字，不改变 PDF 画布缩放） */
@@ -2004,39 +2135,75 @@ window.__ModuleLoader__.load({
      *   - 外部关闭监听运行在 capture 阶段，所以必须先判断点击目标是否仍在菜单内。
      *     否则它会在按钮的 React 事件之前卸载菜单，表现为「点隐藏/删除没反应」。
      */
+    /* READER_RUNTIME:BEGIN */
+    const readerRuntime = (function createReaderRuntime() {
+  function createRenderQueue(limit=1) {
+    let running=0,sequence=0;const pending=[];
+    const cancelled=()=>Object.assign(new Error('Render request cancelled'),{name:'AbortException'});
+    const pump=()=>{
+      pending.sort((a,b)=>a.priority-b.priority||a.order-b.order);
+      while(running<limit&&pending.length){
+        const job=pending.shift();if(job.cancelled)continue;
+        running++;job.started=true;
+        Promise.resolve().then(()=>job.cancelled?Promise.reject(cancelled()):job.work())
+          .then(job.resolve,job.reject).finally(()=>{running--;pump();});
+      }
+    };
+    return {
+      schedule(work,priority=0){
+        const job={work,priority,order:sequence++,started:false,cancelled:false};
+        const promise=new Promise((resolve,reject)=>Object.assign(job,{resolve,reject}));
+        pending.push(job);pump();
+        return {promise,cancel(){job.cancelled=true;if(!job.started){const i=pending.indexOf(job);if(i>=0)pending.splice(i,1);job.reject(cancelled());}}};
+      },
+      stats:()=>({running,pending:pending.length,limit}),
+    };
+  }
+  function bindMenuDismissal({window:win,document:doc,element,close}) {
+    const inside=event=>{
+      const node=element();if(!node)return false;
+      if(event?.composedPath?.().includes(node))return true;
+      try{return !!event?.target&&node.contains(event.target);}catch{return false;}
+    };
+    const outside=e=>{if(!inside(e))close();},always=()=>close();
+    const key=e=>{if(e.key==='Escape'){e.preventDefault?.();close();}};
+    const visibility=()=>{if(doc?.visibilityState==='hidden')close();};
+    const bindings=[['pointerdown',outside],['mousedown',outside],['contextmenu',outside],['wheel',outside],
+      ['scroll',outside],['resize',always],['blur',always],['pagehide',always],['keydown',key]];
+    const capture={capture:true};
+    for(const [name,fn]of bindings)win.addEventListener(name,fn,capture);
+    doc?.addEventListener?.('visibilitychange',visibility);
+    return()=>{for(const [name,fn]of bindings)win.removeEventListener(name,fn,capture);doc?.removeEventListener?.('visibilitychange',visibility);};
+  }
+  function readingZoomShortcut(event,root) {
+    if(!(event.ctrlKey||event.metaKey)||event.altKey||event.isComposing)return null;
+    const values={'+':10,'=':10,'-':-10,'_':-10,'0':0};
+    if(!Object.prototype.hasOwnProperty.call(values,event.key))return null;
+    if(!root?.contains?.(event.target))return null;
+    const target=event.target;
+    // Consume the combination in coordinate/forms so neither this plugin nor
+    // the host/global browser zoom can turn editing into a persistent font change.
+    if(target.closest?.('input,select,textarea,[contenteditable="true"],.ll-layout-controls,.ll-modal,.ll-menu'))return {delta:null};
+    if(!target.closest?.('.ll-pane-translation'))return null;
+    return {delta:values[event.key]};
+  }
+  return {createRenderQueue,bindMenuDismissal,readingZoomShortcut};
+})();
+    /* READER_RUNTIME:END */
+    const PDF_RENDER_QUEUE = readerRuntime.createRenderQueue(1);
+
+    function useMenuLifecycle(ref, menu, onClose) {
+      const [pos,setPos]=React.useState({x:menu.x,y:menu.y});
+      React.useEffect(()=>{
+        const r=ref.current?.getBoundingClientRect();if(!r)return;
+        setPos({x:Math.max(8,Math.min(menu.x,window.innerWidth-r.width-8)),y:Math.max(8,Math.min(menu.y,window.innerHeight-r.height-8))});
+      },[menu.x,menu.y]);
+      React.useEffect(()=>readerRuntime.bindMenuDismissal({window,document,element:()=>ref.current,close:onClose}),[onClose]);
+      return pos;
+    }
     function ContextMenu({ menu, onClose, onOpen, onTranslate, onMutate, onArrange, busy }) {
       const ref = React.useRef(null);
-      const [pos, setPos] = React.useState({ x: menu.x, y: menu.y });
-
-      // 视口内收敛
-      React.useEffect(() => {
-        const el = ref.current;
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        setPos({
-          x: Math.min(menu.x, window.innerWidth - r.width - 8),
-          y: Math.min(menu.y, window.innerHeight - r.height - 8),
-        });
-      }, [menu.x, menu.y]);
-
-      React.useEffect(() => {
-        const close = (event) => {
-          if (ref.current?.contains(event.target)) return;
-          onClose();
-        };
-        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-        // 用 capture 确保先于其他处理器，且滚动/缩放也关闭
-        window.addEventListener('mousedown', close, true);
-        window.addEventListener('wheel', close, true);
-        window.addEventListener('resize', close, true);
-        window.addEventListener('keydown', onKey, true);
-        return () => {
-          window.removeEventListener('mousedown', close, true);
-          window.removeEventListener('wheel', close, true);
-          window.removeEventListener('resize', close, true);
-          window.removeEventListener('keydown', onKey, true);
-        };
-      }, [onClose]);
+      const pos=useMenuLifecycle(ref,menu,onClose);
 
       const p = menu.paper;
       const hidden = p.hidden === true;
@@ -2044,12 +2211,13 @@ window.__ModuleLoader__.load({
         key,
         className: `ll-menu-item${opts.danger ? ' ll-danger' : ''}`,
         disabled: opts.disabled === true,
-        onClick: (e) => { e.stopPropagation(); fn(); onClose(); },
+        onClick: (e) => { e.stopPropagation(); onClose(); fn(); },
       }, label);
 
       return h('div', {
         ref,
         className: 'll-menu',
+        role: 'menu', 'aria-label': '文献操作',
         style: { left: `${pos.x}px`, top: `${pos.y}px` },
         onMouseDown: (e) => e.stopPropagation(),
         onContextMenu: (e) => e.preventDefault(),
@@ -2092,6 +2260,57 @@ window.__ModuleLoader__.load({
      * 翻译进度显示。优先显示**直连 API 任务**（`translate-job`）的真实进度与费用，
      * 没有直连任务时退回旧的 agent 会话进度。
      */
+    function FolderMenu({menu,onClose,collapsed,toggleCollapse,doMutate}) {
+      const ref=React.useRef(null),pos=useMenuLifecycle(ref,menu,onClose);
+      return h('div', {
+          key: 'menu-folder',
+          ref, role: 'menu', 'aria-label': '文件夹操作', className: 'll-menu',
+          style: { left: `${pos.x}px`, top: `${pos.y}px` },
+          onMouseDown: (e) => e.stopPropagation(),
+          onContextMenu: (e) => e.preventDefault(),
+        }, [
+          h('div', { className: 'll-menu-title', key: 't' }, `文件夹：${menu.folder}`),
+          h('div', { className: 'll-hint', key: 'c', style: { padding: '2px 10px 6px' } },
+            `共 ${menu.papers.length} 篇（隐藏 ${menu.hiddenCount}）`),
+          h('button', {
+            key: 'collapse', className: 'll-menu-item',
+            onMouseDown: (e) => { e.stopPropagation(); toggleCollapse(menu.folder); onClose(); },
+          }, collapsed.has(menu.folder) ? '展开此文件夹' : '收起此文件夹'),
+          h('button', {
+            key: 'hidetree', className: 'll-menu-item',
+            onMouseDown: (e) => {
+              e.stopPropagation();
+              const body = { action: 'hide', folder: menu.folder };
+              onClose();
+              doMutate(body, '已隐藏文件夹');
+            },
+          }, '隐藏整个文件夹（含子文件夹）'),
+          h('button', {
+            key: 'showtree', className: 'll-menu-item',
+            onMouseDown: (e) => {
+              e.stopPropagation();
+              const body = { action: 'unhide', folder: menu.folder };
+              onClose();
+              doMutate(body, '已恢复文件夹');
+            },
+          }, '取消隐藏整个文件夹'),
+          h('div', { className: 'll-menu-sep', key: 's2' }),
+          h('button', {
+            key: 'deltree', className: 'll-menu-item ll-danger',
+            onMouseDown: (e) => {
+              e.stopPropagation();
+              onClose();
+              if (window.confirm(
+                `确定移除文件夹「${menu.folder}」里的全部 ${menu.papers.length} 篇文献？\n\n`
+                + 'PDF 会移到 library/trash/，不会永久删除。',
+              )) {
+                doMutate({ action: 'delete', folder: menu.folder }, '已移除文件夹');
+              }
+            },
+          }, '移除整个文件夹…'),
+        ]);
+    }
+
     function TranslateProgress({ paper, progress, job, onOpen, onStartNow, startingNow, onRetry, retrying }) {
       if (job) {
         const phase = job.phase;
@@ -2100,9 +2319,9 @@ window.__ModuleLoader__.load({
           queued: job.stage || '排队中',
           running: job.stage || `翻译中 ${job.percent ?? 0}%`,
           done: '翻译完成',
-          failed: /placeholder|structure-reordered|heading-lost|empty-paragraph|mostly-untranslated/iu.test(job.error ?? '')
+          failed: job.failure?.label || (/placeholder|structure-reordered|heading-lost|empty-paragraph|mostly-untranslated/iu.test(job.error ?? '')
             ? '翻译未完成：部分内容校验失败，可重试续传'
-            : `翻译失败：${String(job.error ?? '未知原因').slice(0, 90)}`,
+            : `翻译失败：${String(job.error ?? '未知原因').slice(0, 90)}`),
         }[phase] ?? phase;
         const cls = `ll-progress ll-progress-${phase === 'done' ? 'done' : phase === 'failed' ? 'failed' : 'running'}`;
         const metricTitle = [
@@ -2169,11 +2388,15 @@ window.__ModuleLoader__.load({
               },
             })),
             h('span', { className: 'll-progress-text', key: 't' }, label),
-            phase === 'failed' && onRetry ? h('button', {
+            phase === 'failed' && onRetry && job.failure?.canResume !== false ? h('button', {
               key: 'retry', className: 'll-btn ll-btn-xs', disabled: retrying,
               title: '重试翻译，复用本版本已经校验通过的分块和段落',
               onClick: (e) => { e.stopPropagation(); onRetry(); },
-            }, retrying ? '提交中…' : '重试') : null,
+            }, retrying ? '提交中…' : (job.failure?.action || '重试续传')) : null,
+            phase === 'failed' ? h('details',{key:'diagnostic',className:'ll-job-diagnostic'},[
+              h('summary',{key:'summary'},'诊断'),h('p',{key:'action'},job.failure?.action || '检查失败详情'),
+              h('pre',{key:'error'},String(job.error || '无详细信息')),
+            ]):null,
             job.schedule === 'offpeak' && ['queued', 'running'].includes(phase) && onStartNow
               ? h('button', {
                 key: 'now', className: 'll-btn ll-btn-xs', disabled: startingNow,
@@ -2625,6 +2848,7 @@ window.__ModuleLoader__.load({
     const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
     function RegionOverlay({ viewport, view, setView }) {
       const drag = React.useRef(null);
+      React.useEffect(()=>()=>drag.current?.cleanup?.(),[]);
       if (!viewport || !view?.page) return null;
       const regions = view.page.regions;
       const point = e => {
@@ -2635,41 +2859,65 @@ window.__ModuleLoader__.load({
         return [Math.max(0,Math.min(view.page.width,x)), Math.max(0,Math.min(view.page.height,y))];
       };
       const begin = (e, r, resize) => {
-        if (!view.editing) return;
+        if (!view.editing || drag.current || e.button !== 0) return;
         e.preventDefault(); e.stopPropagation();
         const layer = e.currentTarget.closest('.ll-region-overlay');
         const b = layer.getBoundingClientRect();
         const p = viewport.convertToPdfPoint((e.clientX-b.left)*viewport.width/b.width, (e.clientY-b.top)*viewport.height/b.height);
         drag.current = { id: r.id, box: [...r.bbox], start: p, resize, rect: b };
-        layer.setPointerCapture(e.pointerId);
+        bindDrag(e,layer);
         setView(v => ({ ...v, selected: r.id }));
+      };
+      // Drag is a transient geometry gesture. Paint its box locally, then commit
+      // once on release; do not rerender the reader/controls for every pointermove.
+      const paint=(id,box)=>{
+        const el=[...document.querySelectorAll('.ll-region-box')].find(n=>n.dataset.regionId===id);
+        if(!el)return;
+        const a=viewport.convertToViewportPoint(box[0],box[1]),b=viewport.convertToViewportPoint(box[2],box[3]);
+        Object.assign(el.style,{left:`${Math.min(a[0],b[0])/viewport.width*100}%`,top:`${Math.min(a[1],b[1])/viewport.height*100}%`,
+          width:`${Math.abs(a[0]-b[0])/viewport.width*100}%`,height:`${Math.abs(a[1]-b[1])/viewport.height*100}%`});
+      };
+      const finish=()=>{
+        const d=drag.current;drag.current=null;d?.cleanup?.();if(!d?.preview)return;
+        setView(v=>({...v,dirty:true,page:{...v.page,regions:v.page.regions.map(r=>r.id===d.id?{...r,bbox:d.preview}:r)}}));
+      };
+      const move=e=>{
+        const d=drag.current;if(!d)return;
+        const p=point(e),[x,y]=d.start;let box;
+        if(d.draw)box=[Math.min(x,p[0]),Math.min(y,p[1]),Math.max(x,p[0]),Math.max(y,p[1])];
+        else if(d.resize)box=[d.box[0],Math.min(d.box[3]-1,p[1]),Math.max(d.box[0]+1,p[0]),d.box[3]];
+        else {const dx=Math.max(-d.box[0],Math.min(view.page.width-d.box[2],p[0]-x)),dy=Math.max(-d.box[1],Math.min(view.page.height-d.box[3],p[1]-y));box=d.box.map((n,i)=>n+(i%2?dy:dx));}
+        d.preview=box;paint(d.id,box);
+      };
+      const cancel=()=>{
+        const d=drag.current;drag.current=null;d?.cleanup?.();if(!d)return;
+        if(d.draw)setView(v=>({...v,dirty:d.wasDirty,page:{...v.page,regions:v.page.regions.filter(r=>r.id!==d.id)}}));
+        else paint(d.id,d.box);
+      };
+      const bindDrag=(e,layer)=>{
+        const pointer=e.pointerId,capture={capture:true};
+        const motion=event=>{if(event.pointerId===pointer)move(event);};
+        const end=event=>{if(event.pointerId===pointer)finish();};
+        const abort=event=>{if(event.pointerId===pointer)cancel();};
+        window.addEventListener('pointermove',motion,capture);window.addEventListener('pointerup',end,capture);window.addEventListener('pointercancel',abort,capture);window.addEventListener('blur',cancel);
+        drag.current.cleanup=()=>{window.removeEventListener('pointermove',motion,capture);window.removeEventListener('pointerup',end,capture);window.removeEventListener('pointercancel',abort,capture);window.removeEventListener('blur',cancel);};
+        // DSH/React may reparent the overlay after selection and release capture.
+        // Window listeners own this gesture until release, cancellation or unmount.
+        try{layer.setPointerCapture(pointer);}catch{/* Window tracking remains active. */}
       };
       return h('div', { className: 'll-region-overlay', style: { pointerEvents: view.editing ? 'auto' : 'none', touchAction: 'none' },
         onPointerDown: e => {
-          if (!view.editing || !view.drawing) return;
+          if (!view.editing || !view.drawing || drag.current || e.button !== 0) return;
           const p = point(e), id = `manual-${Date.now()}`;
-          drag.current = { id, start: p, draw: true, rect: e.currentTarget.getBoundingClientRect() }; e.currentTarget.setPointerCapture(e.pointerId);
+          drag.current = { id, start: p, draw: true, wasDirty:view.dirty,rect: e.currentTarget.getBoundingClientRect() };bindDrag(e,e.currentTarget);
           setView(v => ({ ...v, dirty: true, selected: id, page: { ...v.page, regions: [...v.page.regions,
             { id, role: 'body', bbox: [p[0],p[1],p[0]+1,p[1]+1], itemIds: [] }] } }));
         },
-        onPointerMove: e => {
-          const d = drag.current; if (!d) return;
-          const p = point(e), [x,y] = d.start;
-          let box;
-          if (d.draw) box = [Math.min(x,p[0]),Math.min(y,p[1]),Math.max(x,p[0]),Math.max(y,p[1])];
-          else if (d.resize) box = [d.box[0],Math.min(d.box[3]-1,p[1]),Math.max(d.box[0]+1,p[0]),d.box[3]];
-          else {
-            const dx = Math.max(-d.box[0],Math.min(view.page.width-d.box[2],p[0]-x));
-            const dy = Math.max(-d.box[1],Math.min(view.page.height-d.box[3],p[1]-y));
-            box = d.box.map((n,i) => n+(i%2 ? dy : dx));
-          }
-          setView(v => ({ ...v, dirty: true, page: { ...v.page, regions: v.page.regions.map(r => r.id === d.id ? { ...r, bbox: box } : r) } }));
-        }, onPointerUp: () => { drag.current = null; }, onPointerCancel: () => { drag.current = null; },
       }, regions.map((r,i) => {
         const b = [...viewport.convertToViewportPoint(r.bbox[0],r.bbox[1]), ...viewport.convertToViewportPoint(r.bbox[2],r.bbox[3])];
         const x = Math.min(b[0],b[2]), y = Math.min(b[1],b[3]);
         return h('div', { key: r.id, className: `ll-region-box${view.selected === r.id ? ' is-selected' : ''}`,
-          'data-role': r.role, style: { left: `${x/viewport.width*100}%`, top: `${y/viewport.height*100}%`,
+          'data-role': r.role, 'data-region-id':r.id,style: { left: `${x/viewport.width*100}%`, top: `${y/viewport.height*100}%`,
             width: `${Math.abs(b[2]-b[0])/viewport.width*100}%`, height: `${Math.abs(b[3]-b[1])/viewport.height*100}%` },
           onPointerDown: e => { if (view.drawing) return; begin(e,r,false); } }, [
           h('span', { key: 'label', className: 'll-region-label' }, `${['body','abstract','heading','caption','formula','table','figure'].includes(r.role)
@@ -2685,6 +2933,29 @@ window.__ModuleLoader__.load({
         h('label',{key:'tables',title:'按行列翻译单元格，会增加文本 token；关闭时只翻译表题'},[h('input',{key:'c',type:'checkbox',checked:value.tables===true,onChange:e=>onChange({...value,tables:e.target.checked})}),'翻译表格']),
         h('label',{key:'formula',title:'公式始终优先输出 LaTeX；仅不确定时保留本地原图。关闭后显示待核对候选文本，不猜写缺失符号。'},[h('input',{key:'c',type:'checkbox',checked:value.formulaFallback!==false,onChange:e=>onChange({...value,formulaFallback:e.target.checked})}),'不确定公式用图片']),
       ]);
+    }
+
+    function ToolDialog({tab,onTab,onClose,children}) {
+      const ref=React.useRef(null),close=React.useRef(onClose);close.current=onClose;
+      React.useEffect(()=>{
+        const before=document.activeElement,node=ref.current;
+        node?.querySelector('button')?.focus();
+        const key=e=>{
+          if(e.key==='Escape'){e.preventDefault();close.current();}
+          if(e.key==='Tab'){
+            const list=[...node.querySelectorAll('button,input,select,a[href],textarea')].filter(el=>!el.disabled&&el.getClientRects().length);
+            const i=list.indexOf(document.activeElement),j=e.shiftKey?i-1:i+1;
+            if(j<0||j>=list.length){e.preventDefault();list[e.shiftKey?list.length-1:0]?.focus();}
+          }
+        };
+        node?.addEventListener('keydown',key);
+        return()=>{node?.removeEventListener('keydown',key);if(before?.isConnected)before.focus({preventScroll:true});};
+      },[]);
+      return h('div',{className:'ll-modal-bg'},h('div',{className:'ll-modal ll-tools-dialog',role:'dialog','aria-modal':true,'aria-label':'文献工具',ref},[
+        h('div',{key:'h',className:'ll-modal-head'},[h('h2',{key:'title'},'文献工具'),h('span',{key:'sp',className:'ll-spacer'}),h('button',{key:'close',className:'ll-btn',onClick:onClose},'关闭')]),
+        h('div',{key:'tabs',className:'ll-tool-tabs',role:'tablist'},[['library','文献管理'],['translation','翻译与任务'],['reading','阅读'],['settings','插件设置']].map(([id,label])=>h('button',{key:id,role:'tab','aria-selected':tab===id,className:'ll-tab'+(tab===id?' on':''),onClick:()=>onTab(id)},label))),
+        h('div',{key:'body',className:'ll-modal-body',role:'tabpanel'},children),
+      ]));
     }
     function LayoutControls({ slug, page, mode, schedule, media, view, setView, show, setShow, onJob }) {
       const [data, setData] = React.useState(null), [error,setError] = React.useState(''), [busy,setBusy] = React.useState(false);
@@ -2750,11 +3021,11 @@ window.__ModuleLoader__.load({
           h('div', { key: 'buttons', className: 'll-layout-row ll-layout-actions' }, [
             h('span', { key: 'p' }, `第 ${view.page.page} 页`),
             h('button', { key: 'edit', className: 'll-btn ll-btn-xs', disabled: busy, onClick: () => { setShow(true); setView(v => ({ ...v, editing: !v.editing })); } }, view.editing ? '结束编辑' : '手动纠错'),
-            h('button', { key: 'check', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => act('check-page', { page: view.page.page }) }, '此页已检查'),
-            h('button', { key: 'approve', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => {
+            !view.editing && h('button', { key: 'check', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => act('check-page', { page: view.page.page }) }, '此页已检查'),
+            !view.editing && s.phase !== 'approved' && h('button', { key: 'approve', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => {
               if (window.confirm(`确认已检查《${s.title}》的全部 ${s.pageCount} 页？此操作仅确认，不启动翻译。`)) act('approve', { confirmAll: true });
             } }, '确认整篇'),
-            h('button', { key: 'translate', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty || s.phase !== 'approved', onClick: () => {
+            !view.editing && s.phase === 'approved' && h('button', { key: 'translate', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => {
               if (window.confirm('使用当前已确认分区翻译，将产生 API 费用。继续？')) act('translate');
             } }, '按确认分区翻译'),
           ]),
@@ -2842,9 +3113,18 @@ window.__ModuleLoader__.load({
       ]));
     }
 
+    function PdfToolsMenu({children}) {
+      const [open,setOpen]=React.useState(false),ref=React.useRef(null);
+      React.useEffect(()=>open?readerRuntime.bindMenuDismissal({window,document,element:()=>ref.current,close:()=>setOpen(false)}):undefined,[open]);
+      return h('div',{ref,className:'ll-pdf-extras'},[
+        h('button',{key:'toggle',className:'ll-btn ll-btn-xs','aria-expanded':open,onClick:()=>setOpen(v=>!v)},'工具'),
+        open?h('div',{key:'panel',className:'ll-pdf-extras-panel',role:'group','aria-label':'PDF 查找与打印'},children):null,
+      ]);
+    }
+
     const PdfPage = React.memo(function PdfPage({
       doc, pdfjs, pageNumber, width, ratio, onMeasure, registerRef, rootRef,
-      searchQuery, searchPage, regionView, setRegionView,
+      searchQuery, searchPage, regionView, setRegionView, eligible,
     }) {
       const wrapRef = React.useRef(null);
       const canvasRef = React.useRef(null);
@@ -2882,7 +3162,7 @@ window.__ModuleLoader__.load({
       }, [rootRef]);
 
       React.useEffect(() => {
-        if (!active || !doc || width <= 0) {
+        if (!active || !eligible || !doc || width <= 0) {
           try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
           try { textTaskRef.current?.cancel(); } catch { /* ignore */ }
           renderTaskRef.current = null;
@@ -2898,7 +3178,7 @@ window.__ModuleLoader__.load({
           return undefined;
         }
         let cancelled = false;
-        (async () => {
+        const ticket=PDF_RENDER_QUEUE.schedule(async () => {
           try {
             try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
             renderTaskRef.current = null;
@@ -2915,7 +3195,7 @@ window.__ModuleLoader__.load({
             const nativeDpr = Math.min(window.devicePixelRatio || 1, 1.5);
             const cssPixels = Math.max(1, viewport.width * viewport.height);
             const budgetScale = Math.sqrt(pdfCanvasPixelBudget() / cssPixels);
-            const outputScale = Math.max(0.5, Math.min(nativeDpr, budgetScale));
+            const outputScale = Math.max(0.05, Math.min(nativeDpr, budgetScale));
             canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
             canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
             canvas.style.width = `${Math.floor(viewport.width)}px`;
@@ -2958,13 +3238,15 @@ window.__ModuleLoader__.load({
               setRendered(false);
             }
           }
-        })();
+        },pageNumber);
+        ticket.promise.catch(err=>{if(!cancelled&&err.name!=='AbortException')setError(String(err.message||err));});
         return () => {
           cancelled = true;
+          ticket.cancel();
           try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
           try { textTaskRef.current?.cancel(); } catch { /* ignore */ }
         };
-      }, [active, doc, pdfjs, pageNumber, width, onMeasure]);
+      }, [active, eligible, doc, pdfjs, pageNumber, width, onMeasure]);
 
       React.useEffect(() => () => {
         try { renderTaskRef.current?.cancel(); } catch { /* ignore */ }
@@ -3045,6 +3327,7 @@ window.__ModuleLoader__.load({
       const [searchAt, setSearchAt] = React.useState(-1);
       const [searching, setSearching] = React.useState(false);
       const textCacheRef = React.useRef(new Map());
+      const searchGeneration = React.useRef(0);
       const scrollRef = React.useRef(null);
       const pageRefs = React.useRef(new Map());
       const pageRef = React.useRef(1);
@@ -3074,6 +3357,7 @@ window.__ModuleLoader__.load({
       // 换文章：销毁旧文档，加载新文档
       React.useEffect(() => {
         setFallback(false);
+        searchGeneration.current++;
         setPdfjs(null);
         const saved = documentKey ? loadReadingMemory().pdfs?.[documentKey] : null;
         const savedPage = Math.max(1, Math.round(Number(saved?.page) || 1));
@@ -3141,6 +3425,7 @@ window.__ModuleLoader__.load({
         })();
         return () => {
           cancelled = true;
+          searchGeneration.current++;
           // 只有 loadingTask.destroy() 会真正终止 worker + 释放文档；
           // 别调用 doc.destroy()（PDF.js 6 已没有这个方法）。
           try { task?.destroy(); } catch { /* ignore */ }
@@ -3229,6 +3514,7 @@ window.__ModuleLoader__.load({
       };
 
       const runSearch = React.useCallback(async (rawQuery) => {
+        const generation=++searchGeneration.current;
         const query = String(rawQuery ?? '').trim();
         setSearchQuery(query); setSearchResults([]); setSearchAt(-1);
         if (!doc || !query) return;
@@ -3237,18 +3523,24 @@ window.__ModuleLoader__.load({
         const found = [];
         try {
           for (let n = 1; n <= doc.numPages; n += 1) {
+            if(generation!==searchGeneration.current)return;
             let text = textCacheRef.current.get(n);
             if (text == null) {
               const pageObj = await doc.getPage(n);
               const content = await pageObj.getTextContent();
               text = content.items.map((item) => item.str ?? '').join(' ');
               textCacheRef.current.set(n, text);
+              while(textCacheRef.current.size>16)textCacheRef.current.delete(textCacheRef.current.keys().next().value);
+              if(Math.abs(n-pageRef.current)>1)pageObj.cleanup();
             }
             if (text.toLocaleLowerCase().includes(needle)) found.push(n);
+            await new Promise(resolve=>setTimeout(resolve,0));
           }
+          if(generation!==searchGeneration.current)return;
           setSearchResults(found);
           if (found.length > 0) { setSearchAt(0); goTo(found[0]); }
-        } finally { setSearching(false); }
+        } catch(err) { if(generation===searchGeneration.current)console.warn('PDF 搜索已中止',err); }
+        finally { if(generation===searchGeneration.current)setSearching(false); }
       }, [doc, goTo]);
 
       const stepSearch = (delta) => {
@@ -3335,6 +3627,7 @@ window.__ModuleLoader__.load({
           title: '下一页', 'aria-label': '下一页', onClick: () => goTo(pageRef.current + 1),
         }, '›'),
         h('span', { key: 'sp', className: 'll-spacer' }),
+        h(PdfToolsMenu,{key:'extras'},[
         h('input', {
           key: 'search', className: 'll-input ll-pdf-search', value: searchInput,
           disabled: !doc || searching, placeholder: searching ? '搜索中…' : '搜索原文',
@@ -3347,6 +3640,7 @@ window.__ModuleLoader__.load({
         h('button', { key: 'snext', className: 'll-icon-btn', disabled: searchResults.length === 0, title: '下一个匹配', onClick: () => stepSearch(1) }, '↓'),
         h('span', { key: 'sc', className: 'll-pdf-search-count' }, searching ? '…' : (searchQuery ? `${Math.max(0, searchAt + 1)}/${searchResults.length}` : '')),
         h('button', { key: 'print', className: 'll-btn ll-btn-xs', disabled: !doc, title: '打印原文', onClick: printPdf }, '打印'),
+        ]),
         h('button', {
           key: 'zo', className: 'll-icon-btn', disabled: !doc, title: '缩小', 'aria-label': '缩小',
           onClick: () => setZoom((z) => Math.max(0.4, Math.round((z - 0.15) * 100) / 100)),
@@ -3359,7 +3653,7 @@ window.__ModuleLoader__.load({
         h('button', {
           key: 'fit', className: 'll-btn ll-btn-xs', disabled: !doc,
           title: '适应宽度（重置缩放）', onClick: () => setZoom(1),
-        }, '适应宽度'),
+        }, '适应'),
       ]);
 
       const content = fallback
@@ -3399,7 +3693,8 @@ window.__ModuleLoader__.load({
                 rootRef: scrollRef,
                 searchQuery,
                 searchPage: searchResults[searchAt],
-                regionView: showRegions ? regionView : null,
+                eligible: Math.abs(n-page)<=1,
+                regionView: showRegions && regionView?.page?.page===n ? regionView : null,
                 setRegionView,
               })));
 
@@ -3838,6 +4133,18 @@ window.__ModuleLoader__.load({
         : { phase: 'idle', slug: initialSlug, translated: null, error: null });
       const [scanDir, setScanDir] = React.useState('library/papers');
       const [layoutBatchOpen,setLayoutBatchOpen] = React.useState(false);
+      const [toolsTab,setToolsTab] = React.useState(null);
+      const [navOpen,setNavOpen] = React.useState(false);
+      const [compact,setCompact] = React.useState(()=>window.innerWidth<700);
+      const [readerSurface,setReaderSurface] = React.useState(()=>window.innerWidth<1000?'translation':'split');
+      React.useEffect(()=>{
+        const resize=()=>{const width=containerRef.current?.clientWidth||window.innerWidth;
+          if(width<1000)setReaderSurface(v=>v==='split'?'translation':v);
+          setCompact(width<700);
+        };
+        const observer=new ResizeObserver(resize);if(containerRef.current)observer.observe(containerRef.current);resize();
+        window.addEventListener('resize',resize);return()=>{observer.disconnect();window.removeEventListener('resize',resize);};
+      },[]);
       const [layoutOpenSlug,setLayoutOpenSlug] = React.useState(null);
       const layoutDirtyRef = React.useRef(null);
       const recordLayoutDirty = React.useCallback(slug => {layoutDirtyRef.current=slug;},[]);
@@ -3871,6 +4178,7 @@ window.__ModuleLoader__.load({
       const searchRef = React.useRef(null);
       // 右键菜单 { x, y, kind: 'paper'|'folder', ... }
       const [menu, setMenu] = React.useState(null);
+      const closeMenu=React.useCallback(()=>setMenu(null),[]);
       // 翻译进度（旧的 agent 会话路径，保留兼容）
       const [progress, setProgress] = React.useState({});
       // 直连 DeepSeek API 的翻译任务与配置
@@ -3887,6 +4195,8 @@ window.__ModuleLoader__.load({
       const [apiConfig, setApiConfig] = React.useState(null);
       const [configOpen, setConfigOpen] = React.useState(false);
       const [updateOpen, setUpdateOpen] = React.useState(false);
+      React.useEffect(()=>{setMenu(null);},[state.selected,focusMode,configOpen,updateOpen,browserOpen,layoutBatchOpen,toolsTab]);
+      React.useEffect(()=>{setNavOpen(false);},[state.selected]);
       // 插件版本（由 host 的 /version 从 package.json 读取）
       const [versionInfo, setVersionInfo] = React.useState(null);
       // 跟随 DSH 的真实主题（body[data-ds-dark-theme]），而不是系统偏好
@@ -3997,17 +4307,9 @@ window.__ModuleLoader__.load({
       // 用 capture 抢在浏览器页面缩放/DSH 全局快捷键之前处理。
       React.useEffect(() => {
         const onKey = (e) => {
-          if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-          if (e.key === '+' || e.key === '=') {
-            e.preventDefault(); e.stopPropagation();
-            updateFontPercent((p) => p + 10);
-          } else if (e.key === '-' || e.key === '_') {
-            e.preventDefault(); e.stopPropagation();
-            updateFontPercent((p) => p - 10);
-          } else if (e.key === '0') {
-            e.preventDefault(); e.stopPropagation();
-            updateFontPercent(100);
-          }
+          const action=readerRuntime.readingZoomShortcut(e,containerRef.current);if(!action)return;
+          e.preventDefault();e.stopPropagation();
+          if(action.delta!==null)updateFontPercent(p=>action.delta===0?100:p+action.delta);
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
@@ -4774,11 +5076,16 @@ window.__ModuleLoader__.load({
                 });
 
       return h('div', {
-        className: `ll-root${focusMode ? ' ll-focus' : ''}`,
+        className: `ll-root ll-reader-${readerSurface}${focusMode ? ' ll-focus' : ''}${navOpen?' ll-nav-open':''}${compact?' ll-compact':''}`,
         ref: containerRef,
         'data-ll-theme': themeMode,
-        style: { '--ll-font-scale': String(fontPercent / 100) },
+        style: { '--ll-reading-scale': String(fontPercent / 100) },
       }, [
+        h('div',{key:'mobilebar',className:'ll-mobilebar'},[
+          h('button',{key:'nav',className:'ll-btn','aria-expanded':navOpen,onClick:()=>{setFocusMode(false);setNavOpen(v=>!v);}},'文献库'),
+          h('span',{key:'title'},'论文阅读'),
+          h('button',{key:'tools',className:'ll-btn',onClick:()=>setToolsTab('translation')},'工具'),
+        ]),
         // 第 1 段：目录树 + 列表
         !focusMode ? h('div', { className: 'll-col ll-nav-shell', key: 'nav', style: { flex: `0 0 ${layout.navPct}%` } }, [
           h('div', { className: 'll-nav-head', key: 'h' }, [
@@ -4815,122 +5122,17 @@ window.__ModuleLoader__.load({
                 onClick: () => { setQuery(''); searchRef.current?.focus(); },
               }, '×'),
             ]),
-            h('div', {
-              className: `ll-scan${selectedFolder ? ' ll-scan-selected' : ''}`,
-              key: 'sc',
-            }, selectedFolder ? [
-              h('span', {
-                key: 't', className: 'll-scan-target',
-                title: `扫描分类「${selectedFolder}」记录的原始外部文件夹；只复制新增 PDF`,
-              }, ['扫描：', h('b', { key: 'b' }, selectedFolder)]),
-              h('button', {
-                key: 'go', className: 'll-btn ll-btn-xs',
-                disabled: busy !== null, onClick: doScanFolder,
-                title: '扫描该分类的原始来源文件夹，把新增 PDF 复制进这个分类',
-              }, busy === 'scan-folder' ? '扫描中…' : '扫描新增'),
-              h('button', {
-                key: 'x', className: 'll-btn ll-btn-xs',
-                disabled: busy !== null,
-                title: '取消选中，回到手动扫描库内路径',
-                onClick: () => setSelectedFolder(null),
-              }, '×'),
-            ] : [
-              h('input', {
-                key: 'i', className: 'll-input', value: scanDir, spellCheck: false,
-                title: '手动扫描库内已有的文件夹（相对工作区路径）',
-                onChange: (e) => setScanDir(e.target.value),
-                onKeyDown: (e) => { if (e.key === 'Enter') doScan(); },
-              }),
-              h('button', {
-                key: 'go', className: 'll-btn ll-btn-xs', disabled: busy !== null, onClick: doScan,
-                title: '登记该库内文件夹（含子文件夹）里的 PDF；子文件夹会作为分类',
-              }, busy === 'scan' ? '扫描中…' : '扫描'),
-            ]),
             notice ? h('div', { className: 'll-banner', key: 'n' }, [
               h('span', { key: 't' }, notice.text),
               notice.url ? h('a', { key: 'a', href: notice.url, target: '_blank', rel: 'noreferrer' }, ' 打开会话 →') : null,
             ]) : null,
           ]),
           // 目录树工具条：折叠控制 + 显示隐藏
-          h('div', { className: 'll-treebar', key: 'tb' }, [
-            h('button', {
-              key: 'collapse', className: 'll-btn ll-btn-xs', onClick: collapseAll,
-              title: '收起所有文件夹（只留顶层分类）',
-            }, '全部收起'),
-            h('button', {
-              key: 'expand', className: 'll-btn ll-btn-xs', onClick: expandAll,
-              title: '展开所有文件夹',
-            }, '全部展开'),
-            h('label', {
-              key: 'hidden', className: 'll-hint',
-              style: { marginLeft: 'auto', display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer' },
-              title: '显示被隐藏的文献（淡色显示，可点「显示」恢复）',
-            }, [
-              h('input', {
-                key: 'i', type: 'checkbox', checked: showHidden,
-                onChange: (e) => setShowHidden(e.target.checked),
-              }),
-              h('span', { key: 's' }, `显示隐藏${hiddenCount ? ` (${hiddenCount})` : ''}`),
-            ]),
+          h('div',{className:'ll-nav-actions',key:'tb'},[
+            h('button',{key:'lib',className:'ll-btn',onClick:()=>setToolsTab('library')},'文献管理'),
+            h('button',{key:'tasks',className:'ll-btn',onClick:()=>setToolsTab('translation')},'翻译与任务'),
           ]),
           // 直连翻译：就绪状态 + 配置入口 + 批量入口
-          h('div', { className: 'll-toolbar', key: 'tr' }, [
-            h('span', {
-              key: 'dot', className: `ll-api-dot${apiConfig?.ready ? ' ok' : ''}`,
-              title: apiConfig?.ready
-                ? `密钥来源：${apiConfig.keySource}\n端点：${apiConfig.baseUrl}\n模型：${apiConfig.model}`
-                : '需要 DEEPSEEK_API_KEY：点右侧「配置」填写',
-            }),
-            h('span', {
-              key: 'ok', className: 'll-hint',
-              title: apiConfig?.ready
-                ? `密钥来源：${apiConfig.keySource}\n端点：${apiConfig.baseUrl}\n模型：${apiConfig.model}`
-                : '需要 DEEPSEEK_API_KEY：点右侧「配置」填写',
-            }, apiConfig?.ready ? apiConfig.model : '未配置 API'),
-            h('span', { className: 'll-spacer', key: 'sp' }),
-            h('label', {
-              key: 'offpeak', className: `ll-offpeak-toggle${offpeakOnly ? ' on' : ''}`,
-              title: '开启后请求 host 仅在 DeepSeek 闲时执行：工作日北京时间 09:00–12:00、14:00–18:00 之外，以及周末/法定节假日。闲时单价约为峰时的一半。',
-            }, [
-              h('input', {
-                key: 'i', type: 'checkbox', checked: offpeakOnly, disabled: batchActive,
-                onChange: (event) => setOffpeakOnly(event.target.checked),
-              }),
-              h('span', { key: 's' }, '闲时'),
-            ]),
-            h('button', {
-              key: 'cfg', className: 'll-btn ll-btn-xs',
-              title: '配置 DeepSeek API key（写入 ~/.dsh/.credentials.yaml，自动备份）',
-              onClick: () => setConfigOpen(true),
-            }, '配置'),
-            h('button', {
-              key: 'upd', className: 'll-btn ll-btn-xs',
-              title: '从本地 .tgz 一键更新（不需要 GitHub 或外网）',
-              onClick: () => setUpdateOpen(true),
-            }, '更新'),
-            h('button', {
-              key: 'fill', className: 'll-btn ll-btn-xs',
-              disabled: busy !== null,
-              title: '从译稿/抽取文本识别 DOI、标题、作者、年份和刊名，经 Crossref 校准后查询影响因子与分区',
-              onClick: () => doFillJournals(),
-            }, busy === 'fill' ? '补全中…' : '补全信息'),
-            h('button', {
-              key: 'all', className: 'll-btn ll-btn-xs',
-              disabled: batchState.phase === 'stopping' || busy !== null,
-              title: batchActive
-                ? `当前第 ${batchState.current}/${batchState.total} 篇：${batchState.title || '准备中'}。点击后不再提交后续文献，当前后台任务不会被取消。`
-                : (runningCount > 0
-                  ? `已有 ${runningCount} 个任务在跑`
-                  : '把当前可见且未翻译的文献串行翻译：等上一篇完成后再提交下一篇'),
-              onClick: batchActive ? stopTranslateBatch : () => setLayoutBatchOpen(true),
-            }, batchActive
-              ? `停止后续 ${batchState.current}/${batchState.total}`
-              : '分区/批量翻译'),
-            h('select',{key:'layout-mode',className:'ll-layout-mode',value:layoutMode,'aria-label':'翻译分区模式',title:'选择分区与翻译流程',onChange:e=>setLayoutMode(e.target.value)},[
-              h('option',{key:'auto',value:'auto'},'自动分区翻译'),h('option',{key:'semi',value:'semi'},'半自动·人工检查'),h('option',{key:'manual',value:'manual'},'手动分区'),
-            ]),
-            h(MediaOptions,{key:'media',value:media,onChange:setMedia}),
-          ]),
           h('div', { className: 'll-nav-body', key: 'b' }, navBody),
           // 版本号常驻左栏底部：升级后不用翻文档就能确认运行的是哪一版
           h('div', { className: 'll-nav-foot', key: 'foot' }, [
@@ -4944,38 +5146,8 @@ window.__ModuleLoader__.load({
               ? h('span', { key: 'p', className: 'll-nav-foot-tag', title: '原文由 PDF.js canvas 渲染' }, 'PDF.js')
               : null,
             h('span', { key: 'sp', className: 'll-spacer' }),
-            h('label', {
-              key: 'fs', className: 'll-font-size',
-              title: '先选择范围档位，再拖动微调；设置会立即保存，重启 DSH 后仍保留',
-            }, [
-              h('span', { key: 'l' }, '字号'),
-              h('select', {
-                key: 'band', className: 'll-font-band', value: fontRangeFor(fontPercent).id,
-                'aria-label': '字号范围',
-                onChange: (e) => {
-                  const range = FONT_RANGES.find((item) => item.id === e.target.value) ?? FONT_RANGES[0];
-                  updateFontPercent(Math.min(range.max, Math.max(range.min, fontPercent)));
-                },
-              }, FONT_RANGES.map((range) => h('option', { key: range.id, value: range.id }, range.label))),
-              h('input', {
-                key: 'r', className: 'll-font-range', type: 'range',
-                min: fontRangeFor(fontPercent).min, max: fontRangeFor(fontPercent).max, step: 1,
-                value: fontPercent,
-                'aria-label': '字号滑块',
-                onChange: (e) => updateFontPercent(e.target.value),
-              }),
-              h('input', {
-                key: 'n', className: 'll-font-num', type: 'number',
-                min: FONT_MIN_PERCENT, max: FONT_MAX_PERCENT, step: 1,
-                value: fontPercent,
-                'aria-label': '字号百分比',
-                onChange: (e) => {
-                  if (e.target.value === '') return;
-                  updateFontPercent(e.target.value);
-                },
-              }),
-              h('span', { key: 'p' }, '%'),
-            ]),
+            h('button',{key:'read-tools',className:'ll-btn ll-btn-xs',onClick:()=>setToolsTab('reading')},'阅读设置'),
+            h('button',{key:'settings',className:'ll-btn ll-btn-xs',onClick:()=>setToolsTab('settings')},'设置'),
             h('span', { key: 'h', className: 'll-nav-foot-hint', title: '当前文献总数' }, `${papers.length} 篇`),
           ]),
         ]) : null,
@@ -4983,7 +5155,7 @@ window.__ModuleLoader__.load({
         !focusMode ? h(Divider, {
           key: 'd1',
           onDrag: { start: startDrag('nav'), move: moveDrag, end: endDrag },
-          onDoubleClick: () => setLayout((l) => ({ ...l, navPct: 18 })),
+          onDoubleClick: () => setLayout((l) => ({ ...l, navPct: 16 })),
         }) : null,
 
         // 第 2 段：文献区
@@ -5003,6 +5175,9 @@ window.__ModuleLoader__.load({
               }, englishPaperTitle(selected) || '英文题名待自动识别'),
             ]),
             h('div', { className: 'll-head-actions', key: 'actions' }, [
+              h('select',{key:'surface',className:'ll-reader-select','aria-label':'阅读布局',value:readerSurface,onChange:e=>setReaderSurface(e.target.value)},[
+                h('option',{key:'split',value:'split'},'双栏对照'),h('option',{key:'translation',value:'translation'},'只看译文'),h('option',{key:'pdf',value:'pdf'},'只看原文'),
+              ]),
               h('div', { className: 'll-navpair', key: 'nav' }, [
                 h('button', {
                   key: 'prev', className: 'll-icon-btn', disabled: !prevPaper,
@@ -5136,7 +5311,7 @@ window.__ModuleLoader__.load({
                   key: 'tr', className: 'll-btn', disabled: busy !== null, onClick: () => doTranslate(selected),
                 }, busy === selected.slug ? '投递中…' : '翻译这篇') : null,
               ]),
-              h('div', { className: 'll-pane-body', key: 'b', ref: markdownPaneRef },
+              h('div', { className: 'll-pane-body', key: 'b', ref: markdownPaneRef, tabIndex:0, 'aria-label':'译文阅读区' },
                 contentSwitching || docStale
                   ? h('div', { className: 'll-status' }, contentSwitching ? '正在切换文献…' : '正在读取译文…')
                   : doc.phase === 'loading'
@@ -5216,6 +5391,163 @@ window.__ModuleLoader__.load({
           onAdd: doAddFolder,
         }) : null,
 
+        toolsTab ? h(ToolDialog,{key:'tools',tab:toolsTab,onTab:setToolsTab,onClose:()=>setToolsTab(null)},[
+          toolsTab==='library' ? h('section',{key:'library',className:'ll-tool-section'},[
+            h('h3',{key:'h'},'登记与整理文献'),
+            h('div', {
+              className: `ll-scan${selectedFolder ? ' ll-scan-selected' : ''}`,
+              key: 'sc',
+            }, selectedFolder ? [
+              h('span', {
+                key: 't', className: 'll-scan-target',
+                title: `扫描分类「${selectedFolder}」记录的原始外部文件夹；只复制新增 PDF`,
+              }, ['扫描：', h('b', { key: 'b' }, selectedFolder)]),
+              h('button', {
+                key: 'go', className: 'll-btn ll-btn-xs',
+                disabled: busy !== null, onClick: doScanFolder,
+                title: '扫描该分类的原始来源文件夹，把新增 PDF 复制进这个分类',
+              }, busy === 'scan-folder' ? '扫描中…' : '扫描新增'),
+              h('button', {
+                key: 'x', className: 'll-btn ll-btn-xs',
+                disabled: busy !== null,
+                title: '取消选中，回到手动扫描库内路径',
+                onClick: () => setSelectedFolder(null),
+              }, '×'),
+            ] : [
+              h('input', {
+                key: 'i', className: 'll-input', value: scanDir, spellCheck: false,
+                title: '手动扫描库内已有的文件夹（相对工作区路径）',
+                onChange: (e) => setScanDir(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter') doScan(); },
+              }),
+              h('button', {
+                key: 'go', className: 'll-btn ll-btn-xs', disabled: busy !== null, onClick: doScan,
+                title: '登记该库内文件夹（含子文件夹）里的 PDF；子文件夹会作为分类',
+              }, busy === 'scan' ? '扫描中…' : '扫描'),
+            ]),
+          h('div', { className: 'll-treebar', key: 'tb' }, [
+            h('button', {
+              key: 'collapse', className: 'll-btn ll-btn-xs', onClick: collapseAll,
+              title: '收起所有文件夹（只留顶层分类）',
+            }, '全部收起'),
+            h('button', {
+              key: 'expand', className: 'll-btn ll-btn-xs', onClick: expandAll,
+              title: '展开所有文件夹',
+            }, '全部展开'),
+            h('label', {
+              key: 'hidden', className: 'll-hint',
+              style: { marginLeft: 'auto', display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer' },
+              title: '显示被隐藏的文献（淡色显示，可点「显示」恢复）',
+            }, [
+              h('input', {
+                key: 'i', type: 'checkbox', checked: showHidden,
+                onChange: (e) => setShowHidden(e.target.checked),
+              }),
+              h('span', { key: 's' }, `显示隐藏${hiddenCount ? ` (${hiddenCount})` : ''}`),
+            ]),
+          ]),
+            h('button', {
+              key: 'fill', className: 'll-btn ll-btn-xs',
+              disabled: busy !== null,
+              title: '从译稿/抽取文本识别 DOI、标题、作者、年份和刊名，经 Crossref 校准后查询影响因子与分区',
+              onClick: () => doFillJournals(),
+            }, busy === 'fill' ? '补全中…' : '补全信息'),
+          ]) : null,
+          toolsTab==='translation' ? h('section',{key:'translation',className:'ll-tool-section'},[
+            h('h3',{key:'h'},'翻译默认选项'),
+            h('p',{key:'hint'},'本地分区不产生模型费用；确认后才进入翻译。图表默认只译题注，公式优先写为可编辑 LaTeX。'),
+          h('div', { className: 'll-toolbar', key: 'tr' }, [
+            h('span', {
+              key: 'dot', className: `ll-api-dot${apiConfig?.ready ? ' ok' : ''}`,
+              title: apiConfig?.ready
+                ? `密钥来源：${apiConfig.keySource}\n端点：${apiConfig.baseUrl}\n模型：${apiConfig.model}`
+                : '需要 DEEPSEEK_API_KEY：点右侧「配置」填写',
+            }),
+            h('span', {
+              key: 'ok', className: 'll-hint',
+              title: apiConfig?.ready
+                ? `密钥来源：${apiConfig.keySource}\n端点：${apiConfig.baseUrl}\n模型：${apiConfig.model}`
+                : '需要 DEEPSEEK_API_KEY：点右侧「配置」填写',
+            }, apiConfig?.ready ? apiConfig.model : '未配置 API'),
+            h('span', { className: 'll-spacer', key: 'sp' }),
+            h('label', {
+              key: 'offpeak', className: `ll-offpeak-toggle${offpeakOnly ? ' on' : ''}`,
+              title: '按后端闲时调度；费用以服务端用量和账单为准',
+            }, [
+              h('input', {
+                key: 'i', type: 'checkbox', checked: offpeakOnly, disabled: batchActive,
+                onChange: (event) => setOffpeakOnly(event.target.checked),
+              }),
+              h('span', { key: 's' }, '闲时'),
+            ]),
+            h('button', {
+              key: 'all', className: 'll-btn ll-btn-xs',
+              disabled: batchState.phase === 'stopping' || busy !== null,
+              title: batchActive
+                ? `当前第 ${batchState.current}/${batchState.total} 篇：${batchState.title || '准备中'}。点击后不再提交后续文献，当前后台任务不会被取消。`
+                : (runningCount > 0
+                  ? `已有 ${runningCount} 个任务在跑`
+                  : '把当前可见且未翻译的文献串行翻译：等上一篇完成后再提交下一篇'),
+              onClick: batchActive ? stopTranslateBatch : () => { setToolsTab(null);setLayoutBatchOpen(true); },
+            }, batchActive
+              ? `停止后续 ${batchState.current}/${batchState.total}`
+              : '分区/批量翻译'),
+            h('select',{key:'layout-mode',className:'ll-layout-mode',value:layoutMode,'aria-label':'翻译分区模式',title:'选择分区与翻译流程',onChange:e=>setLayoutMode(e.target.value)},[
+              h('option',{key:'auto',value:'auto'},'自动分区翻译'),h('option',{key:'semi',value:'semi'},'半自动·人工检查'),h('option',{key:'manual',value:'manual'},'手动分区'),
+            ]),
+            h(MediaOptions,{key:'media',value:media,onChange:setMedia}),
+          ]),
+            selected ? h('button',{key:'current',className:'ll-btn ll-primary',disabled:busy!==null,onClick:()=>{setToolsTab(null);doTranslate(selected);}},'准备当前文献') : null,
+          ]) : null,
+          toolsTab==='reading' ? h('section',{key:'reading',className:'ll-tool-section'},[
+            h('h3',{key:'h'},'论文字号'),h('p',{key:'hint'},'只调整译文，不改变菜单、坐标输入或 PDF 缩放。设置自动保存。'),
+            h('label', {
+              key: 'fs', className: 'll-font-size',
+              title: '先选择范围档位，再拖动微调；设置会立即保存，重启 DSH 后仍保留',
+            }, [
+              h('span', { key: 'l' }, '字号'),
+              h('select', {
+                key: 'band', className: 'll-font-band', value: fontRangeFor(fontPercent).id,
+                'aria-label': '字号范围',
+                onChange: (e) => {
+                  const range = FONT_RANGES.find((item) => item.id === e.target.value) ?? FONT_RANGES[0];
+                  updateFontPercent(Math.min(range.max, Math.max(range.min, fontPercent)));
+                },
+              }, FONT_RANGES.map((range) => h('option', { key: range.id, value: range.id }, range.label))),
+              h('input', {
+                key: 'r', className: 'll-font-range', type: 'range',
+                min: fontRangeFor(fontPercent).min, max: fontRangeFor(fontPercent).max, step: 1,
+                value: fontPercent,
+                'aria-label': '字号滑块',
+                onChange: (e) => updateFontPercent(e.target.value),
+              }),
+              h('input', {
+                key: 'n', className: 'll-font-num', type: 'number',
+                min: FONT_MIN_PERCENT, max: FONT_MAX_PERCENT, step: 1,
+                value: fontPercent,
+                'aria-label': '字号百分比',
+                onChange: (e) => {
+                  if (e.target.value === '') return;
+                  updateFontPercent(e.target.value);
+                },
+              }),
+              h('span', { key: 'p' }, '%'),
+            ]),
+          ]) : null,
+          toolsTab==='settings' ? h('section',{key:'settings',className:'ll-tool-section'},[
+            h('h3',{key:'h'},'插件与服务'),
+            h('button', {
+              key: 'cfg', className: 'll-btn ll-btn-xs',
+              title: '配置 DeepSeek API key（写入 ~/.dsh/.credentials.yaml，自动备份）',
+              onClick: () => {setToolsTab(null);setConfigOpen(true);},
+            }, '配置'),
+            h('button', {
+              key: 'upd', className: 'll-btn ll-btn-xs',
+              title: '从本地 .tgz 一键更新（不需要 GitHub 或外网）',
+              onClick: () => {setToolsTab(null);setUpdateOpen(true);},
+            }, '更新'),
+          ]) : null,
+        ]) : null,
         configOpen ? h(ConfigDialog, {
           key: 'config',
           onClose: () => setConfigOpen(false),
@@ -5238,60 +5570,14 @@ window.__ModuleLoader__.load({
           key: 'menu',
           menu,
           busy,
-          onClose: () => setMenu(null),
+          onClose: closeMenu,
           onOpen: (p) => selectPaper(p.slug),
           onTranslate: (p) => doTranslate(p),
           onMutate: doMutate,
           onArrange: doArrange,
         }) : null,
 
-        menu?.kind === 'folder' ? h('div', {
-          key: 'menu-folder',
-          className: 'll-menu',
-          style: { left: `${menu.x}px`, top: `${menu.y}px` },
-          onMouseDown: (e) => e.stopPropagation(),
-          onContextMenu: (e) => e.preventDefault(),
-        }, [
-          h('div', { className: 'll-menu-title', key: 't' }, `文件夹：${menu.folder}`),
-          h('div', { className: 'll-hint', key: 'c', style: { padding: '2px 10px 6px' } },
-            `共 ${menu.papers.length} 篇（隐藏 ${menu.hiddenCount}）`),
-          h('button', {
-            key: 'collapse', className: 'll-menu-item',
-            onMouseDown: (e) => { e.stopPropagation(); toggleCollapse(menu.folder); setMenu(null); },
-          }, collapsed.has(menu.folder) ? '展开此文件夹' : '收起此文件夹'),
-          h('button', {
-            key: 'hidetree', className: 'll-menu-item',
-            onMouseDown: (e) => {
-              e.stopPropagation();
-              const body = { action: 'hide', folder: menu.folder };
-              setMenu(null);
-              doMutate(body, '已隐藏文件夹');
-            },
-          }, '隐藏整个文件夹（含子文件夹）'),
-          h('button', {
-            key: 'showtree', className: 'll-menu-item',
-            onMouseDown: (e) => {
-              e.stopPropagation();
-              const body = { action: 'unhide', folder: menu.folder };
-              setMenu(null);
-              doMutate(body, '已恢复文件夹');
-            },
-          }, '取消隐藏整个文件夹'),
-          h('div', { className: 'll-menu-sep', key: 's2' }),
-          h('button', {
-            key: 'deltree', className: 'll-menu-item ll-danger',
-            onMouseDown: (e) => {
-              e.stopPropagation();
-              setMenu(null);
-              if (window.confirm(
-                `确定移除文件夹「${menu.folder}」里的全部 ${menu.papers.length} 篇文献？\n\n`
-                + 'PDF 会移到 library/trash/，不会永久删除。',
-              )) {
-                doMutate({ action: 'delete', folder: menu.folder }, '已移除文件夹');
-              }
-            },
-          }, '移除整个文件夹…'),
-        ]) : null,
+        menu?.kind === 'folder' ? h(FolderMenu,{key:'menu-folder',menu,onClose:closeMenu,collapsed,toggleCollapse,doMutate}) : null,
       ]);
     }
 

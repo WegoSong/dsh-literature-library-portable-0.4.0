@@ -28,6 +28,9 @@ import { REGION_VERSION, itemBox, unionBoxes, detectShadedPanels, identifyPageRe
 import { ARTICLE_ROLES } from './manual_regions.mjs';
 import { MEDIA_POLICY, mediaOptions, pageGraphics, identifyMedia, tableGrid, markdownTable } from './media_regions.mjs';
 import { readMathGlyphs, reconstructFormula } from './formula_latex.mjs';
+import { buildDocumentModel } from './document_structure.mjs';
+import { attachNativeScripts } from './native_scripts.mjs';
+import { nativePageCache } from './native_page_cache.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = resolve(HERE, '..');
@@ -45,6 +48,7 @@ function parseArgs(argv) {
     else if (a === '--asset-prefix') args.assetPrefix = argv[++i];
     else if (a === '--file-route') args.fileRoute = argv[++i];
     else if (a === '--pages') args.pages = argv[++i];
+    else if (a === '--native-cache') args.nativeCache = argv[++i];
     else if (a === '--debug-cols') args.debugCols = true;
     else if (a === '--dump-layout') { args.dumpLayout = true; args.debugCols = true; }
     else if (a === '--preview-pages') args.previewPages = argv[++i];
@@ -130,7 +134,7 @@ function normalizeInline(s) {
  * item 合成 run；间距出现明显跳跃说明跨栏，必须断开——否则左右两栏会被拼成一句。
  */
 function buildRuns(items, debugOpts = {}) {
-  const mapped = items
+  const mapped = items.flatMap(item=>item.nativeRuns||[item])
     .filter((it) => (it.str ?? '').length > 0
       // 侧边竖排下载水印不能参与正文几何分析。
       && Math.abs(it.transform?.[1] ?? 0) < Math.abs(it.transform?.[0] ?? 1) * 0.5)
@@ -327,6 +331,7 @@ function legacyGroupLines(runs, debugOpts = {}) {
  */
 function composeLineText(runs) {
   let out = '';
+  let host=null;
   for (let i = 0; i < runs.length; i += 1) {
     const r = runs[i];
     const prev = runs[i - 1];
@@ -336,17 +341,19 @@ function composeLineText(runs) {
     if (prev) {
       const gap = r.x0 - prev.x1;
       const spaceThreshold = Math.max(0.9, prev.size * 0.24);
-      const dy = r.y - prev.y;
-      const smaller = r.size <= prev.size * 0.85;
-      const offset = dy > prev.size * 0.1 || dy < -prev.size * 0.03;
-      const adjacent = gap < Math.max(2.5, prev.size * 0.7);
-      const token = /^[0-9A-Za-z+\-=()]{1,6}$/u.test(piece);
+      const anchor=host||prev;
+      const dy = r.y - anchor.y;
+      const smaller = r.size <= anchor.size * 0.85;
+      const offset = dy > anchor.size * 0.1 || dy < -anchor.size * 0.03;
+      const adjacent = r.x0-anchor.x1 < Math.max(2.5, anchor.size * 1.8);
+      const token = /^[\p{L}0-9+\-=().,\/]{1,16}$/u.test(piece);
 
       if (smaller && offset && adjacent && token) script = dy > 0 ? '^' : '_';
       else if (gap > spaceThreshold && !/[-–—/(]$/u.test(out) && !/^[),.;:%]/u.test(piece)) out += ' ';
     }
 
     out += script ? `${script}{${piece}}` : piece;
+    if(!script)host=r;
     // 下标后面的正文词需要空格；公式的标点/连续符号仍保持紧贴。
     const next = runs[i + 1];
     if (script && next && /^[A-Za-z]{2,}\b/u.test(next.text.trim()) && next.size > r.size * 1.1
@@ -849,12 +856,9 @@ function linesToParagraphs(lines, ctx) {
       && Math.abs(priorHeading.size - ln.size) < 0.15 && priorHeading.y0 - ln.y > 0
       && priorHeading.y0 - ln.y < ln.size * 1.6 && /^[A-Z][A-Za-z -]{1,90}$/u.test(text);
     const isHeading = role !== 'abstract' && (ln.size > bodySize * 1.08 || numberedHeading || sectionHeading || headingContinuation) && text.length < 140;
-    const hasRelation = /[=≈≤≥≪≫]/u.test(text);
-    const wordCount = (text.match(/[\p{L}]{2,}/gu) ?? []).length;
-    const formulaShape = wordCount <= 7;
-    // 公式块判定从严：短、符号密集或居中的式子才独立；包含一个等号的完整英文句子仍是正文。
-    const isEquation = hasRelation && text.length < 160 && formulaShape
-      && MATH_CHARS.test(text) && !isEquationFragment(ln);
+    // A second, text-only equation heuristic used to bypass native glyph checks
+    // and wrap experimental prose in $$. Only the geometry math pass may create
+    // display equations; a relation inside a sentence remains part of its prose.
 
     const captionStart = /^(?:FIGURE|TABLE)\s*\d+\b/u.test(text)
       || /^(?:Fig\.|Figure|Table)\s+\d+[.:]\s*/iu.test(text);
@@ -864,7 +868,7 @@ function linesToParagraphs(lines, ctx) {
       || (cur.lastY ?? cur.y0) - ln.y > ln.size * 1.8);
     const provenance = { sourceIds: lineSourceIds(ln), sourcePages: [page], flowId: role === 'abstract' ? 'abstract' : 'body' };
 
-    if (isHeading || isEquation || isCaption || ln.formulaCrop) {
+    if (isHeading || isCaption || ln.formulaCrop) {
       if (cur) { paras.push(cur); cur = null; }
       const previous = paras[paras.length - 1];
       if (isHeading && !isCaption && previous?.type === 'heading'
@@ -1150,6 +1154,7 @@ function splitWidthTransitions(group, width) {
 function markFormulaRegions(lines, { left, right, page }) {
   const mathLike = (line) => {
     const text = line.text.normalize('NFKC');
+    if(/\b(?:the|and|are|was|were|for|with|from|this|that|where|when|these|using|at)\b/iu.test(text))return false;
     const words = text.match(/[A-Za-z]{3,}/gu) ?? [];
     return words.filter((w) => !['approx', 'times', 'leq', 'geq', 'frac', 'neq'].includes(w)).length <= 2
       && !words.some(w => /^[A-Za-z]{7,}$/u.test(w) && !['approx', 'infty'].includes(w))
@@ -1163,15 +1168,16 @@ function markFormulaRegions(lines, { left, right, page }) {
   for (let i = 0; i < lines.length; i += 1) {
     if (!seed(lines[i])) { out.push(lines[i]); continue; }
     const region = [lines[i]];
-    while (out.length && mathLike(out[out.length - 1])
+    while (out.length && !out.at(-1).formulaCrop && !seed(out.at(-1)) && mathLike(out[out.length - 1])
       && out[out.length - 1].y - region[0].y < 20
       && !/^[A-Z][a-z]+/u.test(out[out.length - 1].text)) region.unshift(out.pop());
     while (i + 1 < lines.length && mathLike(lines[i + 1])
+      && !(region.some(l=>/\(\s*\d+[a-z]?\s*\)\s*$/iu.test(l.text))&&seed(lines[i+1])&&/[\p{L}\p{N}]\s*[=≈]\s*[\p{L}\p{N}]/u.test(lines[i+1].text))
       && region[region.length - 1].y - lines[i + 1].y < 20) region.push(lines[++i]);
     const top = Math.max(...region.map((l) => l.y + l.size)) + 3;
     const bottom = Math.min(...region.map((l) => l.y - l.size * 0.35)) - 3;
     out.push({ ...region[0], text: region.map((l) => l.text).join(' '), runs: region.flatMap(l => l.runs),
-      formulaCrop: { page, left: Math.max(0, left - 3), right: right + 3, top, bottom } });
+      formulaCrop: { page, left: Math.max(0, Math.min(...region.map(l=>l.x0))-3), right:Math.max(...region.map(l=>l.x1))+3, top, bottom } });
   }
   return out;
 }
@@ -1227,7 +1233,7 @@ async function resolveFormulaSources(doc,result,cache,opts){
   const formulas=p.paragraphs.filter(b=>b.type==='formula-source');if(!formulas.length)continue;
   const pc=cache.find(c=>c.p===p.page),page=await doc.getPage(p.page);
   let glyphs=[],error=null;
-  try{glyphs=await readMathGlyphs(page,(await loadPdfjs()).OPS,formulas.map(f=>f.crop));}
+  try{glyphs=pc.mathGlyphs||(await pc.nativeGlyphLoader?.())||await readMathGlyphs(page,(await loadPdfjs()).OPS,formulas.map(f=>f.crop));}
   catch{error='native-glyph-decoding-unavailable';}
   for(const f of formulas){
    f.formula=error?{latex:'',reliable:false,reasons:[error]}:reconstructFormula({glyphs,items:pc.rawItems.filter(i=>f.sourceIds.includes(i.sourceId)),paths:pc.graphics.paths,crop:f.crop});
@@ -1324,16 +1330,18 @@ async function extract(pdfPath, opts) {
 
   // 第一趟：抽取文本，区分正文区与页眉页脚区
   const pageCache = [];
+  const nativeCache=nativePageCache(opts.nativeCache,opts.sourceHash,lib.version);
   const overrides = opts.overrides ? JSON.parse(await readFile(opts.overrides, 'utf8')) : null;
   if (overrides && overrides.sourceHash !== opts.sourceHash) throw new Error('人工分区已过期：PDF 内容已更改');
   for (let p = 1; p <= total; p += 1) {
     if (wanted && !wanted.has(p)) continue;
     const page = await doc.getPage(p);
     const vp = page.getViewport({ scale: 1 });
-    const tc = await page.getTextContent({ includeMarkedContent: false });
-    const originalItems = tc.items.filter((i) => typeof i.str === 'string');
-    let panels = [], panelWarning = null;
-    if (p === 1 && !originalItems.some(i => /^abstract$/iu.test(i.str.trim()))) {
+    const cached=await nativeCache.read(p);
+    if(cached)out.stats.nativeCacheHits=(out.stats.nativeCacheHits||0)+1;
+    const originalItems = cached?.items || (await page.getTextContent({ includeMarkedContent: false })).items.filter((i) => typeof i.str === 'string');
+    let panels = cached?.panels||[], panelWarning = cached?.panelWarning||null;
+    if (!cached && p === 1 && !originalItems.some(i => /^abstract$/iu.test(i.str.trim()))) {
       let rendered;
       try {
         rendered = await renderBoundedPage(page);
@@ -1343,7 +1351,13 @@ async function extract(pdfPath, opts) {
       finally { if (rendered) { rendered.canvas.width = 0; rendered.canvas.height = 0; } }
     }
     const semantic = identifyPageRegions(originalItems, { page: p, width: vp.width, height: vp.height, panels });
-    const graphics = await pageGraphics(page, (await loadPdfjs()).OPS);
+    const graphics = cached?.graphics||await pageGraphics(page, (await loadPdfjs()).OPS);
+    let mathGlyphs=cached?.mathGlyphs||null;
+    try{
+      mathGlyphs||=await readMathGlyphs(page,lib.OPS,[{left:0,bottom:0,right:vp.width,top:vp.height}]);
+      out.stats.nativeScriptItems=(out.stats.nativeScriptItems||0)+attachNativeScripts(semantic.items,mathGlyphs);
+    }catch{/* Keep original text and flag uncertain equations in the later math audit. */}
+    const glyphsOnDisk=!!cached||!!(mathGlyphs&&await nativeCache.write(p,{items:originalItems,panels,panelWarning,graphics,mathGlyphs}));
     const manual = overrides?.pages?.[p];
     if (manual) {
       semantic.regions = manual;
@@ -1382,6 +1396,9 @@ async function extract(pdfPath, opts) {
       rawItems,
       manual: !!manual,
       graphics,
+      // Keep only one page's full operator glyphs in memory when disk caching is available.
+      mathGlyphs:glyphsOnDisk?null:mathGlyphs,
+      nativeGlyphLoader:glyphsOnDisk?async()=> (await nativeCache.read(p))?.mathGlyphs:null,
       regions: semantic.regions,
       warnings: [...semantic.warnings, ...(panelWarning ? [panelWarning] : []),
         ...(page.rotate % 360 ? ['unresolved-page-rotation: rotated page coordinates require review'] : []),
@@ -1449,7 +1466,6 @@ async function extract(pdfPath, opts) {
 
   // 第二趟：逐页还原阅读顺序 → 段落 → 跨页续段合并
   let pending = null;
-  let refsStarted = false;
 
   for (const pc of pageCache) {
     const pageParas = extractPageParagraphs(pc, furniture, { bodyLeft, bodyRight, bodySize }, opts, out);
@@ -1457,9 +1473,9 @@ async function extract(pdfPath, opts) {
 
     for (const para of pageParas) {
       const tag = tagParagraph(para);
-      if (tag === 'REFERENCES') refsStarted = true;
-      if (tag === 'ABSTRACT') refsStarted = false;
-      para.section = tag ?? (refsStarted ? 'REFERENCES' : null);
+      // Only the actual heading is a hint. Never propagate REFERENCES to the
+      // rest of the article: the shared interval classifier verifies boundaries.
+      para.section = tag;
     }
 
     // 跨页续段：pending 可能跨多页累积，只累加、不覆盖
@@ -1526,15 +1542,27 @@ async function extract(pdfPath, opts) {
   const regions = pageCache.flatMap(pc => pc.regions);
   const coverage = auditCoverage(sourceItems, regions, out.pages.flatMap(p => p.paragraphs));
   if (!coverage.ok) {
+    const broken=new Set([...coverage.missing,...coverage.duplicate,...coverage.unknown,...coverage.missingBody,...coverage.duplicateBody,...coverage.unexpectedBody]);
+    const warnings=pageCache.filter(pc=>pc.rawItems.some(i=>broken.has(i.sourceId)))
+      .map(pc=>({page:pc.p,message:'unresolved-content-ownership: 原生文字遗漏、重复或归属冲突，请在此页纠错'}));
+    // A failed audit still yields a usable geometry workbench. Never write a
+    // translatable MD from it; keep coverage=false and require a fresh audit.
+    const recovery={version:REGION_VERSION,sourceHash:opts.sourceHash,recovery:true,coverage,previews:[],
+      mediaPolicy:MEDIA_POLICY,media:mediaOptions(opts),warnings,blockingWarnings:warnings,blocks:[],
+      pages:pageCache.map(pc=>({page:pc.p,width:pc.width,height:pc.height,regions:pc.regions,
+        items:pc.rawItems.filter(i=>i.str.trim()).map(i=>({id:i.sourceId,text:i.str,bbox:itemBox(i)}))}))};
+    await writeFile(join(opts.out,opts.name,`${opts.name}.layout.json`),JSON.stringify(recovery));
     await writeFile(join(opts.out, opts.name, `${opts.name}.layout-error.json`), JSON.stringify({ version: REGION_VERSION, coverage,
       pages: pageCache.map(pc => ({ page: pc.p, regions: pc.regions,
         items: pc.rawItems.filter(i => i.str.trim()).map(i => ({ id: i.sourceId, text: i.str, bbox: itemBox(i) })) })) }));
-    throw new Error(`版面完整性校验失败，停止翻译；见 ${opts.name}.layout-error.json`);
+    await task.destroy();
+    throw new Error(`版面完整性校验失败，已保留问题页供纠错，停止翻译；见 ${opts.name}.layout-error.json`);
   }
   out.stats.paragraphs = out.pages.reduce((n, p) => n + p.paragraphs.length, 0);
   await resolveFormulaSources(doc,out,pageCache,opts);
+  out.document = buildDocumentModel(out.pages,opts.sourceHash,coverage);
   const previews = await renderLayoutPreviews(doc, pageCache, opts);
-  out.layout = { version: REGION_VERSION, mediaPolicy: MEDIA_POLICY, media: mediaOptions(opts), sourceHash: opts.sourceHash, coverage, previews,
+  out.layout = { version: REGION_VERSION, documentVersion: out.document.version, performance:{nativeCacheHits:out.stats.nativeCacheHits||0,nativeScriptItems:out.stats.nativeScriptItems||0}, mediaPolicy: MEDIA_POLICY, media: mediaOptions(opts), sourceHash: opts.sourceHash, coverage, previews,
     warnings: pageCache.flatMap(pc => pc.warnings.map(message => ({ page: pc.p, message }))),
     blockingWarnings: pageCache.flatMap(pc => pc.warnings.filter(message => message.startsWith('unresolved-')).map(message => ({ page: pc.p, message }))),
     blocks: out.pages.flatMap(p => p.paragraphs.map((block, index) => ({ id: `p${p.page}-b${index + 1}`, type: block.type,

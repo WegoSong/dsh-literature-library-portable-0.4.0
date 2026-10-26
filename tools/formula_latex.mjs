@@ -151,7 +151,8 @@ export function reconstructFormula({glyphs=[],items=[],paths=[],crop}){
  };
  let latex=render(nodes,bars);
  if(bars.some(b=>!used.has(b)))reasons.add('unresolved-math-line');
- if(!/[=<>]|\\(?:approx|leq|geq|neq)/u.test(latex))reasons.add('no-math-relation');
+ if(!/[=<>]|\\(?:approx|leq|geq|neq)/u.test(latex)&&!/[\p{L}\p{N}].*(?:[_^]\{|\\(?:frac|sqrt|int|sum|prod)\b)/u.test(latex))reasons.add('no-math-relation');
+ if((chars(selected).match(/[\p{L}\p{N}]/gu)||[]).length<2)reasons.add('incomplete-expression');
  let parentheses=0,brackets=0;
  for(const c of latex.replace(/\\[{}]/gu,'')){if(c==='(')parentheses++;if(c===')')parentheses--;if(c==='[')brackets++;if(c===']')brackets--;if(parentheses<0||brackets<0)reasons.add('unbalanced-delimiters');}
  if(parentheses||brackets)reasons.add('unbalanced-delimiters');

@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { validatePageRegions } from './manual_regions.mjs';
@@ -11,6 +12,10 @@ const MODES = ['auto', 'semi', 'manual'];
 export function createLayoutWorkflow({ root, findPaper, extract, translate, isBusy }) {
   let tail = Promise.resolve();
   const locks = new Map(), pending = new Set();
+  // UI polling must not repeatedly load/hash a whole PDF and parse every page.
+  const hashes = new Map(), layouts = new Map();
+  const stamp = s => `${s.size}/${s.mtimeMs}/${s.ctimeMs}/${s.ino}`;
+  const retain = (cache,key,value,max) => { cache.delete(key);cache.set(key,value);while(cache.size>max)cache.delete(cache.keys().next().value);return value; };
   const dir = slug => join(root, slug);
   async function paperFor(slug) {
     // Never use an unvalidated client slug as a filesystem path.
@@ -39,14 +44,21 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
   }
   async function sourceHash(slug) {
     const p = await paperFor(slug);
-    return digest(await readFile(p.pdfAbs)).slice(0, 12);
+    const key=stamp(await stat(p.pdfAbs)),cached=hashes.get(p.pdfAbs);
+    if(cached?.key===key)return cached.value;
+    const hash=createHash('sha256');for await(const chunk of createReadStream(p.pdfAbs))hash.update(chunk);
+    return retain(hashes,p.pdfAbs,{key,value:hash.digest('hex').slice(0,12)},8).value;
   }
   async function current(s, revision) {
     if (!s) fail('请先分区');
     if (revision !== undefined && revision !== s.revision) fail('分区已更新，请刷新后再操作');
     if (s.sourceHash !== await sourceHash(s.slug)) fail('PDF 已更改，请重新分区');
   }
-  async function layout(s) { return JSON.parse(await readFile(s.layoutPath, 'utf8')); }
+  async function layout(s) {
+    const key=stamp(await stat(s.layoutPath)),cached=layouts.get(s.layoutPath);
+    if(cached?.key===key)return cached.value;
+    return retain(layouts,s.layoutPath,{key,value:JSON.parse(await readFile(s.layoutPath,'utf8'))},2).value;
+  }
   const summary = s => s && ({ slug: s.slug, title: s.title, mode: s.mode, phase: s.phase, revision: s.revision,
     media:mediaOptions(s.media), needsRefresh:s.preparationPolicy!==MEDIA_POLICY,
     sourceHash: s.sourceHash, pageCount: s.pageCount || 0, checkedPages: s.checkedPages || [],
@@ -76,7 +88,21 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         s.phase = s.mode === 'auto' && safe ? 'approved' : 'review';
         if (s.mode === 'auto' && !safe) s.error = '自动自检未通过，已暂停。请检查分区后确认。';
         await save(s);
-      } catch (err) { s.phase = 'failed'; s.error = String(err.message || err); await save(s); }
+      } catch (err) {
+        s.phase = 'failed'; s.error = String(err.message || err);
+        if(err.recoveryLayoutPath){
+          try{
+            const l=JSON.parse(await readFile(err.recoveryLayoutPath,'utf8'));
+            if(l.recovery===true&&l.sourceHash===s.sourceHash){
+              s.layoutPath=err.recoveryLayoutPath;s.mdPath=null;s.mdHash=null;s.preparedRevision=null;
+              s.pageCount=l.pages.length;s.coverage=l.coverage;s.warnings=l.warnings||[];s.hardWarnings=l.blockingWarnings||[];
+              s.preparationPolicy=MEDIA_POLICY;s.phase='review';
+              s.error='抽取自检发现内容归属问题，已保留原生文字与分区。请纠正待处理页；通过自检前不会启动翻译。';
+            }
+          }catch{/* An unreadable recovery file never authorizes translation. */}
+        }
+        await save(s);
+      }
     })).then(async () => {
       pending.delete(slug);
       const s = await read(slug);

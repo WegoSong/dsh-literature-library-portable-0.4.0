@@ -9,11 +9,12 @@
  */
 
 import { createHash } from 'node:crypto';
+import { splitReferenceSections } from './document_structure.mjs';
 
 export const PIPELINE_VERSION = 'layout-integrity-v6-recovery';
 // Revalidate old cache entries under the new policy; unchanged source/prompt keys
 // remain reusable. A validation-only relaxation must not force paid retranslations.
-export const VALIDATION_VERSION = 'integrity-v8-media-cells';
+export const VALIDATION_VERSION = 'integrity-v9-caption-panels';
 export const DEFAULT_CHUNK_TOKENS = 6000;
 /**
  * 输出上限相对输入的比例（传给 resolveMaxTokens 的 inputRatio）。
@@ -89,130 +90,6 @@ function extractMetadataBlock(text) {
   return { text: stripped, metadata: blocks.join('\n\n') };
 }
 
-const REFERENCE_HEADING_WORD = /(?:references|bibliography|literature\s+cited|参考文献)/giu;
-/** 参考文献条目编号：[12] / 12. / 12（RSC 等只用数字，后接大写作者名） */
-const REFERENCE_ENTRY_MARK = /\[\d{1,3}\]|\n[ \t]*\d{1,3}[.)]?[ \t]+(?=[A-Z\u3400-\u9FFF])/gu;
-const YEAR_RE = /\b(?:1[89]\d{2}|20\d{2})\b/u;
-
-/** 一段文本里有多少「像参考文献条目」的编号标记，以及其中带年份的比例。 */
-function referenceSignals(value) {
-  const text = String(value ?? '');
-  const marks = [...text.matchAll(REFERENCE_ENTRY_MARK)];
-  let withYear = 0;
-  for (let i = 0; i < marks.length; i++) {
-    const mark = marks[i];
-    if (YEAR_RE.test(text.slice(mark.index, Math.min(marks[i + 1]?.index ?? text.length, mark.index + 1500)))) withYear += 1;
-  }
-  return { count: marks.length, withYear, ratio: marks.length ? withYear / marks.length : 0 };
-}
-
-/** 找「连续递增编号」的参考文献区段（不依赖有没有标题，也容忍少量乱序）。 */
-function numberedReferenceStart(value) {
-  const text = String(value ?? '');
-  const marks = [];
-  for (const match of text.matchAll(REFERENCE_ENTRY_MARK)) {
-    const number = Number(/\d{1,3}/u.exec(match[0])?.[0] ?? NaN);
-    if (Number.isFinite(number)) {
-      const after = text.slice(match.index + match[0].length, match.index + match[0].length + 160);
-      const authorStart = /^\s*(?:(?:[A-Z]\.)(?:-[A-Z]\.)?\s*){1,4}[\p{L}][\p{L}'’\-]+/u.test(after);
-      marks.push({ number, index: match.index, lineStart: !text.slice(lineStartAt(text, match.index), match.index).trim(), authorStart });
-    }
-  }
-  if (marks.length < 12) return null;
-
-  let best = null;
-  for (let i = 0; i < marks.length; i += 1) {
-    const first = marks[i];
-    if (first.index < text.length * 0.35 || first.number > 3) continue;
-    let last = first;
-    let count = 1;
-    let lineStarts = first.lineStart ? 1 : 0;
-    const hasYear = (k) => YEAR_RE.test(text.slice(marks[k].index, Math.min(marks[k + 1]?.index ?? text.length, marks[k].index + 1500)));
-    const hasCitationData = (k) => /\b(?:19|20)\d{2}\s*[,;]\s*(?:\d+|e\d+|n\/a)|\((?:19|20)\d{2}\)\s*\d/iu
-      .test(text.slice(marks[k].index, Math.min(marks[k + 1]?.index ?? text.length, marks[k].index + 1500)));
-    let withYear = hasYear(i) ? 1 : 0;
-    let authorStarts = first.authorStart ? 1 : 0;
-    let citationData = hasCitationData(i) ? 1 : 0;
-    for (let j = i + 1; j < marks.length; j += 1) {
-      const next = marks[j];
-      if (next.index > last.index + 3000) break;
-      if (next.number <= last.number) continue;
-      if (next.number - last.number > 8) break;
-      count += 1;
-      if (next.lineStart) lineStarts += 1;
-      if (hasYear(j)) withYear += 1;
-      if (next.authorStart) authorStarts += 1;
-      if (hasCitationData(j)) citationData += 1;
-      last = next;
-    }
-    const coverage = last.index / text.length;
-    const ratio = withYear / Math.max(1, count);
-    if (count < 12 || ratio < 0.5 || coverage < 0.75) continue;
-    /*
-     * 条目必须是「行首编号」。正文里的 [12] 是嵌在句子中间的，
-     * 即便碰巧按 1、2、3 递增也不能当成参考文献（引用密集的综述很容易这样）。
-     */
-    // PDF extraction often joins many references onto one line, and long author
-    // lists push the year past 240 chars. Sequential IDs + author initials + years
-    // are independent bibliographic evidence; prose citations lack that prefix.
-    if (lineStarts / count < 0.25 && !(authorStarts / count >= 0.75 && citationData / count >= 0.6)) continue;
-    const score = count * ratio * (1 + authorStarts / count);
-    if (!best || score > best.score) best = { index: first.index, count, ratio, score };
-  }
-  return best;
-}
-
-/** 文章后半部出现的 references / 参考文献 这个词（可能被双栏抽取挤在句子中间）。 */
-function inlineReferenceHeading(value) {
-  const text = String(value ?? '');
-  let hit = null;
-  for (const match of text.matchAll(REFERENCE_HEADING_WORD)) {
-    const index = match.index ?? 0;
-    if (index < text.length * 0.5) continue;
-    const tail = text.slice(index);
-    if (tail.length < text.length * 0.03) continue;
-    const signals = referenceSignals(tail);
-    if (signals.count < 6 || signals.ratio < 0.45) continue;
-    hit = { index };
-  }
-  return hit;
-}
-
-/**
- * 独立成行的 References / 参考文献 标题。
- * 标题本身就是很强的信号，因此只要求后面有 3 条以上编号条目。
- */
-function standaloneReferenceHeading(value) {
-  const text = String(value ?? '');
-  const headingRe = /^(?:#{1,4}\s*)?(?:references|bibliography|literature\s+cited|参考文献)\s*$/gimu;
-  let hit = null;
-  for (const match of text.matchAll(headingRe)) {
-    const index = match.index ?? 0;
-    if (index < text.length * 0.4) continue;
-    const tail = text.slice(index);
-    const entryLines = tail.split('\n').filter((line) => /^\s*(?:\[\d+[a-z]?\]|\d+[.)])\s+\S/u.test(line)).length;
-    if (entryLines < 3 && referenceSignals(tail).count < 3) continue;
-    hit = { index };
-  }
-  return hit;
-}
-
-function lineStartAt(text, index) {
-  const at = text.lastIndexOf('\n', index);
-  return at < 0 ? 0 : at + 1;
-}
-
-function cleanReferenceSection(value) {
-  return String(value ?? '')
-    // 抽取脚本的章节/版面标记可能被双栏文本挤到行中间，因此不能只匹配整行。
-    .replace(/===SEC:REFERENCES===/gu, '\n\n')
-    .replace(/===SEC:[A-Z_]+===/gu, '')
-    .replace(/===LAYOUT:COLUMNS\s+\d+===/gu, '')
-    .replace(/===PAGE\s+\d+===/gu, '')
-    .replace(/[ \t]+\n/gu, '\n')
-    .replace(/\n{3,}/gu, '\n\n')
-    .trim();
-}
 
 /**
  * 剥离参考文献，供翻译前从 API 输入里删除、翻译后原样接回。
@@ -227,42 +104,7 @@ function cleanReferenceSection(value) {
  *   3. 文章后半部出现的 references / 参考文献 一词，其后确有成批带年份的条目。
  */
 export function splitHighConfidenceReferences(text) {
-  const value = String(text ?? '').replace(/\r\n?/gu, '\n');
-  const candidates = [];
-
-  const marker = /===SEC:REFERENCES===/gu;
-  for (const match of value.matchAll(marker)) {
-    const index = match.index ?? 0;
-    if (index < value.length * 0.35) continue;
-    candidates.push({ index, reason: 'section-marker' });
-    break;
-  }
-
-  const numbered = numberedReferenceStart(value);
-  if (numbered) candidates.push({ index: numbered.index, reason: 'numbered-list' });
-
-  if (candidates.length === 0) {
-    const heading = standaloneReferenceHeading(value);
-    if (heading) candidates.push({ index: heading.index, reason: 'standalone-heading' });
-  }
-
-  if (candidates.length === 0) {
-    const heading = inlineReferenceHeading(value);
-    if (heading) candidates.push({ index: heading.index, reason: 'inline-heading' });
-  }
-
-  if (candidates.length === 0) return { body: value, references: '', reason: null };
-  const chosen = candidates.sort((a, b) => a.index - b.index)[0];
-  // An inline [1] may follow Keywords/publication dates on the same PDF line.
-  // Keep that prefix; moving the cut to line start would silently remove it.
-  const cut = chosen.reason === 'numbered-list' ? chosen.index : lineStartAt(value, chosen.index);
-  // 切点太靠前说明判定不可靠：宁可保留原文，也不要吞掉正文。
-  if (cut < value.length * 0.3) return { body: value, references: '', reason: null };
-  return {
-    body: value.slice(0, cut).trimEnd(),
-    references: cleanReferenceSection(value.slice(cut)),
-    reason: chosen.reason,
-  };
+  return splitReferenceSections(text);
 }
 
 /**
@@ -448,7 +290,17 @@ export function prepareDocument(text) {
   for(const o of objects){
     const literal=o.kind==='TABLE'?o.original:`<figcaption>${o.original.replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;')}</figcaption>`;
     refs.references=refs.references.split(o.id).join(literal);
+    for(const section of refs.sections)section.raw=section.raw.split(o.id).join(literal);
   }
+  // Retain bibliography intervals at their original anchors. An appendix after
+  // them remains translatable; references are restored locally, never by a model.
+  let referenceBody='',referenceAt=0;
+  refs.sections.forEach((section,index)=>{
+    section.placeholder=`@@DSH_REFERENCE_${String(index+1).padStart(6,'0')}@@`;
+    referenceBody+=meta.text.slice(referenceAt,section.start)+`\n\n${section.placeholder}\n\n`;
+    referenceAt=section.end;
+  });
+  if(refs.sections.length)refs.body=referenceBody+meta.text.slice(referenceAt);
   objects=objects.filter(o=>refs.body.includes(o.id));
   const furniture = removeRepeatedPageFurniture(refs.body);
   const withoutGeneratorComments = furniture.text.replace(
@@ -461,6 +313,7 @@ export function prepareDocument(text) {
     : withoutGeneratorComments;
   const hinted = layoutHints(cleanFront).replace(/\n{3,}/gu, '\n\n').trim();
   const protectedResult = protectTechnicalTokens(hinted);
+  for(const section of refs.sections)protectedResult.placeholders.push({placeholder:section.placeholder,type:'reference',value:''});
   for(const o of objects)protectedResult.placeholders.push({placeholder:o.id,type:'object',value:''});
   const units = protectedResult.text.split(/\n{2,}/u).filter((unit) => unit.trim());
   const cellMap=new Map();
@@ -487,6 +340,7 @@ export function prepareDocument(text) {
   return {
     text: structured,
     references: refs.references,
+    referenceSections: refs.sections,
     metadata: meta.metadata,
     placeholders: protectedResult.placeholders,
     objects,
@@ -504,7 +358,11 @@ export function prepareDocument(text) {
 
 /** Called only after every chunk has passed integrity validation. */
 export function restoreDocument(parts,prepared){
- if(!prepared.objects?.length)return parts.map(p=>restoreTechnicalTokens(p,prepared.placeholders).trim());
+ const restoreReferences=text=>{
+  for(const section of prepared.referenceSections||[])text=text.split(section.placeholder).join(section.raw);
+  return text;
+ };
+ if(!prepared.objects?.length)return parts.map(p=>restoreTechnicalTokens(restoreReferences(p),prepared.placeholders).trim());
  const joined=parts.join('\n\n'), blocks=translationBlocks(joined), translated=new Map(), body=[];
  for(const b of blocks){
    const meta=prepared.placeholders.find(p=>p.placeholder===b.marker);
@@ -524,7 +382,7 @@ export function restoreDocument(parts,prepared){
      :`<figcaption>${rows[0][0].replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;')}</figcaption>`;
    result=result.replace(o.id,()=>value);
  }
- const restored=restoreTechnicalTokens(result,prepared.placeholders).trim();
+ const restored=restoreTechnicalTokens(restoreReferences(result),prepared.placeholders).trim();
  if(prepared.placeholders.some(p=>restored.includes(p.placeholder)))throw new Error('图表技术标记未完整还原，停止写入');
  return [restored];
 }
@@ -787,7 +645,24 @@ export function validateTranslation(source, translation, placeholders = [], opti
     if (!input.includes(placeholder)) errors.push(`unexpected-placeholder:${placeholder}`);
   }
 
-  const ordered = expected.filter((item) => item.type === 'block' || ['object','value'].includes(item.type) || item.type === 'formula' && !isInlineVariable(item))
+  // A caption may naturally say "at 6 rpm, illuminate 100 LEDs" in Chinese.
+  // Permit value order only inside the SAME explicitly labeled caption panel;
+  // counts, panel ownership and paragraph boundaries remain strict.
+  const captionPanel=(text,id)=>{
+    const at=text.indexOf(id);if(at<0)return null;
+    const prefix=text.slice(0,at),anchor=[...prefix.matchAll(/@@DSH_BLOCK_\d{6}@@/gu)].at(-1);
+    const body=prefix.slice(anchor?anchor.index+anchor[0].length:0);
+    if(!/^\s*(?:FIGURE|Figure|图)\s/u.test(body))return null;
+    const panel=[...body.matchAll(/(?:^|[.。；;]\s*)[（(]([a-l](?:\s*[,，–-]\s*[a-l])*)[)）]/gu)].at(-1);
+    return panel?`${anchor?.[0]||'single'}/${panel[1].replace(/\s/gu,'').replaceAll('，',',')}`:null;
+  };
+  const flexibleValues=new Set();
+  for(const item of expected.filter(i=>i.type==='value')){
+    const before=captionPanel(input,item.placeholder),after=captionPanel(output,item.placeholder);
+    if(before&&before===after)flexibleValues.add(item.placeholder);
+    else if(before&&output.includes(item.placeholder))errors.push(`caption-value-moved:${item.placeholder}`);
+  }
+  const ordered = expected.filter((item) => item.type === 'block' || ['object','value','reference'].includes(item.type) && !flexibleValues.has(item.placeholder) || item.type === 'formula' && !isInlineVariable(item))
     .sort((a, b) => input.indexOf(a.placeholder) - input.indexOf(b.placeholder));
   let previousPosition = -1;
   for (const item of ordered) {
