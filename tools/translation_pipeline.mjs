@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 export const PIPELINE_VERSION = 'layout-integrity-v6-recovery';
 // Revalidate old cache entries under the new policy; unchanged source/prompt keys
 // remain reusable. A validation-only relaxation must not force paid retranslations.
-export const VALIDATION_VERSION = 'integrity-v7-inline-ownership';
+export const VALIDATION_VERSION = 'integrity-v8-media-cells';
 export const DEFAULT_CHUNK_TOKENS = 6000;
 /**
  * 输出上限相对输入的比例（传给 resolveMaxTokens 的 inputRatio）。
@@ -64,7 +64,7 @@ export function nextOutputRatio(budgetAttempt = 0) {
  */
 const STRUCTURAL_FLUSH_RATIO = 0.85;
 
-const PLACEHOLDER_RE = /@@DSH_(?:FORMULA|URL|DOI|CITATION|BLOCK)_\d{6}@@/gu;
+const PLACEHOLDER_RE = /@@DSH_(?:FORMULA|URL|DOI|CITATION|BLOCK|OBJECT|CELLTOKEN|VALUE)_\d{6}@@/gu;
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 export function estimateTokens(text) {
@@ -377,7 +377,7 @@ export function protectTechnicalTokens(text) {
   const placeholders = [];
 
   // 本地公式截图只传短标记，不上传图片，不消耗视觉 token。
-  value = replaceMatches(value, /!\[原文公式[^\]]*\]\([^\n)]+\)/gu, 'FORMULA', placeholders);
+  value = replaceMatches(value, /!\[原文(?:公式|图片)[^\]]*\]\([^\n)]+\)/gu, 'FORMULA', placeholders);
 
   value = replaceMatches(
     value,
@@ -426,8 +426,24 @@ function layoutHints(text) {
 
 export function prepareDocument(text) {
   const original = String(text ?? '').replace(/\r\n?/gu, '\n');
-  const meta = extractMetadataBlock(original);
+  // Remove tables BEFORE reference detection: a table's "References" column is
+  // not a bibliography. Translate cells as separate blocks, reconstruct locally.
+  let objects=[];
+  const objectSource=original.replace(/===((?:TABLE|CAPTION)):BEGIN===\n([\s\S]*?)\n===\1:END===/gu,(_,kind,content)=>{
+    const id=`@@DSH_OBJECT_${String(objects.length+1).padStart(6,'0')}@@`;
+    const rows=kind==='TABLE'?content.trim().split('\n').filter((_,i)=>i!==1).map(l=>l.trim().replace(/^\||\|$/gu,'').split('|').map(s=>s.trim())):[[content.trim()]];
+    if(!rows.length||!rows[0].length||rows.some(r=>r.length!==rows[0].length))throw new Error('表格行列结构不完整，停止翻译');
+    objects.push({id,kind,rows,original:content.trim()});return `\n\n${id}\n\n`;
+  });
+  const meta = extractMetadataBlock(objectSource);
   const refs = splitHighConfidenceReferences(meta.text);
+  // Captions after the bibliography belong to the locally retained reference
+  // appendix. They must not leak internal anchors or be sent back for translation.
+  for(const o of objects){
+    const literal=o.kind==='TABLE'?o.original:`<figcaption>${o.original.replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;')}</figcaption>`;
+    refs.references=refs.references.split(o.id).join(literal);
+  }
+  objects=objects.filter(o=>refs.body.includes(o.id));
   const furniture = removeRepeatedPageFurniture(refs.body);
   const withoutGeneratorComments = furniture.text.replace(
     /^<!--\s*(?:source:|本文件由 extract_pdf\.mjs)[\s\S]*?-->\s*$/gimu,
@@ -439,11 +455,27 @@ export function prepareDocument(text) {
     : withoutGeneratorComments;
   const hinted = layoutHints(cleanFront).replace(/\n{3,}/gu, '\n\n').trim();
   const protectedResult = protectTechnicalTokens(hinted);
+  for(const o of objects)protectedResult.placeholders.push({placeholder:o.id,type:'object',value:''});
   const units = protectedResult.text.split(/\n{2,}/u).filter((unit) => unit.trim());
+  const cellMap=new Map();
+  for(const o of objects){
+    o.cells=o.rows.map(row=>row.map(cell=>{
+      if(!cell)return null;
+      const protectedCell=protectTechnicalTokens(cell);
+      // Rebase local token ids so they cannot collide with body or other cells.
+      let value=protectedCell.text;
+      for(const token of protectedCell.placeholders){
+        const id=`@@DSH_CELLTOKEN_${String(protectedResult.placeholders.length+1).padStart(6,'0')}@@`;
+        value=value.split(token.placeholder).join(id);protectedResult.placeholders.push({...token,placeholder:id});
+      }
+      value=replaceMatches(value,/(?<![\w@])\d+(?:[.,]\d+)*(?:\s*[–−-]\s*\d+(?:\.\d+)?)?(?![\w@])/gu,'VALUE',protectedResult.placeholders);
+      const index=units.length;units.push(value);cellMap.set(index,{object:o.id});return index;
+    }));
+  }
   const structured = units.map((unit, index) => {
     const placeholder = `@@DSH_BLOCK_${String(index + 1).padStart(6, '0')}@@`;
     protectedResult.placeholders.push({ placeholder, type: 'block', value: '',
-      heading: /^#{1,6}\s/u.test(unit), source: unit });
+      heading: /^#{1,6}\s/u.test(unit), source: unit, cell:cellMap.get(index) });
     return `${placeholder}\n${unit}`;
   }).join('\n\n');
   return {
@@ -451,6 +483,7 @@ export function prepareDocument(text) {
     references: refs.references,
     metadata: meta.metadata,
     placeholders: protectedResult.placeholders,
+    objects,
     stats: {
       originalChars: original.length,
       translatableChars: protectedResult.text.length,
@@ -461,6 +494,33 @@ export function prepareDocument(text) {
       referenceReason: refs.reason,
     },
   };
+}
+
+/** Called only after every chunk has passed integrity validation. */
+export function restoreDocument(parts,prepared){
+ if(!prepared.objects?.length)return parts.map(p=>restoreTechnicalTokens(p,prepared.placeholders).trim());
+ const joined=parts.join('\n\n'), blocks=translationBlocks(joined), translated=new Map(), body=[];
+ for(const b of blocks){
+   const meta=prepared.placeholders.find(p=>p.placeholder===b.marker);
+   const clean=restoreTechnicalTokens(b.body,prepared.placeholders).trim();
+   if(meta?.cell)translated.set(Number(b.marker.match(/(\d{6})@@$/u)[1])-1,clean);
+   else body.push(b.source);
+ }
+ let result=body.join('\n\n');
+ for(const o of prepared.objects){
+   if(!result.includes(o.id))throw new Error('缺少图表定位标记，停止写入');
+   const rows=o.cells.map(row=>row.map(index=>{
+     if(index===null)return '';
+     if(!translated.has(index))throw new Error('缺少表格单元格译文，停止写入');
+     return translated.get(index).replace(/\r?\n/gu,' ').replace(/\|/gu,'&#124;');
+   }));
+   const value=o.kind==='TABLE'?rows.map((r,i)=>`| ${r.join(' | ')} |${i===0?'\n| '+r.map(()=>'---').join(' | ')+' |':''}`).join('\n')
+     :`<figcaption>${rows[0][0].replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;')}</figcaption>`;
+   result=result.replace(o.id,()=>value);
+ }
+ const restored=restoreTechnicalTokens(result,prepared.placeholders).trim();
+ if(prepared.placeholders.some(p=>restored.includes(p.placeholder)))throw new Error('图表技术标记未完整还原，停止写入');
+ return [restored];
 }
 
 function splitOversizeUnit(unit, maxTokens) {
@@ -588,7 +648,7 @@ export function repairEquivalentPlaceholders(source, translation, placeholders =
   const repairs = [];
   const expected = placeholders.filter((p) => input.includes(p.placeholder));
   const allowed = new Set(expected.map((p) => p.placeholder));
-  text = text.replace(/[@＠]{2}\s*DSH\s*[_＿]\s*(FORMULA|CITATION|URL|DOI|BLOCK)\s*[_＿]\s*(\d{1,6})\s*[@＠]{2}/giu,
+  text = text.replace(/[@＠]{2}\s*DSH\s*[_＿]\s*(FORMULA|CITATION|URL|DOI|BLOCK|OBJECT|CELLTOKEN|VALUE)\s*[_＿]\s*(\d{1,6})\s*[@＠]{2}/giu,
     (raw, type, id) => {
       const canonical = `@@DSH_${type.toUpperCase()}_${id.padStart(6, '0')}@@`;
       if (!allowed.has(canonical)) return raw;
@@ -721,7 +781,7 @@ export function validateTranslation(source, translation, placeholders = [], opti
     if (!input.includes(placeholder)) errors.push(`unexpected-placeholder:${placeholder}`);
   }
 
-  const ordered = expected.filter((item) => item.type === 'block' || item.type === 'formula' && !isInlineVariable(item))
+  const ordered = expected.filter((item) => item.type === 'block' || ['object','value'].includes(item.type) || item.type === 'formula' && !isInlineVariable(item))
     .sort((a, b) => input.indexOf(a.placeholder) - input.indexOf(b.placeholder));
   let previousPosition = -1;
   for (const item of ordered) {
@@ -736,6 +796,12 @@ export function validateTranslation(source, translation, placeholders = [], opti
   const hardAnchors = new Set(ordered.filter(i => i.type === 'formula').map(i => i.placeholder));
   const sourceContexts = tokenContexts(input, expected, hardAnchors);
   const outputContexts = tokenContexts(output, expected, hardAnchors);
+  const cellBlocks=new Set(placeholders.filter(p=>p.cell).map(p=>p.placeholder));
+  const sourceCells=tokenContexts(input,expected,new Set()), outputCells=tokenContexts(output,expected,new Set());
+  for(const item of expected.filter(p=>p.type!=='block')){
+    const a=sourceCells.get(item.placeholder), b=outputCells.get(item.placeholder);
+    if(a&&(cellBlocks.has(a.split('/')[0])||item.type==='object')&&a!==b&&output.includes(item.placeholder))errors.push(`table-cell-token-moved:${item.placeholder}`);
+  }
   const inline = expected.filter(isInlineVariable);
   for (const item of inline) {
     if (output.includes(item.placeholder) && sourceContexts.get(item.placeholder) !== outputContexts.get(item.placeholder)) {

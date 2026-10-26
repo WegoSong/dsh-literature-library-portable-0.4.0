@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { validatePageRegions } from './manual_regions.mjs';
+import { MEDIA_POLICY, mediaOptions } from './media_regions.mjs';
 
 const digest = data => createHash('sha256').update(data).digest('hex');
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
@@ -47,6 +48,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
   }
   async function layout(s) { return JSON.parse(await readFile(s.layoutPath, 'utf8')); }
   const summary = s => s && ({ slug: s.slug, title: s.title, mode: s.mode, phase: s.phase, revision: s.revision,
+    media:mediaOptions(s.media), needsRefresh:s.preparationPolicy!==MEDIA_POLICY,
     sourceHash: s.sourceHash, pageCount: s.pageCount || 0, checkedPages: s.checkedPages || [],
     error: s.error || null, updatedAt: s.updatedAt, warnings: s.warnings || [], coverage: s.coverage || null,
     translationJobId: s.translationJobId || null });
@@ -60,12 +62,13 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         s.phase = 'partitioning'; await save(s);
         const result = await extract((await paperFor(slug)).pdfAbs, slug, undefined, {
           outputRoot: join(dir(slug), `r${revision}`), overrides: s.overrides, sourceHash: s.sourceHash,
-          rawLayout: raw, allowReview: true,
+          rawLayout: raw, allowReview: true, media:mediaOptions(s.media),
         });
         await current(s);
         s.layoutPath = result.layoutPath; s.mdPath = result.mdPath;
         s.mdHash = raw ? null : digest(result.md);
         s.preparedRevision = revision;
+        s.preparationPolicy = MEDIA_POLICY;
         const l = await layout(s);
         s.pageCount = l.pages.length; s.warnings = l.warnings; s.coverage = l.coverage;
         s.hardWarnings = l.blockingWarnings || [];
@@ -86,14 +89,15 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       }
     }).catch(() => { pending.delete(slug); });
   }
-  async function startOne(slug, mode, schedule, force) {
+  async function startOne(slug, mode, schedule, force, media) {
     return serial(slug, async () => {
       const p = await paperFor(slug), old = await read(slug);
       if (pending.has(slug) || isBusy(slug)) fail('此文献已有任务，请等待完成');
-      if (old && !force && old.sourceHash === await sourceHash(slug)) return summary(old);
+      const sameSource=old?.sourceHash === await sourceHash(slug), sameMedia=JSON.stringify(mediaOptions(old?.media))===JSON.stringify(mediaOptions(media));
+      if (old && !force && sameSource && sameMedia && old.preparationPolicy===MEDIA_POLICY) return summary(old);
       const s = { slug, title: p.title || slug, mode, schedule: schedule === 'offpeak' ? 'offpeak' : 'now',
         phase: 'queued', revision: (old?.revision || 0) + 1, sourceHash: await sourceHash(slug),
-        overrides: {}, checkedPages: [] };
+        media:mediaOptions(media),overrides:!force&&sameSource ? old.overrides||{} : {}, checkedPages: [] };
       // Keep old revision files recoverable; new preparation never overwrites them.
       await save(s); enqueue(slug, s.revision, mode === 'manual'); return summary(s);
     });
@@ -121,7 +125,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       if (!slugs.length || slugs.length > 200) fail('每批请选择 1–200 篇', 400);
       const results = [];
       for (const slug of slugs) {
-        try { results.push({ state: await startOne(slug, body.mode, body.schedule, body.force === true) }); }
+        try { results.push({ state: await startOne(slug, body.mode, body.schedule, body.force === true, body.media) }); }
         catch (err) { results.push({ slug, error: err.message }); }
       }
       return { results };
@@ -130,6 +134,11 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       if (!Number.isInteger(body.revision)) fail('缺少当前分区版本号，请刷新', 400);
       const s = await read(body.slug); await current(s, body.revision);
       if (pending.has(body.slug) || isBusy(body.slug)) fail('分区或翻译进行中，暂时不能修改');
+      if(body.action==='set-media'){
+        s.media=mediaOptions(body.media);s.revision++;s.phase='queued';s.mode=s.mode==='auto'?'semi':s.mode;
+        s.checkedPages=[];s.translationJobId=null;s.error=null;
+        await save(s);enqueue(s.slug,s.revision,s.mode==='manual'&&Object.keys(s.overrides||{}).length!==s.pageCount);return {state:summary(s)};
+      }
       const l = await layout(s);
       if (body.action === 'save-page') {
         const p = l.pages.find(p => p.page === body.page);
@@ -149,6 +158,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         await save(s); return { state: summary(s) };
       }
       if (body.action === 'approve' || body.action === 'translate') {
+        if(s.preparationPolicy!==MEDIA_POLICY)fail('图表处理已升级，请应用图表选项重新抽取并检查；保留已有人工框。');
         if (s.preparedRevision !== s.revision || !s.mdHash) fail('当前分区版本尚未通过抽取自检，请先修正失败页面', 422);
         if (!l.coverage?.ok || s.hardWarnings?.length || !l.pages.every(p => p.items.length)) fail('自检未通过，仍有遗漏文字或复杂页，请先修正。扫描件须先 OCR。', 422);
         if (body.action === 'approve') {
@@ -171,6 +181,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     const s = await read(slug);
     if (!s) return null; // Legacy callers retain the automatic preflight below.
     await current(s);
+    if(s.preparationPolicy!==MEDIA_POLICY)fail('图表处理已升级，请先应用图表选项重新抽取并确认；不会自动重新付费翻译。');
     if (pending.has(slug) || s.phase !== 'approved') fail('请先完成分区预览与确认，再翻译');
     if (s.preparedRevision !== s.revision) fail('分区与抽取稿版本不一致，请重新检查');
     if (!s.mdHash) fail('分区尚未生成可翻译文本');

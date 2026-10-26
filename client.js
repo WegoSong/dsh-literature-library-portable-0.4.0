@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.10';
+    const PDFJS_REV = '0.6.11';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -337,6 +337,12 @@ window.__ModuleLoader__.load({
 .ll-md table { border-collapse: collapse; margin: .8em 0; font-size: calc(12px * var(--ll-font-scale, 1)); width: 100%; }
 .ll-md th, .ll-md td { border: .5px solid var(--dsw-alias-border-l3); padding: 4px 8px; text-align: left; vertical-align: top; }
 .ll-md th { background: var(--dsw-alias-interactive-bg-hover); }
+.ll-md .ll-table-scroll { max-width: 100%; overflow-x: auto; }
+.ll-md .ll-table-scroll table { min-width: var(--ll-table-min, 560px); }
+.ll-md figcaption { display: block; margin: .85em 0; font-family: Georgia, 'Noto Serif SC', 'Songti SC', SimSun, serif; font-style: italic; font-size: .9em; line-height: 1.6; color: #46515e; }
+.ll-root .ll-media-options { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; font-size:12px !important; line-height:1.4 !important; }
+.ll-root .ll-media-options label { display:inline-flex; align-items:center; gap:4px; font-size:12px !important; line-height:1.4 !important; margin:0 !important; white-space:nowrap; }
+.ll-root .ll-media-options input[type=checkbox] { width:13px !important; height:13px !important; min-height:13px !important; padding:0 !important; margin:0 !important; }
 .ll-md hr { border: 0; border-top: .5px solid var(--dsw-alias-border-l3); margin: 1.4em 0; }
 .ll-pane-translation .ll-md { color: var(--ll-paper-text); }
 .ll-pane-translation .ll-md h1,
@@ -1082,7 +1088,7 @@ window.__ModuleLoader__.load({
       const allowed = new Set([
         'p', 'br', 'hr', 'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins', 'mark',
         'sub', 'sup', 'small', 'kbd', 'code', 'pre', 'blockquote', 'details', 'summary',
-        'table', 'thead', 'tbody', 'tr', 'th', 'td', 'ul', 'ol', 'li', 'a', 'img', 'span',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td', 'ul', 'ol', 'li', 'a', 'img', 'span', 'figcaption',
       ]);
       let html = String(source)
         .replace(/<!--[\s\S]*?-->/gu, '')
@@ -1205,6 +1211,8 @@ window.__ModuleLoader__.load({
       let i = 0;
       while (i < lines.length) {
         const line = lines[i];
+        const caption = /^<figcaption>(.*)<\/figcaption>$/u.exec(line);
+        if(caption){const text=caption[1].replace(/&lt;/gu,'<').replace(/&gt;/gu,'>').replace(/&amp;/gu,'&');html.push(`<figcaption>${renderInline(text,katex,footnoteRefs)}</figcaption>`);i++;continue;}
 
         // 译稿通常把块公式写在一行：`$$...$$`。必须在行内 `$...$` 解析前
         // 整体吃掉，否则中间两个 `$` 会被当作一对行内分隔符，首尾各残留 `$`。
@@ -1300,9 +1308,9 @@ window.__ModuleLoader__.load({
           const head = cells(line); i += 2;
           const body = [];
           while (i < lines.length && /^\s*\|/.test(lines[i])) { body.push(cells(lines[i])); i += 1; }
-          html.push('<table><thead><tr>' + head.map((c) => `<th>${renderInline(c, katex, footnoteRefs)}</th>`).join('') + '</tr></thead><tbody>'
+          html.push(`<div class="ll-table-scroll" style="--ll-table-min:${Math.max(560,head.length*130)}px"><table><thead><tr>` + head.map((c) => `<th>${renderInline(c, katex, footnoteRefs)}</th>`).join('') + '</tr></thead><tbody>'
             + body.map((r) => '<tr>' + r.map((c) => `<td>${renderInline(c, katex, footnoteRefs)}</td>`).join('') + '</tr>').join('')
-            + '</tbody></table>');
+            + '</tbody></table></div>');
           continue;
         }
 
@@ -2611,7 +2619,7 @@ window.__ModuleLoader__.load({
      * 但保留占位高度，所以滚动条不会跳动。父组件用 React.memo 包住它，
      * 页码变化时不会把 200 多页全部重渲染一遍。
      */
-    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式原图', table: '表格文字',
+    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式原图', table: '表格', figure:'图片',
       title: '论文标题', 'front-matter': '作者信息', 'article-info': '文章信息', affiliation: '作者单位', publication: '出版信息',
       'running-matter': '页眉页脚', watermark: '忽略/水印' };
     const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
@@ -2664,14 +2672,20 @@ window.__ModuleLoader__.load({
           'data-role': r.role, style: { left: `${x/viewport.width*100}%`, top: `${y/viewport.height*100}%`,
             width: `${Math.abs(b[2]-b[0])/viewport.width*100}%`, height: `${Math.abs(b[3]-b[1])/viewport.height*100}%` },
           onPointerDown: e => { if (view.drawing) return; begin(e,r,false); } }, [
-          h('span', { key: 'label', className: 'll-region-label' }, `${['body','abstract','heading','caption','formula','table'].includes(r.role)
-            ? regions.slice(0,i+1).filter(x=>['body','abstract','heading','caption','formula','table'].includes(x.role)).length : '信息'} ${REGION_LABELS[r.role] || r.role}`),
+          h('span', { key: 'label', className: 'll-region-label' }, `${['body','abstract','heading','caption','formula','table','figure'].includes(r.role)
+            ? regions.slice(0,i+1).filter(x=>['body','abstract','heading','caption','formula','table','figure'].includes(x.role)).length : '信息'} ${REGION_LABELS[r.role] || r.role}`),
           view.editing && !view.drawing ? h('span', { key: 'resize', className: 'll-region-handle', onPointerDown: e => begin(e,r,true) }) : null,
         ]);
       }));
     }
 
-    function LayoutControls({ slug, page, mode, schedule, view, setView, show, setShow, onJob }) {
+    function MediaOptions({value={},onChange}){
+      return h('div',{className:'ll-media-options'},[
+        h('label',{key:'figures',title:'从 PDF 本地截图插入原图；只翻译图注，不翻译图内文字，不发送视觉 API'},[h('input',{key:'c',type:'checkbox',checked:value.figures===true,onChange:e=>onChange({...value,figures:e.target.checked})}),'插入图片']),
+        h('label',{key:'tables',title:'按行列翻译单元格，会增加文本 token；关闭时只翻译表题'},[h('input',{key:'c',type:'checkbox',checked:value.tables===true,onChange:e=>onChange({...value,tables:e.target.checked})}),'翻译表格']),
+      ]);
+    }
+    function LayoutControls({ slug, page, mode, schedule, media, view, setView, show, setShow, onJob }) {
       const [data, setData] = React.useState(null), [error,setError] = React.useState(''), [busy,setBusy] = React.useState(false);
       const [epoch,setEpoch] = React.useState(0);
       React.useEffect(() => {
@@ -2703,7 +2717,7 @@ window.__ModuleLoader__.load({
       async function act(action, extra = {}) {
         setBusy(true); setError('');
         try {
-          const r = await postJson('/layout', { action, slug, mode, schedule, revision: data?.state?.revision, ...extra });
+          const r = await postJson('/layout', { action, slug, mode, schedule, media, revision: data?.state?.revision, ...extra });
           if (r.results?.[0]?.error) throw new Error(r.results[0].error);
           if (r.job) onJob?.(r.job);
           setView(v => ({ ...v, dirty: false })); setEpoch(n => n+1);
@@ -2727,6 +2741,10 @@ window.__ModuleLoader__.load({
           } }, s ? '重新分区' : '开始分区'),
         ]),
         (error || s?.error || data?.stale) ? h('p', { key: 'err', role: 'alert', className: 'll-layout-error' }, error || (data.stale ? 'PDF 已变化，请重新分区' : s.error)) : null,
+        ready ? h('div',{key:'media',className:'ll-layout-row'},[
+          h('span',{key:'current'},`此稿：图片${s.media?.figures?'开':'关'} · 表格${s.media?.tables?'开':'关'}`),
+          (s.needsRefresh || !!s.media?.figures!==!!media?.figures || !!s.media?.tables!==!!media?.tables) ? h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||view?.dirty,onClick:()=>act('set-media')},s.needsRefresh?'升级图表分区（保留人工框）':'应用图表选项（保留人工框）'):null,
+        ]):null,
         ready && view?.page ? h('div', { key: 'tools' }, [
           h('div', { key: 'buttons', className: 'll-layout-row ll-layout-actions' }, [
             h('span', { key: 'p' }, `第 ${view.page.page} 页`),
@@ -2772,7 +2790,7 @@ window.__ModuleLoader__.load({
       ]);
     }
 
-    function LayoutBatchDialog({ papers, mode, setMode, schedule, onClose, onSelect, onJob }) {
+    function LayoutBatchDialog({ papers, mode, setMode, schedule, media, setMedia, onClose, onSelect, onJob }) {
       const [chosen,setChosen] = React.useState(new Set()), [states,setStates] = React.useState([]), [notice,setNotice] = React.useState(''), [busy,setBusy] = React.useState(false);
       React.useEffect(() => {
         let dead = false;
@@ -2788,7 +2806,7 @@ window.__ModuleLoader__.load({
         setBusy(true); const errors = []; let count = 0;
         try {
           if (action === 'start') {
-            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule});
+            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule,media});
             count = r.results.filter(x => !x.error).length; errors.push(...r.results.filter(x => x.error).map(x => x.error));
           } else for (const slug of chosen) {
             const s = bySlug.get(slug);
@@ -2808,7 +2826,8 @@ window.__ModuleLoader__.load({
             h('button',{key:'all',className:'ll-btn ll-btn-xs',onClick:()=>setChosen(chosen.size===candidates.length?new Set():new Set(candidates.map(p=>p.slug)))},'全选/取消'),
             ...[['start','分区选中'],['approve','确认已检查选中'],['translate','翻译已确认选中']].map(([action,label])=>h('button',{key:action,className:'ll-btn ll-btn-xs',disabled:busy || !chosen.size,onClick:()=>run(action)},label)),
           ]),
-          h('p',{key:'hint',className:'ll-layout-hint'},'分区串行在后台运行；可逐篇打开检查并翻译，也可全部检查后批量翻译。已存在的分区不会被批量覆盖，重做请在 PDF 分区工具中操作。'),
+          h(MediaOptions,{key:'media',value:media,onChange:setMedia}),
+          h('p',{key:'hint',className:'ll-layout-hint'},'图表默认跳过内容、只译题注。图片本地截图，不译图内文字；表格翻译增加 token。分区串行执行，支持逐篇或批量确认。变更图表选项会保留人工框、重新抽取并要求确认。'),
           notice ? h('p',{key:'notice',role:'status'},notice):null,
         ]),
         h('div',{key:'list',className:'ll-modal-body'},candidates.map(p=>{
@@ -2990,7 +3009,7 @@ window.__ModuleLoader__.load({
      * 直接滚 `.ll-pdf-body`，不再需要点「上一页/下一页」。工具条的页码会
      * 随滚动实时更新；输入页码/点翻页按钮则会平滑滚到对应页。
      */
-    function PdfViewer({ address, title, switching, documentKey, layoutMode, schedule, onJob, openLayout, onLayoutDirty }) {
+    function PdfViewer({ address, title, switching, documentKey, layoutMode, schedule, media, onJob, openLayout, onLayoutDirty }) {
       const [layoutOpen,setLayoutOpen] = React.useState(!!openLayout);
       const [showRegions,setShowRegions] = React.useState(!!openLayout);
       const [regionView,setRegionView] = React.useState(null);
@@ -3386,7 +3405,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'll-pdf-viewer' }, [
         toolbar,
         h('div', { className: 'll-pdf-body', ref: scrollRef }, content),
-        layoutOpen ? h(LayoutControls,{key:'layout-tools',slug:documentKey,page,mode:layoutMode,schedule,view:regionView,setView:setRegionView,
+        layoutOpen ? h(LayoutControls,{key:'layout-tools',slug:documentKey,page,mode:layoutMode,schedule,media,view:regionView,setView:setRegionView,
           show:showRegions,setShow:setShowRegions,onJob}) : null,
       ]);
     }
@@ -3825,6 +3844,8 @@ window.__ModuleLoader__.load({
         try { const m=localStorage.getItem('dsh-literature-library/layout-mode'); return ['auto','semi','manual'].includes(m)?m:'semi'; } catch {return 'semi';}
       });
       const setLayoutMode = m => { changeLayoutMode(m); try {localStorage.setItem('dsh-literature-library/layout-mode',m);} catch {} };
+      const [media,setMediaState]=React.useState(()=>{try{const v=JSON.parse(localStorage.getItem('dsh-literature-library/media-v1')||'{}');return {figures:v.figures===true,tables:v.tables===true};}catch{return {figures:false,tables:false};}});
+      const setMedia=value=>{setMediaState(value);try{localStorage.setItem('dsh-literature-library/media-v1',JSON.stringify(value));}catch{}};
       const [selectedFolder, setSelectedFolder] = React.useState(null);
       const [busy, setBusy] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
@@ -4273,7 +4294,7 @@ window.__ModuleLoader__.load({
         if (layoutMode === 'auto' && !window.confirm('自动模式：本地分区、自检通过后会付费翻译。继续？')) return;
         setBusy(p.slug);
         try {
-          const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,schedule:offpeakOnly?'offpeak':'now'});
+          const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,media,schedule:offpeakOnly?'offpeak':'now'});
           if(r.results?.[0]?.error) throw new Error(r.results[0].error);
           window.dispatchEvent(new Event('ll-layout-changed'));
           setNotice({kind:'ok',text:'已打开 PDF 分区工具。半自动/手动模式检查确认后，点击「按确认分区翻译」。已有分区不会被覆盖。'});
@@ -4907,6 +4928,7 @@ window.__ModuleLoader__.load({
             h('select',{key:'layout-mode',className:'ll-layout-mode',value:layoutMode,'aria-label':'翻译分区模式',title:'选择分区与翻译流程',onChange:e=>setLayoutMode(e.target.value)},[
               h('option',{key:'auto',value:'auto'},'自动分区翻译'),h('option',{key:'semi',value:'semi'},'半自动·人工检查'),h('option',{key:'manual',value:'manual'},'手动分区'),
             ]),
+            h(MediaOptions,{key:'media',value:media,onChange:setMedia}),
           ]),
           h('div', { className: 'll-nav-body', key: 'b' }, navBody),
           // 版本号常驻左栏底部：升级后不用翻文档就能确认运行的是哪一版
@@ -5174,7 +5196,7 @@ window.__ModuleLoader__.load({
                   documentKey: selected.slug,
                   title: selected.title ?? selected.slug,
                   switching: pdfSwitching || !pdfPaper,
-                  layoutMode, schedule: offpeakOnly ? 'offpeak' : 'now', openLayout: layoutOpenSlug === selected.slug,
+                  layoutMode, media, schedule: offpeakOnly ? 'offpeak' : 'now', openLayout: layoutOpenSlug === selected.slug,
                   onJob: r => { upsertJob(r); setJobPollEpoch(v=>v+1); },
                   onLayoutDirty: recordLayoutDirty,
                 }),
@@ -5183,6 +5205,7 @@ window.__ModuleLoader__.load({
         ] : h('div', { className: 'll-empty', key: 'none' }, '请从左侧选择一篇文献。')),
 
         layoutBatchOpen ? h(LayoutBatchDialog,{key:'layout-batch',papers:filteredPapers,mode:layoutMode,setMode:setLayoutMode,
+          media,setMedia,
           schedule:offpeakOnly?'offpeak':'now',onClose:()=>setLayoutBatchOpen(false),onSelect:slug=>{selectPaper(slug);setLayoutOpenSlug(slug);},
           onJob:r=>{upsertJob(r);setJobPollEpoch(v=>v+1);}}):null,
         browserOpen ? h(FolderBrowser, {

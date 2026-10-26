@@ -1965,6 +1965,8 @@ export function apply(ctx, config = {}) {
       extraArgs.push('--overrides', overridePath);
     }
     if (options.rawLayout) extraArgs.push('--raw-layout');
+    if (options.media?.figures === true) extraArgs.push('--include-figures');
+    if (options.media?.tables === true) extraArgs.push('--translate-tables');
 
     const { spawn } = await import('node:child_process');
     await new Promise((resolvePromise, rejectPromise) => {
@@ -1976,7 +1978,10 @@ export function apply(ctx, config = {}) {
         '--file-route', `${prefix}/file`,
         '--no-json',
         ...extraArgs,
-      ], { stdio: 'ignore', cwd: workspaceRoot });
+      ], { stdio: ['ignore','ignore','pipe'], cwd: workspaceRoot });
+      let diagnostics = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', text => { diagnostics = (diagnostics + text).slice(-4096); });
 
       const onAbort = () => { try { child.kill(); } catch { /* ignore */ } };
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
@@ -1984,7 +1989,7 @@ export function apply(ctx, config = {}) {
       child.on('error', (err) => rejectPromise(new Error(`抽取进程启动失败：${err.message}`)));
       child.on('close', (code) => {
         if (signal) signal.removeEventListener('abort', onAbort);
-        if (code !== 0) rejectPromise(new Error(`抽取失败（退出码 ${code}）`));
+        if (code !== 0) rejectPromise(new Error(`抽取失败（退出码 ${code}）${diagnostics.trim() ? `：${diagnostics.trim()}` : ''}`));
         else resolvePromise();
       });
     });
@@ -2295,7 +2300,7 @@ export function apply(ctx, config = {}) {
       extraRules: [
         config.extraRules,
         '输入中的 @@DSH_FORMULA_nnnnnn@@、@@DSH_CITATION_nnnnnn@@、@@DSH_DOI_nnnnnn@@、'
-          + '@@DSH_URL_nnnnnn@@、@@DSH_BLOCK_nnnnnn@@ 是本地保护标记，必须逐字、逐个、原位置保留；不得翻译、改写、复制或遗漏。',
+          + '@@DSH_URL_nnnnnn@@、@@DSH_BLOCK_nnnnnn@@、@@DSH_OBJECT_nnnnnn@@、@@DSH_CELLTOKEN_nnnnnn@@、@@DSH_VALUE_nnnnnn@@ 是本地保护标记，必须逐字、逐个、原位置保留；不得翻译、改写、复制或遗漏。表格单元格已分块，逐块翻译，不合并、不补数据。',
       ].filter(Boolean).join('\n'),
     });
 
@@ -2609,9 +2614,7 @@ export function apply(ctx, config = {}) {
     }
     job.chunkIndex = chunks.length;
 
-    const restoredParts = parts.map((part) => pipeline.restoreTechnicalTokens(
-      part, prepared.placeholders,
-    ).trim());
+    const restoredParts = pipeline.restoreDocument(parts, prepared);
     let translatedBody = restoredParts.join('\n\n');
     const translatedTitle = /^#\s+(.+)$/mu.exec(translatedBody)?.[1];
     if (translatedTitle) translatedBody = translatedBody.replace(/^#\s+.+\n*/mu, '').trim();

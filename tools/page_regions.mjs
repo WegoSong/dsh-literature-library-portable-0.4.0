@@ -6,6 +6,10 @@ export const REGION_VERSION = 'page-regions-v2-labeled-abstract';
 export function itemBox(item) {
   const x = item.transform?.[4] ?? 0, y = item.transform?.[5] ?? 0;
   const size = Math.abs(item.height || item.transform?.[3] || 0);
+  if(Math.abs(item.transform?.[1]||0)>Math.abs(item.transform?.[0]||0)*2){
+    const sign=item.transform[1]>0?1:-1, w=item.width||0;
+    return sign>0?[x-size,y,x+size*.3,y+w]:[x-size*.3,y-w,x+size,y];
+  }
   return [x, y - size * 0.3, x + (item.width || 0), y + size];
 }
 
@@ -104,7 +108,9 @@ export function identifyPageRegions(rawItems, { page, width, height, panels = []
       itemIds: members.map(i => i.sourceId) };
     regions.push(region); return region;
   };
-  add('watermark', meaningful.filter(i => !horizontal.includes(i)), 'rotated-text');
+  const rotated=meaningful.filter(i => !horizontal.includes(i));
+  const rotatedTable=rotated.some(i=>/^Table\s*\d+\.?$/iu.test(i.str.trim()));
+  add('watermark', rotated.filter(i=>!rotatedTable || i.transform[4]>width*.95 || i.transform[4]<width*.03), 'rotated-page-edge-not-table');
   if (page === 1) {
     const long = horizontal.filter(i => i.str.length > 45 && i.height > 5).map(i => i.height).sort((a, b) => a - b);
     const bodySize = long[Math.floor(long.length / 2)] || 10;

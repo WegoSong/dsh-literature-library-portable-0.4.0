@@ -25,6 +25,7 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { REGION_VERSION, itemBox, unionBoxes, detectShadedPanels, identifyPageRegions, auditCoverage } from './page_regions.mjs';
 import { ARTICLE_ROLES } from './manual_regions.mjs';
+import { MEDIA_POLICY, mediaOptions, pageGraphics, identifyMedia, tableGrid, markdownTable } from './media_regions.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = resolve(HERE, '..');
@@ -47,6 +48,8 @@ function parseArgs(argv) {
     else if (a === '--preview-pages') args.previewPages = argv[++i];
     else if (a === '--overrides') args.overrides = argv[++i];
     else if (a === '--raw-layout') args.rawLayout = true;
+    else if (a === '--include-figures') args.figures = true;
+    else if (a === '--translate-tables') args.tables = true;
     else if (a === '--help' || a === '-h') args.help = true;
     else args.positional.push(a);
   }
@@ -992,9 +995,10 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
       const lines = pc.lines.filter(l => l.manualRegion === r.id).sort((a,b) => b.y-a.y || a.x0-b.x0);
       const sourceIds = r.itemIds, sourcePages = [pc.p], flowId = r.role === 'body' ? 'body' : `manual-${pc.p}-${r.id}`;
       const text = lines.map(l => l.text).join(' ');
+      if (r.role === 'table' || r.role === 'figure') return [mediaParagraph(pc,r,opts)];
       if (r.role === 'formula') return [{ type: 'formula-source', text, sourceIds, sourcePages, flowId,
         crop: { page: pc.p, left: r.bbox[0], bottom: r.bbox[1], right: r.bbox[2], top: r.bbox[3] } }];
-      if (r.role === 'heading' || r.role === 'caption') return [{ type: r.role, text, sourceIds, sourcePages, flowId }];
+      if (r.role === 'heading' || r.role === 'caption') return [{ type: r.role, text:r.captionText||text, sourceIds, sourcePages, flowId }];
       const safe = markFormulaRegions(lines, { left: r.bbox[0], right: r.bbox[2], page: pc.p });
       const paras = linesToParagraphs(safe, { bodyLeft: r.bbox[0], bodyRight: r.bbox[2], bodySize, role: r.role, page: pc.p });
       return paras.map(p => ({ ...p, flowId }));
@@ -1008,7 +1012,7 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
     registerRegion(pc, [line], 'running-matter', 'page-edge-or-watermark', null);
   }
   // 首页出版信息在独立元数据区保留，不再与摘要/正文混排。
-  const kept = cleaned.filter((l) => !pc.frontLines?.includes(l) && l.regionRole !== 'abstract');
+  const kept = cleaned.filter((l) => !pc.frontLines?.includes(l) && !['abstract','table','figure','caption'].includes(l.regionRole));
   const abstractLines = cleaned.filter(l => l.regionRole === 'abstract');
 
   // 版面划分：递归处理「通栏摘要框 + 双栏正文」这类上下并存的混合版面，
@@ -1086,7 +1090,26 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
       } else pageParas.push(para);
     }
   }
+  // Floating objects come after the page's prose, never between two fragments of
+  // a sentence. Ownership is still audited even for explicitly omitted contents.
+  for(const r of pc.regions.filter(r=>['caption','table','figure'].includes(r.role))) {
+    if(r.role==='caption') pageParas.push({type:'caption',text:r.captionText||pc.lines.filter(l=>l.manualRegion===r.id).sort((a,b)=>b.y-a.y).map(l=>l.text).join(' '),sourceIds:r.itemIds,sourcePages:[pc.p],flowId:`caption-${r.id}`});
+    else pageParas.push(mediaParagraph(pc,r,opts));
+  }
   return pageParas;
+}
+
+function mediaParagraph(pc,r,opts){
+ const members=pc.rawItems.filter(i=>r.itemIds.includes(i.sourceId));
+ const base={type:r.role,text:r.label||`${r.role==='table'?'Table':'Figure'} (page ${pc.p})`,sourceIds:r.itemIds,sourcePages:[pc.p],flowId:`media-${r.id}`,
+   crop:{page:pc.p,left:r.bbox[0],bottom:r.bbox[1],right:r.bbox[2],top:r.bbox[3]}};
+ if(r.role==='table'&&opts.tables){
+   base.rows=tableGrid(members,r.bbox,pc.graphics,cell=>groupLines(buildRuns(cell)).map(l=>l.text).join(' ')
+     .replace(/([\p{L}\d]+(?:[_^]\{[^{}]+\})+)/gu,m=>`$${m}$`));
+   if(!base.rows)throw new Error(`第 ${pc.p} 页表格无法可靠还原行列或符号（复杂横表、缺失字形等）。请纠正表格框；也可将此表设为忽略并保留题注，或关闭表格内容翻译后重试。不会把单元格串成正文。`);
+ }
+ base.omitted=r.role==='table'?!opts.tables:!opts.figures;
+ return base;
 }
 
 function registerRegion(pc, lines, role, evidence, flow) {
@@ -1155,15 +1178,15 @@ async function renderFormulaSources(doc, result, opts) {
     const requirePdf = createRequire(requireFromHere.resolve('pdfjs-dist/package.json'));
     ({ createCanvas } = requirePdf('@napi-rs/canvas'));
   } catch { /* 没有原生渲染器时明确提示，不把损坏文本伪装成公式。 */ }
-  const folder = join(opts.out, opts.name, 'formulas');
-  let sequence = 0;
+  let sequence = 0, figureSequence = 0;
   for (const page of result.pages) {
-    const formulas = page.paragraphs.filter((p) => p.type === 'formula-source');
+    const formulas = page.paragraphs.filter((p) => p.type === 'formula-source' || p.type === 'figure' && !p.omitted);
     if (!formulas.length) continue;
     let sourcePage;
     if (createCanvas) sourcePage = await doc.getPage(page.page);
     for (const para of formulas) {
-      sequence += 1;
+      const figure=para.type==='figure', number=figure?++figureSequence:++sequence;
+      const kind=figure?'figures':'formulas', folder=join(opts.out,opts.name,kind);
       if (!createCanvas) { para.formulaWarning = true; continue; }
       const crop = para.crop;
       const scale = 2;
@@ -1178,9 +1201,9 @@ async function renderFormulaSources(doc, result, opts) {
           background: 'rgb(255,255,255)',
         }).promise;
         await mkdir(folder, { recursive: true });
-        const name = `p${page.page}-${sequence}-${opts.sourceHash}.png`;
+        const name = `p${page.page}-${number}-${opts.sourceHash}.png`;
         await writeFile(join(folder, name), canvas.toBuffer('image/png'));
-        const imagePath = `${opts.assetPrefix ?? `${opts.name}`}/formulas/${name}`;
+        const imagePath = `${opts.assetPrefix ?? `${opts.name}`}/${kind}/${name}`;
         para.image = opts.fileRoute ? `${opts.fileRoute}?path=${encodeURIComponent(imagePath)}` : imagePath;
       } catch (err) { para.formulaWarning = true; }
       finally { canvas.width = 0; canvas.height = 0; }
@@ -1188,6 +1211,7 @@ async function renderFormulaSources(doc, result, opts) {
     sourcePage?.cleanup();
   }
   result.stats.formulaSources = sequence;
+  result.stats.figureSources = figureSequence;
 }
 
 function nativeCanvas(width, height) {
@@ -1289,6 +1313,7 @@ async function extract(pdfPath, opts) {
       finally { if (rendered) { rendered.canvas.width = 0; rendered.canvas.height = 0; } }
     }
     const semantic = identifyPageRegions(originalItems, { page: p, width: vp.width, height: vp.height, panels });
+    const graphics = await pageGraphics(page, (await loadPdfjs()).OPS);
     const manual = overrides?.pages?.[p];
     if (manual) {
       semantic.regions = manual;
@@ -1296,6 +1321,8 @@ async function extract(pdfPath, opts) {
       for (const item of semantic.items) item.regionId = owners.get(item.sourceId);
       semantic.warnings = [];
     }
+    else identifyMedia(semantic,{page:p,width:vp.width,height:vp.height,graphics,
+      previousTables:pageCache.at(-1)?.regions.filter(r=>r.role==='table')||[]});
     const rawItems = semantic.items, lines = [];
     // Build text independently inside each identified region. Once two native PDF
     // items have been fused across a panel edge, no later prompt can undo it.
@@ -1311,7 +1338,7 @@ async function extract(pdfPath, opts) {
     }
     const abstract = p === 1 ? lines.find((l) => /^abstract$/iu.test(l.text.trim())) : null;
     const frontLines = manual ? lines.filter(l => !ARTICLE_ROLES.includes(l.regionRole))
-      : lines.filter(l => !['body', 'abstract'].includes(l.regionRole)
+      : lines.filter(l => !ARTICLE_ROLES.includes(l.regionRole)
         || abstract && l.y > abstract.y + 2 && l.regionRole !== 'abstract');
     const topEdge = vp.height * 0.925;
     const bottomEdge = vp.height * 0.075;
@@ -1324,6 +1351,7 @@ async function extract(pdfPath, opts) {
       frontLines,
       rawItems,
       manual: !!manual,
+      graphics,
       regions: semantic.regions,
       warnings: [...semantic.warnings, ...(panelWarning ? [panelWarning] : []),
         ...(page.rotate % 360 ? ['unresolved-page-rotation: rotated page coordinates require review'] : []),
@@ -1406,7 +1434,7 @@ async function extract(pdfPath, opts) {
 
     // 跨页续段：pending 可能跨多页累积，只累加、不覆盖
     if (pending && pageParas.length) {
-      const first = pageParas.find(p => p.type !== 'caption');
+    const first = pageParas.find(p => !['caption','table','figure'].includes(p.type));
       if (first?.type === 'para' && first.flowId === pending.flowId
         && (/^[a-z]/u.test(first.text) || /-$/u.test(pending.text)) && !first.section) {
         const glue = /-$/u.test(pending.text) ? '' : ' ';
@@ -1420,10 +1448,10 @@ async function extract(pdfPath, opts) {
     const carried = pending;
     pending = null;
 
-    const last = pageParas[pageParas.length - 1];
+    const last = pageParas.findLast(p=>!['caption','table','figure'].includes(p.type));
     if (last && last.type === 'para' && last.flowId === 'body' && !endsSentence(last.text) && !last.section) {
       pending = last;
-    } else if (!pageParas.some(p => p.type !== 'caption') && carried && !endsSentence(carried.text)) pending = carried;
+    } else if (!pageParas.some(p => !['caption','table','figure'].includes(p.type)) && carried && !endsSentence(carried.text)) pending = carried;
 
     out.pages.push({ page: pc.p, width: pc.width, height: pc.height, columns, paragraphs: pageParas });
     out.stats.pagesProcessed += 1;
@@ -1475,7 +1503,7 @@ async function extract(pdfPath, opts) {
   }
   out.stats.paragraphs = out.pages.reduce((n, p) => n + p.paragraphs.length, 0);
   const previews = await renderLayoutPreviews(doc, pageCache, opts);
-  out.layout = { version: REGION_VERSION, sourceHash: opts.sourceHash, coverage, previews,
+  out.layout = { version: REGION_VERSION, mediaPolicy: MEDIA_POLICY, media: mediaOptions(opts), sourceHash: opts.sourceHash, coverage, previews,
     warnings: pageCache.flatMap(pc => pc.warnings.map(message => ({ page: pc.p, message }))),
     blockingWarnings: pageCache.flatMap(pc => pc.warnings.filter(message => message.startsWith('unresolved-')).map(message => ({ page: pc.p, message }))),
     blocks: out.pages.flatMap(p => p.paragraphs.map((block, index) => ({ id: `p${p.page}-b${index + 1}`, type: block.type,
@@ -1536,13 +1564,20 @@ function renderMarkdown(result) {
       const text = p.text.trim();
       if (!text) continue;
       if (p.section) L.push(`===SEC:${p.section}===`);
-      if (p.type === 'formula-source') {
+      if(p.type==='table') {
+        if(!p.omitted) L.push('===TABLE:BEGIN===',markdownTable(p.rows),'===TABLE:END===');
+      }
+      else if(p.type==='figure') {
+        if(!p.omitted&&p.image)L.push(`![原文图片（第 ${page.page} 页）](${p.image})`);
+        else if(!p.omitted)throw new Error(`第 ${page.page} 页图片截图失败，请关闭图片选项或重新分区。`);
+      }
+      else if (p.type === 'formula-source') {
         if (p.image) L.push(`![原文公式（第 ${page.page} 页）](${p.image})`);
         else L.push(`> **公式抽取需核对（原文第 ${page.page} 页）**：请查看原 PDF，本段不自动重建公式。`);
       }
       else if (p.type === 'heading') L.push(`## ${text}`);
       else if (p.type === 'equation') L.push(`$$${text}$$`);
-      else if (p.type === 'caption') L.push(`**${text}**`);
+      else if (p.type === 'caption') L.push(`===CAPTION:BEGIN===\n${text}\n===CAPTION:END===`);
       else L.push(text);
       L.push('');
     }

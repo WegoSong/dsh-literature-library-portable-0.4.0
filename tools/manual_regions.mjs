@@ -1,5 +1,5 @@
 /** Manual page replacements. Native text ownership is checked before extraction. */
-export const ARTICLE_ROLES = ['body', 'abstract', 'heading', 'caption', 'formula', 'table'];
+export const ARTICLE_ROLES = ['body', 'abstract', 'heading', 'caption', 'formula', 'table', 'figure'];
 export const REGION_ROLES = [...ARTICLE_ROLES, 'title', 'front-matter', 'article-info', 'affiliation', 'publication', 'running-matter', 'watermark'];
 export function validatePageRegions(page, drafts) {
   const fail = message => { throw Object.assign(new Error(message), { status: 422 }); };
@@ -16,6 +16,7 @@ export function validatePageRegions(page, drafts) {
     const original = page.regions.find(o => o.id === r.id);
     const unchanged = original && original.bbox.every((n, j) => Math.abs(n - b[j]) < 0.01);
     return { id: r.id, role: r.role, bbox: [...b], itemIds: [], order: index + 1,
+      ...(unchanged&&r.role===original.role?{captionText:original.captionText,label:original.label,rotation:original.rotation}:{}),
       flow: ARTICLE_ROLES.includes(r.role) ? 'article' : null,
       confidence: 'human-reviewed', evidence: 'manual-page-replacement',
       originalIds: unchanged ? new Set(original.itemIds) : null };
