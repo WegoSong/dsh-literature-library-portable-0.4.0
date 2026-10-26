@@ -1,7 +1,7 @@
 /** Local page-region evidence. Coordinates use PDF space (origin at bottom left).
  * This module never calls an API and never invents/replaces source text.
  */
-export const REGION_VERSION = 'page-regions-v1';
+export const REGION_VERSION = 'page-regions-v2-labeled-abstract';
 
 export function itemBox(item) {
   const x = item.transform?.[4] ?? 0, y = item.transform?.[5] ?? 0;
@@ -53,8 +53,39 @@ function inside(item, box) {
 
 const ABSTRACT = /^(?:abstract|a\s*b\s*s\s*t\s*r\s*a\s*c\s*t)\s*$/iu;
 const INTRO = /^(?:1\s*[.|]?\s*)?introduction\s*$/iu;
-const ORG = /\b(?:department|university|institute|laboratory|e-mail|correspondence|ORCID|copyright)\b|@|©/iu;
-const PUBLICATION = /^(?:DOI\s*:|https?:\/\/doi\.|www\.|received\s*:|revised\s*:|accepted\s*:|published\s*:)/iu;
+const ORG = /\b(?:department|university|institute|laboratory|e-mail|correspondence|corresponding|ORCID|copyright)\b|@|©/iu;
+const PUBLICATION = /^(?:DOI\s*:|https?:\/\/doi\.|www\.|(?:received|revised|accepted|published|available\s+online)\s*(?::|\d))/iu;
+
+/** Explicit labels are stronger evidence than a background color. Locate the
+ * first long prose baseline below the label, then follow that column only until
+ * its first substantial vertical gap. Labels can be letter-spaced PDF text.
+ */
+function labeledAbstract(items, label, pageWidth) {
+  const y = label.transform[5], x = label.transform[4];
+  const prose = items.filter(i => i.str.trim().length > 45 && i.height > 4
+    && i.transform[5] < y - 2 && i.transform[5] > y - 90
+    && i.transform[4] <= x + 20 && i.transform[4] + i.width > x + 50)
+    .sort((a, b) => b.transform[5] - a.transform[5]);
+  const first = prose[0];
+  if (!first) return null;
+  const left = first.transform[4] - 2;
+  const nearby = prose.filter(i => first.transform[5] - i.transform[5] < 40 && Math.abs(i.transform[4] - first.transform[4]) < 12);
+  const right = Math.min(pageWidth, Math.max(...nearby.map(i => i.transform[4] + i.width)) + 3);
+  const candidates = items.filter(i => !ABSTRACT.test(i.str.trim()) && i.transform[5] < y - 2
+    && i.transform[4] >= left && i.transform[4] + i.width <= right + 2)
+    .sort((a, b) => b.transform[5] - a.transform[5]);
+  let previous = first.transform[5], bottom = previous;
+  for (const i of candidates) {
+    const cy = i.transform[5];
+    if (cy > first.transform[5] + first.height) continue;
+    if (previous - cy > Math.max(first.height * 2.6, 18)) break;
+    bottom = Math.min(bottom, cy - first.height * 0.4); previous = cy;
+  }
+  const box = [left, bottom, right, y + label.height + 2];
+  const members = items.filter(i => inside(i, box));
+  if (members.map(i => i.str).join(' ').length < 250) return null;
+  return { box, members };
+}
 
 /** Identify independently supported front matter before merging ANY PDF text items.
  * Unmatched content stays body; uncertain content is not silently discarded.
@@ -80,7 +111,18 @@ export function identifyPageRegions(rawItems, { page, width, height, panels = []
     const abstractLabel = horizontal.find(i => ABSTRACT.test(i.str.trim()));
     const intro = horizontal.find(i => INTRO.test(i.str.trim()));
     let abstract = null;
-    for (const box of panels) {
+    if (abstractLabel) {
+      const labeled = labeledAbstract(horizontal, abstractLabel, width);
+      if (labeled) {
+        abstract = add('abstract', labeled.members, 'explicit-abstract-label+column+line-gaps');
+        const articleLabel = horizontal.find(i => /^article(?:info)?$/u.test(i.str.replace(/\s/gu, '').toLowerCase())
+          && Math.abs(i.transform[5] - abstractLabel.transform[5]) < 10 && i.transform[4] < labeled.box[0] - 30);
+        if (articleLabel) add('article-info', horizontal.filter(i => i.transform[5] <= articleLabel.transform[5] + articleLabel.height
+          && i.transform[5] >= labeled.box[1] && i.transform[4] + i.width < labeled.box[0] - 5),
+        'article-info-label-beside-abstract');
+      }
+    }
+    for (const box of abstract ? [] : panels) {
       const members = horizontal.filter(i => inside(i, box));
       const text = members.map(i => i.str).join(' ');
       const hasLabel = members.some(i => ABSTRACT.test(i.str.trim()));
@@ -104,8 +146,18 @@ export function identifyPageRegions(rawItems, { page, width, height, panels = []
     const contentTop = abstract ? abstract.bbox[3] : abstractLabel?.transform[5] ?? intro?.transform[5];
     if (contentTop) {
       const above = horizontal.filter(i => !claimed.has(i.sourceId) && i.transform[5] > contentTop + 5);
-      const max = Math.max(0, ...above.filter(i => i.str.length > 10).map(i => i.height));
-      const title = above.filter(i => i.height >= max * 0.92 && max >= bodySize * 1.4);
+      const titleFonts = above.filter(i => i.height >= bodySize * 1.4).map(i => i.height)
+        .filter(size => above.filter(i => Math.abs(i.height - size) < 0.2).reduce((n, i) => n + i.str.trim().length, 0) >= 35);
+      const max = Math.max(0, ...titleFonts);
+      const candidates = above.filter(i => i.height >= max * 0.92 && max >= bodySize * 1.4).sort((a, b) => b.transform[5] - a.transform[5]);
+      const clusters = [];
+      for (const i of candidates) {
+        const last = clusters[clusters.length - 1];
+        if (last && last[last.length - 1].transform[5] - i.transform[5] <= max * 2.2) last.push(i);
+        else clusters.push([i]);
+      }
+      const title = clusters.filter(group => group.reduce((n, i) => n + i.str.trim().length, 0) >= 35)
+        .sort((a, b) => b.reduce((n, i) => n + i.str.length, 0) - a.reduce((n, i) => n + i.str.length, 0))[0] || [];
       const titleRegion = add('title', title, 'largest-font-above-article');
       if (titleRegion) {
         add('front-matter', above.filter(i => i.transform[5] < titleRegion.bbox[1]
@@ -113,6 +165,17 @@ export function identifyPageRegions(rawItems, { page, width, height, panels = []
         add('publication', above.filter(i => !claimed.has(i.sourceId)), 'publisher-header-above-title');
       }
     }
+
+    // Elsevier's correspondence/date/copyright band may sit above the conventional
+    // 7.5% page footer. Expand it only when no normal-size body prose occupies it;
+    // a Wiley affiliation block beside continuing body must NOT claim that band.
+    const footerSeeds = horizontal.filter(i => i.transform[5] < height * 0.2 && i.height < bodySize * 0.96
+      && (ORG.test(i.str) || PUBLICATION.test(i.str.trim())));
+    const footerTop = Math.max(0, ...footerSeeds.map(i => i.transform[5] + i.height));
+    const hasBodyInFooter = horizontal.some(i => !claimed.has(i.sourceId) && i.transform[5] <= footerTop
+      && i.height >= bodySize * 0.98 && i.str.length > 45 && !PUBLICATION.test(i.str.trim()));
+    if (footerTop && !hasBodyInFooter) add('publication', horizontal.filter(i => i.transform[5] <= footerTop),
+      'isolated-small-font-correspondence-and-publication-band');
 
     // Affiliation blocks may sit halfway down page one. Follow their small-font
     // connected text, not the entire horizontal band (which also contains body).
@@ -136,7 +199,8 @@ export function identifyPageRegions(rawItems, { page, width, height, panels = []
       add(affiliation ? 'affiliation' : 'publication', component, 'small-font-metadata-connected-component');
     }
     add('publication', horizontal.filter(i => !claimed.has(i.sourceId)
-      && PUBLICATION.test(i.str.trim())), 'explicit-publication-label');
+      && (PUBLICATION.test(i.str.trim()) || i.transform[5] < height * 0.15
+        && /Elsevier.*(?:rights|reserved)|Wiley.*(?:rights|reserved)|©/iu.test(i.str))), 'explicit-publication-label');
   }
   // Do NOT claim body here: the extractor still needs to split columns, captions,
   // equations and width transitions. These objects retain stable source IDs.

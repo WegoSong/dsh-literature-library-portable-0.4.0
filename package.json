@@ -1,6 +1,6 @@
 {
   "name": "dsh-literature-library",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "description": "DSH literature library: categorized PDFs, bilingual reading, continuous PDF.js viewer, DeepSeek translation, and journal metadata.",
   "license": "MIT",
   "type": "module",

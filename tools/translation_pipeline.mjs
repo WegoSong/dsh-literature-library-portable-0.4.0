@@ -11,6 +11,9 @@
 import { createHash } from 'node:crypto';
 
 export const PIPELINE_VERSION = 'layout-integrity-v6-recovery';
+// Revalidate old cache entries under the new policy; unchanged source/prompt keys
+// remain reusable. A validation-only relaxation must not force paid retranslations.
+export const VALIDATION_VERSION = 'integrity-v7-inline-ownership';
 export const DEFAULT_CHUNK_TOKENS = 6000;
 /**
  * 输出上限相对输入的比例（传给 resolveMaxTokens 的 inputRatio）。
@@ -96,8 +99,9 @@ function referenceSignals(value) {
   const text = String(value ?? '');
   const marks = [...text.matchAll(REFERENCE_ENTRY_MARK)];
   let withYear = 0;
-  for (const mark of marks) {
-    if (YEAR_RE.test(text.slice(mark.index, mark.index + 240))) withYear += 1;
+  for (let i = 0; i < marks.length; i++) {
+    const mark = marks[i];
+    if (YEAR_RE.test(text.slice(mark.index, Math.min(marks[i + 1]?.index ?? text.length, mark.index + 1500)))) withYear += 1;
   }
   return { count: marks.length, withYear, ratio: marks.length ? withYear / marks.length : 0 };
 }
@@ -109,7 +113,9 @@ function numberedReferenceStart(value) {
   for (const match of text.matchAll(REFERENCE_ENTRY_MARK)) {
     const number = Number(/\d{1,3}/u.exec(match[0])?.[0] ?? NaN);
     if (Number.isFinite(number)) {
-      marks.push({ number, index: match.index, lineStart: match[0].startsWith('\n') });
+      const after = text.slice(match.index + match[0].length, match.index + match[0].length + 160);
+      const authorStart = /^\s*(?:(?:[A-Z]\.)(?:-[A-Z]\.)?\s*){1,4}[\p{L}][\p{L}'’\-]+/u.test(after);
+      marks.push({ number, index: match.index, lineStart: !text.slice(lineStartAt(text, match.index), match.index).trim(), authorStart });
     }
   }
   if (marks.length < 12) return null;
@@ -121,7 +127,12 @@ function numberedReferenceStart(value) {
     let last = first;
     let count = 1;
     let lineStarts = first.lineStart ? 1 : 0;
-    let withYear = YEAR_RE.test(text.slice(first.index, first.index + 240)) ? 1 : 0;
+    const hasYear = (k) => YEAR_RE.test(text.slice(marks[k].index, Math.min(marks[k + 1]?.index ?? text.length, marks[k].index + 1500)));
+    const hasCitationData = (k) => /\b(?:19|20)\d{2}\s*[,;]\s*(?:\d+|e\d+|n\/a)|\((?:19|20)\d{2}\)\s*\d/iu
+      .test(text.slice(marks[k].index, Math.min(marks[k + 1]?.index ?? text.length, marks[k].index + 1500)));
+    let withYear = hasYear(i) ? 1 : 0;
+    let authorStarts = first.authorStart ? 1 : 0;
+    let citationData = hasCitationData(i) ? 1 : 0;
     for (let j = i + 1; j < marks.length; j += 1) {
       const next = marks[j];
       if (next.index > last.index + 3000) break;
@@ -129,7 +140,9 @@ function numberedReferenceStart(value) {
       if (next.number - last.number > 8) break;
       count += 1;
       if (next.lineStart) lineStarts += 1;
-      if (YEAR_RE.test(text.slice(next.index, next.index + 240))) withYear += 1;
+      if (hasYear(j)) withYear += 1;
+      if (next.authorStart) authorStarts += 1;
+      if (hasCitationData(j)) citationData += 1;
       last = next;
     }
     const coverage = last.index / text.length;
@@ -139,8 +152,11 @@ function numberedReferenceStart(value) {
      * 条目必须是「行首编号」。正文里的 [12] 是嵌在句子中间的，
      * 即便碰巧按 1、2、3 递增也不能当成参考文献（引用密集的综述很容易这样）。
      */
-    if (lineStarts / count < 0.25) continue;
-    const score = count * ratio;
+    // PDF extraction often joins many references onto one line, and long author
+    // lists push the year past 240 chars. Sequential IDs + author initials + years
+    // are independent bibliographic evidence; prose citations lack that prefix.
+    if (lineStarts / count < 0.25 && !(authorStarts / count >= 0.75 && citationData / count >= 0.6)) continue;
+    const score = count * ratio * (1 + authorStarts / count);
     if (!best || score > best.score) best = { index: first.index, count, ratio, score };
   }
   return best;
@@ -237,7 +253,9 @@ export function splitHighConfidenceReferences(text) {
 
   if (candidates.length === 0) return { body: value, references: '', reason: null };
   const chosen = candidates.sort((a, b) => a.index - b.index)[0];
-  const cut = lineStartAt(value, chosen.index);
+  // An inline [1] may follow Keywords/publication dates on the same PDF line.
+  // Keep that prefix; moving the cut to line start would silently remove it.
+  const cut = chosen.reason === 'numbered-list' ? chosen.index : lineStartAt(value, chosen.index);
   // 切点太靠前说明判定不可靠：宁可保留原文，也不要吞掉正文。
   if (cut < value.length * 0.3) return { body: value, references: '', reason: null };
   return {
@@ -643,7 +661,9 @@ export async function recoverStructuredTranslation({ source, translation, placeh
         translatedBlocks += 1;
         if (validation.ok) break;
       }
-      if (!validation.ok) throw Object.assign(new Error(`第 ${index + 1} 段恢复未通过：${validation.errors.join(', ')}`), { validation });
+      if (!validation.ok) throw Object.assign(new Error(`第 ${index + 1} 段恢复未通过：${validation.errors.join(', ')}`), {
+        validation, failureContext: { source: block.source, translation: framed, paragraphIndex: index + 1 },
+      });
       await onAccepted?.({ ...block, text: framed });
     }
     output.push(framed);
@@ -651,6 +671,30 @@ export async function recoverStructuredTranslation({ source, translation, placeh
   const text = output.join('\n\n');
   const validation = validateTranslation(source, text, placeholders);
   return { text, validation, reusedBlocks, translatedBlocks };
+}
+
+/** Only atomic inline symbols may move with Chinese word order. Display math,
+ * formula crops and inline equations/inequalities remain ordered hard anchors.
+ */
+function isInlineVariable(item) {
+  if (item.type !== 'formula' || !item.value) return false;
+  const raw = item.value.trim();
+  if (!(raw.startsWith('$') && !raw.startsWith('$$') || raw.startsWith('\\('))) return false;
+  return /^(?:\\[A-Za-z]+|[\p{L}])[\p{L}\p{N}]*(?:(?:[_^]\{[\p{L}\p{N}]+\}|[_^][\p{L}\p{N}])[\p{L}\p{N}]*)*$/u.test(formulaBody(raw));
+}
+
+function tokenContexts(text, expected, hardAnchors) {
+  const allowed = new Set(expected.map(i => i.placeholder));
+  const result = new Map();
+  let block = 'prefix', anchor = 'start';
+  for (const match of text.matchAll(PLACEHOLDER_RE)) {
+    const id = match[0];
+    if (!allowed.has(id)) continue;
+    if (id.startsWith('@@DSH_BLOCK_')) { block = id; anchor = 'start'; }
+    else if (hardAnchors.has(id)) anchor = id;
+    else result.set(id, `${block}/${anchor}`);
+  }
+  return result;
 }
 
 /** 返回 errors（必须重译）与 warnings（记录但不阻断）。 */
@@ -677,7 +721,7 @@ export function validateTranslation(source, translation, placeholders = [], opti
     if (!input.includes(placeholder)) errors.push(`unexpected-placeholder:${placeholder}`);
   }
 
-  const ordered = expected.filter((item) => ['block', 'formula'].includes(item.type))
+  const ordered = expected.filter((item) => item.type === 'block' || item.type === 'formula' && !isInlineVariable(item))
     .sort((a, b) => input.indexOf(a.placeholder) - input.indexOf(b.placeholder));
   let previousPosition = -1;
   for (const item of ordered) {
@@ -689,6 +733,18 @@ export function validateTranslation(source, translation, placeholders = [], opti
       if (!/^#{1,6}\s+\S/u.test(headingText)) errors.push(`heading-lost:${item.placeholder}`);
     }
   }
+  const hardAnchors = new Set(ordered.filter(i => i.type === 'formula').map(i => i.placeholder));
+  const sourceContexts = tokenContexts(input, expected, hardAnchors);
+  const outputContexts = tokenContexts(output, expected, hardAnchors);
+  const inline = expected.filter(isInlineVariable);
+  for (const item of inline) {
+    if (output.includes(item.placeholder) && sourceContexts.get(item.placeholder) !== outputContexts.get(item.placeholder)) {
+      errors.push(`inline-variable-moved:${item.placeholder}`);
+    }
+  }
+  const inlineIds = new Set(inline.map(i => i.placeholder));
+  const inlineOrder = (text) => [...text.matchAll(PLACEHOLDER_RE)].map(m => m[0]).filter(id => inlineIds.has(id)).join(',');
+  if (inline.length > 1 && inlineOrder(input) !== inlineOrder(output) && !errors.length) warnings.push('inline-variable-reordered-within-paragraph');
   if (/\[章节：|===SEC:|\[原文第 \d+ 页\]|\[本页版面：/u.test(output)) errors.push('internal-layout-marker-leaked');
 
   const outputPlain = output.replace(PLACEHOLDER_RE, '').replace(/\s+/gu, '');

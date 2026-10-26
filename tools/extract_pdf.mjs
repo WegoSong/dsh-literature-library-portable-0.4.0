@@ -926,6 +926,7 @@ function stripRunningHeads(lines, pageHeight, pageNumber, furniture, bodyLineCou
     if (isPageNum) { dropped.push({ text: t, reason: 'pagenum', page: pageNumber }); continue; }
 
     const furnitureLike = (furniture.has(t) && t.length <= 90)
+      || (inTop && /^[A-Z]\.\s+.{1,60}\bet\s+al\.?$/u.test(t))
       || (inBottom && t.length < 140 && /^[A-Z]/u.test(t) && /\b(?:19|20)\d{2}\s*[;,]\s*\d/u.test(t))
       || (t.length <= 90 && /^(vol\.?|no\.?|pp?\.?|issn|doi|https?:|www\.|received|accepted|published|©|\d{4}\s)/iu.test(t));
     if (furnitureLike && innerText >= 6) {
@@ -1050,7 +1051,9 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
     if (g.role === 'abstract') {
       const region = pc.regions.find(r => r.role === 'abstract');
       region.flow = 'article'; region.order = 1;
-      pageParas.push({ type: 'heading', text: 'ABSTRACT', sourceIds: [], sourcePages: [pc.p], flowId: 'abstract' });
+      const labels = g.lines.filter(l => /^a\s*b\s*s\s*t\s*r\s*a\s*c\s*t\s*$/iu.test(l.text.trim()));
+      pageParas.push({ type: 'heading', text: 'ABSTRACT', sourceIds: labels.flatMap(lineSourceIds), sourcePages: [pc.p], flowId: 'abstract' });
+      g.lines = g.lines.filter(l => !labels.includes(l));
     } else registerRegion(pc, g.lines, 'body', 'column-geometry+width-transition', 'article');
     const ordered = [...g.lines].sort((a, b) => Math.round(b.y * 4) - Math.round(a.y * 4) || a.x0 - b.x0);
     const merged = mergeFragments(ordered, g.gutter);
@@ -1278,7 +1281,7 @@ async function extract(pdfPath, opts) {
         && i.width < vp.width * 0.62 && i.height > 5).map(i => ({ x0: i.transform[4], x1: i.transform[4] + i.width })), vp.width);
       const gutter = rawColumns.columns === 2 ? { start: rawColumns.gutterStart, end: rawColumns.gutterEnd } : null;
       const debug = { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width, gutter };
-      lines.push(...groupLines(buildRuns(bundle.items, debug), debug).map(l => ({ ...l, regionRole: bundle.role })));
+      lines.push(...groupLines(buildRuns(bundle.items, debug), debug).filter(l => l.text.trim()).map(l => ({ ...l, regionRole: bundle.role })));
     }
     const abstract = p === 1 ? lines.find((l) => /^abstract$/iu.test(l.text.trim())) : null;
     const frontLines = lines.filter(l => !['body', 'abstract'].includes(l.regionRole)
@@ -1398,13 +1401,14 @@ async function extract(pdfPath, opts) {
     const titleLines = front.frontLines.filter((l) => l.size >= titleSize * 0.92).sort((a, b) => b.y - a.y);
     const titleBottom = Math.min(...titleLines.map((l) => l.y));
     if (!out.source.title && titleSize > bodySize * 1.3) out.source.title = titleLines.map((l) => l.text).join(' ');
-    if (!out.source.author && titleSize > bodySize * 1.3) {
-      const frontBottom = Math.min(...front.frontLines.map((l) => l.y));
-      const names = front.rawItems.filter((i) => i.transform[5] < titleBottom && i.transform[5] > frontBottom
-        && i.height >= titleSize * 0.48 && i.height <= titleSize * 0.68
-        && /^[A-Z][A-Za-z.\s-]+$/u.test(i.str.trim()) && i.str.trim().split(/\s+/u).length >= 2
-        && i.str.trim().split(/\s+/u).length <= 4);
-      out.source.author = names.map((i) => i.str.trim()).join(', ') || null;
+    if (titleSize > bodySize * 1.3) {
+      const authorRegions = new Set(front.regions.filter(r => r.role === 'front-matter').map(r => r.id));
+      const cleanName = (i) => i.str.trim().replace(/^[,\s]+|[,\s*]+$/gu, '');
+      const names = front.rawItems.filter((i) => authorRegions.has(i.regionId)
+        && i.height >= titleSize * 0.48 && i.height <= titleSize * 0.82
+        && /^[A-Z][A-Za-z.\s-]+$/u.test(cleanName(i)) && cleanName(i).split(/\s+/u).length >= 2
+        && cleanName(i).split(/\s+/u).length <= 4);
+      if (names.length > 1 || !out.source.author) out.source.author = names.map(cleanName).join(', ') || out.source.author;
       if (!out.source.author) {
         const authors = front.lines.filter(l => l.regionRole === 'front-matter' && l.size >= titleSize * 0.6
           && !/\b(?:University|Department|Institute|Laboratory|Correspondence)\b|@/iu.test(l.text));

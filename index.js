@@ -2158,6 +2158,7 @@ export function apply(ctx, config = {}) {
       upgradedChunks: job.upgradedChunks ?? 0,
       preprocessing: job.preprocessing ?? null,
       layout: job.layout ?? null,
+      failureReport: job.failureReport ?? null,
       log: job.log.slice(-8),
     };
   }
@@ -2299,6 +2300,23 @@ export function apply(ctx, config = {}) {
         await writeFile(file, `${JSON.stringify(value)}\n`, 'utf8');
         try { rmSync(temp, { force: true }); } catch { /* ignore */ }
       }
+    };
+    // Keep the last failed chunk/paragraph locally for diagnosis. Never include
+    // request headers, API keys, provider credentials, or browser state.
+    const saveValidationFailure = async (chunkIndex, source, translation, validation, paragraphIndex = null) => {
+      try {
+        const relDir = `${libraryDir}/logs/translation-failures/${cachePaperId}`;
+        const dir = join(libraryRoot, 'logs', 'translation-failures', cachePaperId);
+        const file = `chunk-${chunkIndex + 1}${paragraphIndex ? '-paragraph' : ''}.json`;
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, file), JSON.stringify({
+          createdAt: new Date().toISOString(), slug: job.slug, chunkIndex: chunkIndex + 1,
+          paragraphIndex, model: job.model, validationPolicy: pipeline.VALIDATION_VERSION,
+          source, translation, validation,
+          technicalTokens: prepared.placeholders.filter(p => p.type !== 'block' && source.includes(p.placeholder)),
+        }, null, 2), 'utf8');
+        job.failureReport = `${relDir}/${file}`;
+      } catch { note('本地诊断文件未能保存；任务仍按完整性校验结果处理'); }
     };
 
     for (let i = 0; i < chunks.length; i += 1) {
@@ -2465,6 +2483,7 @@ export function apply(ctx, config = {}) {
         }
         job.validationFailures += 1;
         note(`第 ${i + 1} 块完整性校验未通过：${lastValidation.errors.join(', ')}`);
+        await saveValidationFailure(i, chunks[i], responseText, lastValidation);
         // 大块已产生译文但结构不完整时，逐段恢复而不是原样重复整个大请求。
         if (qualityIndex === 0) {
           try {
@@ -2525,6 +2544,8 @@ export function apply(ctx, config = {}) {
           } catch (err) {
             if (!err.validation) throw err;
             lastValidation = err.validation;
+            if (err.failureContext) await saveValidationFailure(i, err.failureContext.source,
+              err.failureContext.translation, err.validation, err.failureContext.paragraphIndex);
             note(`段落恢复失败：${err.message}`);
           }
           // 已经对损坏段落做了两次有界恢复，继续整块升级只会重复消耗。
