@@ -100,3 +100,9 @@ node plugin/literature-library/tools/extract_pdf.mjs "论文.pdf" --out "output/
 状态保存在 `library/layouts/<文献>/state.json`，分区每次修改建立新版本，旧版目录保留。手动修改、PDF 改变或抽取稿变动会阻止过期确认；已排队/正在翻译时不能修改。分区任务重启后若被中断，需点击重新分区；已完成的分区和逐页检查记录仍保留。不要直接手改内部 state 文件。
 
 开发测试：`node tools/test_layout_workflow.mjs`、`node tools/test_manual_pdf_regions.mjs`。真实浏览器夹具 `tools/layout_ui_harness.mjs` 使用独立临时文献库并阻断外部 API；React 测试依赖仅安装在 `output/layout-ui-test-deps/`，不进入发布包。浏览器验证不等于真实 API 翻译质量或其他电脑内存验证。
+
+### 0.6.10 分区界面修复
+
+分区工具现在位于 PDF 下方，不遮挡论文；工具区限高且独立滚动，详细说明默认收起。模式选择、类型和边界输入使用紧凑字号，不受论文阅读字号影响。原来的阅读字号、阅读位置和已保存分区不变。
+
+升级会刷新当前页面中的插件样式，避免旧样式残留。安装更新后仍需完整重启 DSH 以加载新版本代码。开发回归增加 `node tools/test_layout_ui_css.mjs`；浏览器夹具默认模拟旧样式残留、宿主大字号干扰和高阅读字号，以验证 PDF 不会被分区工具挤没。

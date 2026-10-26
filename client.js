@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.9';
+    const PDFJS_REV = '0.6.10';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -740,14 +740,30 @@ window.__ModuleLoader__.load({
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 /* PDF.js 阅读器：工具条与译文第 2 行同高，正文用 canvas 自己画 */
-.ll-pdf-viewer { flex: auto; min-height: 0; display: flex; flex-direction: column; }
-.ll-layout-controls { flex: none; max-height: 38vh; overflow: auto; padding: 8px 10px; border-bottom: 1px solid var(--ll-soft-border); background: var(--ll-panel-bg); color: var(--ll-text); font-size: 12px; }
-.ll-layout-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.ll-pdf-viewer { flex: 1 1 0; min-height: 0; min-width: 0; display: flex; flex-direction: column; container-type: size; }
+.ll-root .ll-layout-controls { flex: 0 1 auto; min-height: 0; min-width: 0; max-height: 220px; overflow: auto; box-sizing: border-box; padding: 6px 8px; border-top: 1px solid var(--ll-soft-border); background: var(--ll-panel-bg); color: var(--ll-text); font: 12px/1.4 system-ui,sans-serif; overscroll-behavior: contain; }
+/* At least two thirds of the actual viewer stays available to the PDF, even
+   when the host header is expanded. vh alone cannot enforce that constraint. */
+.ll-pdf-viewer > .ll-layout-controls { max-height: min(220px, 32vh); }
+@supports (height: 1cqh) { .ll-pdf-viewer > .ll-layout-controls { max-height: min(220px, 34cqh); } }
+.ll-root .ll-layout-row { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; max-width: 100%; min-width: 0; min-height: 26px; overflow-x: auto; }
+.ll-layout-row > :not(.ll-layout-state):not(.ll-spacer) { flex-shrink: 0; }
+.ll-layout-state { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ll-layout-row + .ll-layout-row, .ll-layout-editor { margin-top: 4px; }
+.ll-root .ll-layout-actions { flex-wrap: wrap; overflow: visible; }
 .ll-layout-row input[type=number] { width: 58px; margin-left: 3px; }
 .ll-layout-row select { max-width: 100%; }
-.ll-layout-hint { margin: 6px 0; color: var(--ll-muted); font-size: 12px; line-height: 1.5; }
-.ll-layout-error { margin: 6px 0; color: #c04d43; overflow-wrap: anywhere; }
-.ll-layout-region-list { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.ll-root .ll-layout-controls :is(p,label,summary,strong,span), .ll-root .ll-layout-controls :is(button,input,select),
+.ll-root .ll-layout-mode { font-size: 12px !important; line-height: 1.4 !important; letter-spacing: normal; }
+.ll-root .ll-layout-controls :is(button,input,select), .ll-root .ll-layout-mode { box-sizing: border-box; max-width: 100%; min-width: 0; min-height: 25px !important; height: 25px !important; margin: 0; padding: 2px 6px !important; font-family: inherit; border: 1px solid var(--ll-soft-border); border-radius: 4px; background: var(--ll-control-bg); color: var(--ll-text); }
+.ll-root .ll-layout-mode { width: 160px; flex: 0 1 160px; text-overflow: ellipsis; }
+.ll-root .ll-layout-controls label { display: inline-flex; align-items: center; white-space: nowrap; gap: 3px; }
+.ll-root .ll-layout-hint { margin: 4px 0 !important; color: var(--ll-muted); }
+.ll-root .ll-layout-error { margin: 4px 0 !important; color: #de8176; overflow-wrap: anywhere; max-height: 48px; overflow: auto; }
+.ll-root .ll-layout-region-list { display: flex; flex-wrap: nowrap; gap: 4px; margin: 5px 0; max-width: 100%; overflow-x: auto; padding: 2px; }
+.ll-layout-region-list > button { flex: none; }
+.ll-layout-help { margin-top: 4px; color: var(--ll-muted); }
+.ll-layout-help summary { cursor: pointer; width: fit-content; }
 .ll-layout-region-list [aria-pressed=true] { outline: 2px solid var(--ll-accent); }
 .ll-region-overlay { position: absolute; inset: 0; z-index: 6; user-select: none; }
 .ll-region-box { position: absolute; border: 1.5px solid #1477b8; background: rgba(20,119,184,.055); box-sizing: border-box; cursor: move; }
@@ -919,16 +935,42 @@ window.__ModuleLoader__.load({
 .ll-item.active .ll-item-journal { color: var(--ll-muted); }
 .ll-pane-body .ll-empty strong { color: var(--ll-paper-text); }
 .ll-modal-bg { backdrop-filter: none; }
+/* Reading zoom belongs to the paper, not to navigation and form controls. */
+.ll-root :is(.ll-nav-shell,.ll-head,.ll-pane-head,.ll-pane-tools,.ll-layout-controls,.ll-modal,.ll-menu) {
+  --ll-font-scale: 1; font-size: 12px; line-height: 1.4;
+}
+.ll-root :is(.ll-nav-shell,.ll-head,.ll-pane-head,.ll-pane-tools,.ll-modal,.ll-menu) :is(button,input,select,label,summary) {
+  font-family: inherit; font-size: 12px !important; line-height: 1.4 !important;
+}
+.ll-root :is(.ll-nav-shell,.ll-modal,.ll-menu) select {
+  box-sizing: border-box; max-width: 100%; min-width: 0; height: 25px !important; min-height: 25px !important;
+  margin: 0; padding: 2px 5px !important;
+}
+.ll-root .ll-nav-shell .ll-toolbar > .ll-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.ll-root .ll-nav-title { flex-wrap: wrap; }
+.ll-root .ll-nav-title > span { white-space: nowrap; flex-shrink: 0; }
+.ll-root .ll-nav-head > .ll-banner { max-height: 52px; overflow: auto; font-size: 11px; line-height: 1.4; }
+.ll-root .ll-head { max-height: min(210px, 28vh); overflow: auto; }
+.ll-root .ll-pane-head { flex-shrink: 0; }
+.ll-root .ll-pdf-body { flex: 1 1 0; min-height: 0; }
+.ll-root .ll-pane-body :is(.ll-empty,.ll-status) {
+  --ll-font-scale: 1; font: 13px/1.6 system-ui,sans-serif;
+}
+.ll-root .ll-pane-body .ll-empty strong { font-size: 14px; line-height: 1.4; }
 `;
 
     function injectCss() {
       const id = 'dsh-literature-library/style';
       if (typeof document === 'undefined') return;
-      if (document.querySelector(`style[data-plugin-css="${id}"]`) !== null) return;
-      const tag = document.createElement('style');
+      // A hot upgrade reuses the document. An existing tag is not evidence that
+      // it contains this version's CSS (new layout selectors may be absent).
+      const tags = [...document.querySelectorAll(`style[data-plugin-css="${id}"]`)];
+      const tag = tags.shift() || document.createElement('style');
       tag.dataset.plugin = 'dsh-literature-library';
       tag.dataset.pluginCss = id;
-      tag.textContent = CSS;
+      tag.dataset.pluginCssVersion = PDFJS_REV;
+      if (tag.textContent !== CSS) tag.textContent = CSS;
+      for (const duplicate of tags) duplicate.remove();
       document.head.appendChild(tag);
     }
 
@@ -2675,7 +2717,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'll-layout-controls' }, [
         h('div', { key: 'top', className: 'll-layout-row' }, [
           h('strong', { key: 'name' }, '论文分区'),
-          h('span', { key: 'status' }, s ? `${LAYOUT_PHASES[s.phase]} · 已检查 ${s.checkedPages.length}/${s.pageCount} 页` : '尚未分区'),
+          h('span', { key: 'status', className: 'll-layout-state', title: s ? `${LAYOUT_PHASES[s.phase]} · 已检查 ${s.checkedPages.length}/${s.pageCount} 页` : '尚未分区' }, s ? `${LAYOUT_PHASES[s.phase]} · ${s.checkedPages.length}/${s.pageCount} 页` : '尚未分区'),
           h('span', { key: 'sp', className: 'll-spacer' }),
           h('button', { key: 'show', className: 'll-btn ll-btn-xs', disabled: !view?.page, onClick: () => setShow(!show) }, show ? '隐藏分区' : '显示分区'),
           h('button', { key: 'start', className: 'll-btn ll-btn-xs', disabled: busy || view?.dirty || ['queued','partitioning'].includes(s?.phase), onClick: () => {
@@ -2684,10 +2726,9 @@ window.__ModuleLoader__.load({
             setShow(true); act('start', { force: !!s });
           } }, s ? '重新分区' : '开始分区'),
         ]),
-        h('p', { key: 'hint', className: 'll-layout-hint' }, '本地分区不消耗模型 token。自动模式自检后翻译；半自动/手动须确认。分区框上的数字表示阅读顺序。'),
         (error || s?.error || data?.stale) ? h('p', { key: 'err', role: 'alert', className: 'll-layout-error' }, error || (data.stale ? 'PDF 已变化，请重新分区' : s.error)) : null,
         ready && view?.page ? h('div', { key: 'tools' }, [
-          h('div', { key: 'buttons', className: 'll-layout-row' }, [
+          h('div', { key: 'buttons', className: 'll-layout-row ll-layout-actions' }, [
             h('span', { key: 'p' }, `第 ${view.page.page} 页`),
             h('button', { key: 'edit', className: 'll-btn ll-btn-xs', disabled: busy, onClick: () => { setShow(true); setView(v => ({ ...v, editing: !v.editing })); } }, view.editing ? '结束编辑' : '手动纠错'),
             h('button', { key: 'check', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => act('check-page', { page: view.page.page }) }, '此页已检查'),
@@ -2699,13 +2740,12 @@ window.__ModuleLoader__.load({
             } }, '按确认分区翻译'),
           ]),
           view.editing ? h('div', { key: 'editor', className: 'll-layout-editor' }, [
-            h('div', { key: 'row', className: 'll-layout-row' }, [
+            h('div', { key: 'row', className: 'll-layout-row ll-layout-actions' }, [
               h('button', { key: 'draw', className: 'll-btn ll-btn-xs', onClick: () => setView(v => ({ ...v, drawing: !v.drawing })) }, view.drawing ? '停止画框' : '画新分区'),
               h('button', { key: 'clear', className: 'll-btn ll-btn-xs', onClick: () => { if (window.confirm('清空本页分区并从头画框？未覆盖文字将阻止保存。')) setView(v => ({ ...v, dirty: true, page: { ...v.page, regions: [] } })); } }, '清空本页重画'),
               h('button', { key: 'save', className: 'll-btn ll-btn-xs', disabled: busy || !view.dirty && s.mode !== 'manual', onClick: () => act('save-page', { page: view.page.page, regions: view.page.regions.map(({id,role,bbox}) => ({id,role,bbox})) }) }, '保存本页并自检'),
               h('button', { key: 'discard', className: 'll-btn ll-btn-xs', onClick: () => { setView(v => ({ ...v, dirty: false, page: data.page })); setEpoch(n => n+1); } }, '放弃未保存修改'),
             ]),
-            h('p', { key: 'how', className: 'll-layout-hint' }, '拖框可移动，右下角可缩放；新框优先接管框内文字。正文/标题/题注/公式分开，非正文归入信息区。需整页覆盖，避免重叠。'),
             h('div', { key: 'regions', className: 'll-layout-region-list' }, view.page.regions.map((r,i) => h('button', {
               key: r.id, className: 'll-btn ll-btn-xs', 'aria-pressed': view.selected === r.id,
               onClick: () => setView(v => ({ ...v, selected: r.id, drawing: false })),
@@ -2724,6 +2764,11 @@ window.__ModuleLoader__.load({
           view.dirty ? h('p', { key:'unsaved',className:'ll-layout-error' }, '本页有未保存修改。请保存或放弃后再检查其他页。') : null,
           data.blockingWarnings?.length ? h('p',{key:'warnings',className:'ll-layout-error'},`待处理页：${[...new Set(data.blockingWarnings.map(w => w.page))].join('、')}`) : null,
         ]) : null,
+        h('details', { key: 'help', className: 'll-layout-help' }, [
+          h('summary', { key: 'summary' }, '操作说明与费用'),
+          h('p', { key: 'hint', className: 'll-layout-hint' }, '本地分区与人工检查不消耗模型 token；自动模式自检后翻译，半自动/手动须确认。框号表示阅读顺序。'),
+          h('p', { key: 'how', className: 'll-layout-hint' }, '拖框移动，右下角缩放；新框接管框内文字。正文、标题、题注、公式分开；非正文归入信息区。需整页覆盖，避免重叠。'),
+        ]),
       ]);
     }
 
@@ -2949,6 +2994,11 @@ window.__ModuleLoader__.load({
       const [layoutOpen,setLayoutOpen] = React.useState(!!openLayout);
       const [showRegions,setShowRegions] = React.useState(!!openLayout);
       const [regionView,setRegionView] = React.useState(null);
+      React.useEffect(() => {
+        const open = () => { setLayoutOpen(true); setShowRegions(true); };
+        window.addEventListener('ll-layout-changed',open);
+        return () => window.removeEventListener('ll-layout-changed',open);
+      },[]);
       React.useEffect(() => {
         onLayoutDirty?.(regionView?.dirty ? documentKey : null);
         const prevent = e => { e.preventDefault(); e.returnValue = ''; };
@@ -3335,9 +3385,9 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'll-pdf-viewer' }, [
         toolbar,
+        h('div', { className: 'll-pdf-body', ref: scrollRef }, content),
         layoutOpen ? h(LayoutControls,{key:'layout-tools',slug:documentKey,page,mode:layoutMode,schedule,view:regionView,setView:setRegionView,
           show:showRegions,setShow:setShowRegions,onJob}) : null,
-        h('div', { className: 'll-pdf-body', ref: scrollRef }, content),
       ]);
     }
 
@@ -4854,7 +4904,7 @@ window.__ModuleLoader__.load({
             }, batchActive
               ? `停止后续 ${batchState.current}/${batchState.total}`
               : '分区/批量翻译'),
-            h('select',{key:'layout-mode',value:layoutMode,'aria-label':'翻译分区模式',title:'选择分区与翻译流程',onChange:e=>setLayoutMode(e.target.value)},[
+            h('select',{key:'layout-mode',className:'ll-layout-mode',value:layoutMode,'aria-label':'翻译分区模式',title:'选择分区与翻译流程',onChange:e=>setLayoutMode(e.target.value)},[
               h('option',{key:'auto',value:'auto'},'自动分区翻译'),h('option',{key:'semi',value:'semi'},'半自动·人工检查'),h('option',{key:'manual',value:'manual'},'手动分区'),
             ]),
           ]),
