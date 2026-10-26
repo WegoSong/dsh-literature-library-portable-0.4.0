@@ -49,6 +49,7 @@ function cleanJournalName(value) {
   text = text.replace(/\s+(?:19|20)\d{2}\s*[,;(].*$/, '').trim();
   text = text.replace(/\s+\d{1,4}\s*\((?:19|20)\d{2}\).*$/, '').trim();
   text = text.replace(/\s+(?:Vol\.?|Volume)\s*\d+.*$/i, '').trim();
+  text = text.replace(/\s+\d+(?:\.\d+)?\s*[:;,].*$/u, '').trim();
   return text.length >= 2 && text.length <= 180 ? text : null;
 }
 
@@ -58,6 +59,7 @@ function cleanAuthors(value) {
     .replace(/\\\*/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+  if (/^(?:原文标题|英文标题|中文标题|PDF Subject|PDF CreationDate|作者|期刊|DOI|Keywords|Correspondence)\s*[:：]/iu.test(text)) return null;
   return text.length >= 2 && text.length <= 800 ? text : null;
 }
 
@@ -196,7 +198,7 @@ export function extractMetadataFromText(text, { fallbackTitle = '', slug = '' } 
       }
     }
     match = /^PDF\s+Subject\s*[：:]\s*(.+)$/i.exec(line);
-    if (!result.journal && match && /journal|proceedings|transactions|review|letters|science|nature/i.test(match[1])) {
+    if (!result.journal && match && /journal|proceedings|transactions|review|letters|science|nature|materials|nano\s+energy/i.test(match[1])) {
       result.journal = cleanJournalName(match[1]);
       result.evidence.push('pdf-subject-journal');
     }

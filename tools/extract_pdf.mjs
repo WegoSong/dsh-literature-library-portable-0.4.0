@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve, basename, extname } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = resolve(HERE, '..');
@@ -36,6 +37,8 @@ function parseArgs(argv) {
     if (a === '--out') args.out = argv[++i];
     else if (a === '--name') args.name = argv[++i];
     else if (a === '--no-json') args.json = false;
+    else if (a === '--asset-prefix') args.assetPrefix = argv[++i];
+    else if (a === '--file-route') args.fileRoute = argv[++i];
     else if (a === '--pages') args.pages = argv[++i];
     else if (a === '--debug-cols') args.debugCols = true;
     else if (a === '--dump-layout') { args.dumpLayout = true; args.debugCols = true; }
@@ -115,7 +118,9 @@ function normalizeInline(s) {
  */
 function buildRuns(items, debugOpts = {}) {
   const mapped = items
-    .filter((it) => (it.str ?? '').length > 0)
+    .filter((it) => (it.str ?? '').length > 0
+      // 侧边竖排下载水印不能参与正文几何分析。
+      && Math.abs(it.transform?.[1] ?? 0) < Math.abs(it.transform?.[0] ?? 1) * 0.5)
     .map((it) => ({
       str: it.str,
       x: it.transform?.[4] ?? 0,
@@ -145,12 +150,16 @@ function buildRuns(items, debugOpts = {}) {
     // 无法恢复正确的 Bi_{2}Te_{3} 顺序。
     const scriptBetween = mapped.some((s) => s !== it
       && s.size <= em * 0.86
-      && Math.abs(s.y - it.y) <= em * 0.65
+      && Math.abs(s.y - it.y) <= em * 0.85
       && Math.abs(s.y - it.y) >= em * 0.08
       && s.x >= cur.x1 - em * 0.12
       && s.x <= it.x + em * 0.12);
 
-    if (sameLine && sameSize && !crossColumn && !overlaps && reasonable && !scriptBetween) {
+    const fence = debugOpts.gutter;
+    const crossesFence = fence && cur.x1 <= fence.start + 1 && it.x >= fence.end - 1;
+    const headingNumber = /^\d+(?:\.\d+)*\.?$/u.test(cur.text.trim()) && sameLine
+      && /^[A-Z]/u.test(it.str) && gap < em * 5;
+    if (sameLine && sameSize && !crossesFence && !overlaps && (( !crossColumn && reasonable && !scriptBetween) || headingNumber)) {
       // 诊断：左栏一行与右栏一行在同一基线上，间距极小（本论文栏间距仅约 11pt，
       // 与字距同级），"跨栏须有 1.4em 间隔"这条规则会漏判，从而把两栏拼成一行。
       if (debugOpts?.dumpLayout && debugOpts.pageWidth) {
@@ -184,6 +193,57 @@ function buildRuns(items, debugOpts = {}) {
  * 角标走单独分支：字号更小 + 基线偏移 + 紧贴基准文本。
  */
 function groupLines(runs, debugOpts = {}) {
+  return groupBaselineLines(runs, debugOpts.gutter);
+}
+
+// 先建立正文基线，再把小字号上/下标归入最近的宿主。旧算法只看上一条行，
+// 上标先出现时会把引文编号搬到下一行开头，也会把两栏同高内容合在一起。
+function groupBaselineLines(runs, gutter) {
+  const lines = [];
+  for (const r of [...runs].sort((a, b) => b.size - a.size || b.y - a.y || a.x0 - b.x0)) {
+    const candidates = lines.filter((line) => {
+      const smaller = r.size <= line.size * 0.88;
+      const tolerance = smaller ? line.size * 0.82 : Math.max(0.7, line.size * 0.16);
+      const gap = Math.max(r.x0 - line.x1, line.x0 - r.x1, 0);
+      if (gutter && ((r.x0 >= gutter.end - 1 && line.x1 <= gutter.start + 1)
+        || (line.x0 >= gutter.end - 1 && r.x1 <= gutter.start + 1))) return false;
+      return Math.abs(line.y - r.y) <= tolerance && gap <= line.size * 1.0;
+    }).sort((a, b) => {
+      const score = (line) => Math.abs(line.y - r.y) + (r.size <= line.size * 0.88
+        ? Math.min(...line.runs.map((base) => Math.abs(base.x1 - r.x0))) * 2 : 0);
+      return score(a) - score(b);
+    });
+    const target = candidates[0];
+    if (target) {
+      target.runs.push(r);
+      target.x0 = Math.min(target.x0, r.x0);
+      target.x1 = Math.max(target.x1, r.x1);
+    } else lines.push({ y: r.y, x0: r.x0, x1: r.x1, size: r.size, runs: [r] });
+  }
+  for (const line of lines) {
+    line.runs.sort((a, b) => a.x0 - b.x0 || b.y - a.y);
+    line.text = composeLineText(line.runs);
+  }
+  // 后加入的片段可能桥接了两个先前独立的基线块，需合并到稳定状态。
+  for (let i = 0; i < lines.length; i += 1) {
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const a = lines[i], b = lines[j];
+      const gap = Math.max(a.x0 - b.x1, b.x0 - a.x1, 0);
+      const crossed = gutter && ((a.x1 <= gutter.start + 1 && b.x0 >= gutter.end - 1)
+        || (b.x1 <= gutter.start + 1 && a.x0 >= gutter.end - 1));
+      if (!crossed && Math.abs(a.y - b.y) < Math.max(a.size, b.size) * 0.18
+        && gap < Math.max(a.size, b.size) * 1.15) {
+        a.runs.push(...b.runs); a.runs.sort((x, y) => x.x0 - y.x0);
+        a.x0 = Math.min(a.x0, b.x0); a.x1 = Math.max(a.x1, b.x1);
+        a.text = composeLineText(a.runs);
+        lines.splice(j--, 1);
+      }
+    }
+  }
+  return lines.sort((a, b) => Math.round(b.y * 4) - Math.round(a.y * 4) || a.x0 - b.x0);
+}
+
+function legacyGroupLines(runs, debugOpts = {}) {
   const sorted = [...runs].sort((a, b) => b.y - a.y || a.x0 - b.x0);
   const lines = [];
 
@@ -271,6 +331,10 @@ function composeLineText(runs) {
     }
 
     out += script ? `${script}{${piece}}` : piece;
+    // 下标后面的正文词需要空格；公式的标点/连续符号仍保持紧贴。
+    const next = runs[i + 1];
+    if (script && next && /^[A-Za-z]{2,}\b/u.test(next.text.trim()) && next.size > r.size * 1.1
+      && !(next.text.trim().length <= 2 && runs[i + 2]?.size <= next.size * 0.85)) out += ' ';
   }
   return normalizeInline(out);
 }
@@ -468,10 +532,13 @@ function detectColumns(lines, pageWidth, opts = {}) {
   }
   let leftKey = null;
   let leftPeak = 0;
+  let bestPair = -1;
   for (const [k, n] of hist) {
-    if (n > leftPeak || (n === leftPeak && leftKey !== null && k < leftKey)) {
-      leftPeak = n;
-      leftKey = k;
+    for (const [right, count] of hist) {
+      const distance = (right - k) * BIN;
+      if (distance < pageWidth * 0.25 || distance > pageWidth * 0.6 || Math.min(n, count) < 3) continue;
+      const score = Math.min(n, count) * 2 + n + count;
+      if (score > bestPair) { bestPair = score; leftPeak = n; leftKey = k; }
     }
   }
   if (leftKey === null) return none;
@@ -490,8 +557,8 @@ function detectColumns(lines, pageWidth, opts = {}) {
   const rightStart = rightKey * BIN;
 
   // 中缝：左栏行的最大 x1 与右栏行的最小 x0 之间
-  const leftLines = narrow.filter((l) => l.x0 < rightStart - 10 && l.x1 <= rightStart + 10);
-  const rightLines = narrow.filter((l) => l.x0 >= rightStart - 10);
+  const leftLines = narrow.filter((l) => l.x0 < rightStart - 10 && l.x1 <= rightStart - 2);
+  const rightLines = narrow.filter((l) => l.x0 >= rightStart - 5 && l.x0 <= rightStart + BIN + 5);
   if (leftLines.length < 3 || rightLines.length < 3) return none;
 
   const leftEnd = Math.max(...leftLines.map((l) => l.x1));
@@ -639,6 +706,41 @@ function partitionLayout(lines, pageWidth, depth = 0) {
     if (spanSet.has(l)) continue;
     if ((l.x0 + l.x1) / 2 < mid) left.push(l); else right.push(l);
   }
+  // 通栏摘要的末行往往很短，不能只按行宽将其划到左栏正文。
+  if (spanning.length && left.length && right.length) {
+    const bothStart = Math.min(Math.max(...left.map((l) => l.y)), Math.max(...right.map((l) => l.y)));
+    for (const side of [left, right]) {
+      for (let i = side.length - 1; i >= 0; i -= 1) {
+        if (side[i].y > bothStart + side[i].size * 1.5
+          && spanning.some((s) => s.y > side[i].y)) spanning.push(...side.splice(i, 1));
+      }
+    }
+  }
+
+  // 通栏内容按垂直位置分隔双栏段，而不是把所有 inside 行提前到正文前面。
+  // 首页题名续行、作者、摘要都是通栏，必须完整读完后才开始左右栏正文。
+  if (spanning.length) {
+    const spans = [...spanning].sort((a, b) => b.y - a.y);
+    const bands = [];
+    for (const line of spans) {
+      const last = bands[bands.length - 1];
+      if (last && last[last.length - 1].y - line.y <= Math.max(line.size * 2, 18)) last.push(line);
+      else bands.push([line]);
+    }
+    let remaining = [...left, ...right];
+    const ordered = [];
+    for (const band of bands) {
+      const top = Math.max(...band.map((l) => l.y));
+      const bottom = Math.min(...band.map((l) => l.y));
+      const aboveBand = remaining.filter((l) => l.y > top + 1);
+      ordered.push(...partitionLayout(aboveBand, pageWidth, depth + 1));
+      const sameBand = remaining.filter((l) => l.y <= top + 1 && l.y >= bottom - 1);
+      ordered.push({ lines: [...band, ...sameBand], gutter: null });
+      remaining = remaining.filter((l) => l.y < bottom - 1);
+    }
+    ordered.push(...partitionLayout(remaining, pageWidth, depth + 1));
+    return ordered;
+  }
 
   const core = [...left, ...right];
   const spanTop = core.length ? Math.max(...core.map((l) => l.y)) : 0;
@@ -671,6 +773,7 @@ const SECTION_PATTERNS = [
 ];
 
 function tagParagraph(p) {
+  if (p.type !== 'heading') return null;
   for (const s of SECTION_PATTERNS) if (s.re.test(p.text)) return s.tag;
   return null;
 }
@@ -682,11 +785,11 @@ function withScripts(line) {
     const next = t
       .replace(/([\p{L}\p{N})\]])[ ]+([_^]\{)/gu, '$1$2')
       .replace(/([_^]\{[^}]{1,6}\})[ ]+([_^]\{)/gu, '$1$2')
-      .replace(/([_^]\{[^}]{1,6}\})[ ]+([\p{L}\p{N}])/gu, '$1$2');
+      .replace(/([_^]\{[^}]{1,6}\})[ ]+([_^]\{)/gu, '$1$2');
     if (next === t) break;
     t = next;
   }
-  return t;
+  return t.replace(/(?<![\w$])([\p{L}\p{N}]+(?:[_^]\{[^}]+\}[\p{L}\p{N}]*)+)/gu, '$$$1$$');
 }
 
 function endsSentence(t) { return /[.!?。！？:;]["')\]]?$/u.test(t.trim()); }
@@ -697,12 +800,25 @@ function linesToParagraphs(lines, ctx) {
   const paras = [];
   let cur = null;
 
-  for (const ln of lines) {
+  // 标题编号常与标题分成两个 PDF item，合回同一基线以便保留层级。
+  const normalized = [];
+  for (const line of lines) {
+    const prev = normalized[normalized.length - 1];
+    if (prev && /^\d+(?:\.\d+)*\.?$/u.test(prev.text.trim())
+      && Math.abs(prev.y - line.y) < line.size * 0.3
+      && line.x0 > prev.x1 && line.x0 - prev.x1 < line.size * 5) {
+      prev.text += ` ${line.text}`; prev.x1 = line.x1; continue;
+    }
+    normalized.push({ ...line });
+  }
+  for (const ln of normalized) {
     const text = withScripts(ln);
     if (!text) continue;
 
-    const numberedHeading = /^\s*(?:\d+\.)+\d*\s+\p{L}/u.test(text);
-    const isHeading = (ln.size > bodySize * 1.12 || numberedHeading) && text.length < 140;
+    const numberedHeading = /^\s*\d+(?:\.\d+)*\.?\s+[A-Z][a-z]/u.test(text) && text.length < 100
+      && !/[=,;:()[\]”“"$]/u.test(text);
+    const sectionHeading = /^(?:\d+(?:\.\d+)*\.?\s+)?(?:abstract|introduction|results?(?: and discussion)?|discussions?|conclusions?|summary|methods?|materials? and methods?|experimental(?: section| setup)?|references?|bibliography|acknowledge?ments?|supporting information|supplementary information)$/iu.test(text.trim());
+    const isHeading = (ln.size > bodySize * 1.08 || numberedHeading || sectionHeading) && text.length < 140;
     const hasRelation = /[=≈≤≥≪≫]/u.test(text);
     const wordCount = (text.match(/[\p{L}]{2,}/gu) ?? []).length;
     const formulaShape = wordCount <= 7;
@@ -710,22 +826,30 @@ function linesToParagraphs(lines, ctx) {
     const isEquation = hasRelation && text.length < 160 && formulaShape
       && MATH_CHARS.test(text) && !isEquationFragment(ln);
 
-    const isCaption = /^(?:fig(?:ure)?|table)\s*\d+/iu.test(text);
+    const isCaption = /^(?:FIGURE|TABLE)\s*\d+\b/u.test(text)
+      || /^(?:Fig\.|Figure|Table)\s+\d+[.:]\s/iu.test(text);
 
-    if (isHeading || isEquation || isCaption) {
+    if (isHeading || isEquation || isCaption || ln.formulaCrop) {
       if (cur) { paras.push(cur); cur = null; }
-      paras.push({ type: isHeading ? 'heading' : (isEquation ? 'equation' : 'caption'), text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size });
+      const previous = paras[paras.length - 1];
+      if (isHeading && !isCaption && previous?.type === 'heading'
+        && !/^\d+(?:\.\d+)*\.?\s/u.test(text)
+        && Math.abs(previous.size - ln.size) < 0.5 && previous.y0 - ln.y < ln.size * 1.5) {
+        previous.text += ` ${text}`; previous.y0 = ln.y; continue;
+      }
+      paras.push({ type: ln.formulaCrop ? 'formula-source' : isCaption ? 'caption' : isHeading ? 'heading' : 'equation', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size,
+        ...(ln.formulaCrop ? { crop: ln.formulaCrop } : {}) });
       continue;
     }
 
     if (!cur) {
-      cur = { type: 'para', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size };
+      cur = { type: 'para', text, x0: ln.x0, x1: ln.x1, y0: ln.y, lastY: ln.y, size: ln.size };
       continue;
     }
 
     const indent = ln.x0 - bodyLeft;
     const startsNew = indent > (bodyRight - bodyLeft) * 0.022;
-    const bigGap = cur.y0 - ln.y > ln.size * 1.75;
+    const bigGap = (cur.lastY ?? cur.y0) - ln.y > ln.size * 1.75;
     const hyphenated = /[A-Za-z]-$/u.test(cur.text);
     const continuation = /[,;(\[]$/u.test(cur.text);
     const sameBlock = !endsSentence(cur.text) || (!startsNew && !bigGap) || hyphenated || continuation;
@@ -735,9 +859,10 @@ function linesToParagraphs(lines, ctx) {
       else cur.text += ' ' + text;
       cur.x0 = Math.min(cur.x0, ln.x0);
       cur.x1 = Math.max(cur.x1, ln.x1);
+      cur.lastY = ln.y;
     } else {
       paras.push(cur);
-      cur = { type: 'para', text, x0: ln.x0, x1: ln.x1, y0: ln.y, size: ln.size };
+      cur = { type: 'para', text, x0: ln.x0, x1: ln.x1, y0: ln.y, lastY: ln.y, size: ln.size };
     }
   }
   if (cur) paras.push(cur);
@@ -760,12 +885,15 @@ function stripRunningHeads(lines, pageHeight, pageNumber, furniture, bodyLineCou
 
   for (const l of lines) {
     const t = l.text.trim();
+    if (/Downloaded from|Wiley Online Library.*(?:rules of use|Terms and Conditions)|Creative Commons License/iu.test(t)) {
+      dropped.push({ text: t, reason: 'download-watermark', page: pageNumber }); continue;
+    }
     const inTop = l.y >= topEdge;
     const inBottom = l.y <= bottomEdge;
     const inZone = inTop || inBottom;
     if (!inZone) { kept.push(l); continue; }
 
-    const isPageNum = /^[\s|·•\-–—]*(\d{1,4}|[ivxlcIVXLC]{1,6})[\s|·•\-–—]*$/u.test(t);
+    const isPageNum = /^[\s|·•\-–—]*(\d{1,4}(?:\s+of\s+\d{1,4})?|[ivxlcIVXLC]{1,6})[\s|·•\-–—]*$/u.test(t);
     if (isPageNum) { dropped.push({ text: t, reason: 'pagenum', page: pageNumber }); continue; }
 
     const furnitureLike = (furniture.has(t) && t.length <= 90)
@@ -798,7 +926,7 @@ function collectPublicationMetadata(pageCache, source) {
         : (line.y <= pc.height * 0.075 ? 'footer' : 'body');
       if (strong.test(line.text)) add(line.text, pc.p, region, 100);
       // 第一页上部通常包含标题、作者、单位和期刊抬头；保留有限数量供模型辨认。
-      else if (pc.p === 1 && line.y >= pc.height * 0.78) add(line.text, pc.p, 'first-page-top', 40);
+    else if (pc.p === 1 && (pc.frontLines?.includes(line) || line.y >= pc.height * 0.78)) add(line.text, pc.p, 'first-page-top', 40);
     }
   }
   if (source.title) add(`原文标题: ${source.title}`, 0, 'pdf-metadata', 120);
@@ -814,7 +942,7 @@ function collectPublicationMetadata(pageCache, source) {
       if (seen.has(key)) return false;
       seen.add(key); return true;
     })
-    .slice(0, 40)
+    .slice(0, 100)
     .map(({ score, ...item }) => item);
 }
 
@@ -823,8 +951,10 @@ function collectPublicationMetadata(pageCache, source) {
 function extractPageParagraphs(pc, furniture, ctx, opts, out) {
   const { bodyLeft, bodyRight, bodySize } = ctx;
 
-  const { kept, dropped } = stripRunningHeads(pc.lines, pc.height, pc.p, furniture, pc.bodyLines.length);
+  const { kept: cleaned, dropped } = stripRunningHeads(pc.lines, pc.height, pc.p, furniture, pc.bodyLines.length);
   for (const d of dropped) out.dropped.push(d);
+  // 首页出版信息在独立元数据区保留，不再与摘要/正文混排。
+  const kept = cleaned.filter((l) => !pc.frontLines?.includes(l));
 
   // 版面划分：递归处理「通栏摘要框 + 双栏正文」这类上下并存的混合版面，
   // 使摘要独立成组、正文左右栏各自成组。
@@ -878,11 +1008,87 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
 
   const pageParas = [];
   for (const g of groups) {
-    const ordered = [...g.lines].sort((a, b) => b.y - a.y || a.x0 - b.x0);
+    const ordered = [...g.lines].sort((a, b) => Math.round(b.y * 4) - Math.round(a.y * 4) || a.x0 - b.x0);
     const merged = mergeFragments(ordered, g.gutter);
-    for (const para of linesToParagraphs(merged, { bodyLeft, bodyRight, bodySize })) pageParas.push(para);
+    const localLeft = Math.min(...merged.map((l) => l.x0));
+    const localRight = Math.max(...merged.map((l) => l.x1));
+    const safeLines = markFormulaRegions(merged, { left: localLeft, right: localRight, page: pc.p });
+    for (const para of linesToParagraphs(safeLines, { bodyLeft: localLeft, bodyRight: localRight, bodySize })) {
+      const previous = pageParas[pageParas.length - 1];
+      if (previous?.type === 'para' && para.type === 'para' && !endsSentence(previous.text)
+        && (/^[a-z]/u.test(para.text) || /-$/u.test(previous.text))) {
+        previous.text = previous.text.replace(/-$/u, '') + (/-$/u.test(previous.text) ? '' : ' ') + para.text;
+      } else pageParas.push(para);
+    }
   }
   return pageParas;
+}
+
+/** PDF 的分式、根号和矩阵并非线性文本。保留原页局部图像，避免凭残片编造 LaTeX。 */
+function markFormulaRegions(lines, { left, right, page }) {
+  const mathLike = (line) => {
+    const text = line.text.normalize('NFKC');
+    const words = text.match(/[A-Za-z]{3,}/gu) ?? [];
+    return words.filter((w) => !['approx', 'times', 'leq', 'geq', 'frac', 'neq'].includes(w)).length <= 2
+      && text.length < 220 && !/^\d+(?:\.\d+)*\s+[A-Z][a-z]/u.test(text);
+  };
+  const seed = (line) => mathLike(line) && /[=≈≠≤≥]|\\approx/u.test(line.text);
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!seed(lines[i])) { out.push(lines[i]); continue; }
+    const region = [lines[i]];
+    while (out.length && mathLike(out[out.length - 1])
+      && out[out.length - 1].y - region[0].y < 20
+      && !/^[A-Z][a-z]+/u.test(out[out.length - 1].text)) region.unshift(out.pop());
+    while (i + 1 < lines.length && mathLike(lines[i + 1])
+      && region[region.length - 1].y - lines[i + 1].y < 20) region.push(lines[++i]);
+    const top = Math.max(...region.map((l) => l.y + l.size)) + 3;
+    const bottom = Math.min(...region.map((l) => l.y - l.size * 0.35)) - 3;
+    out.push({ ...region[0], text: region.map((l) => l.text).join(' '),
+      formulaCrop: { page, left: Math.max(0, left - 3), right: right + 3, top, bottom } });
+  }
+  return out;
+}
+
+async function renderFormulaSources(doc, result, opts) {
+  let createCanvas;
+  try {
+    const requirePdf = createRequire(requireFromHere.resolve('pdfjs-dist/package.json'));
+    ({ createCanvas } = requirePdf('@napi-rs/canvas'));
+  } catch { /* 没有原生渲染器时明确提示，不把损坏文本伪装成公式。 */ }
+  const folder = join(opts.out, opts.name, 'formulas');
+  let sequence = 0;
+  for (const page of result.pages) {
+    const formulas = page.paragraphs.filter((p) => p.type === 'formula-source');
+    if (!formulas.length) continue;
+    let sourcePage;
+    if (createCanvas) sourcePage = await doc.getPage(page.page);
+    for (const para of formulas) {
+      sequence += 1;
+      if (!createCanvas) { para.formulaWarning = true; continue; }
+      const crop = para.crop;
+      const scale = 2;
+      const width = Math.ceil((crop.right - crop.left) * scale);
+      const height = Math.ceil((crop.top - crop.bottom) * scale);
+      if (width <= 0 || height <= 0 || width * height > 4_000_000) { para.formulaWarning = true; continue; }
+      const canvas = createCanvas(width, height);
+      try {
+        await sourcePage.render({ canvasContext: canvas.getContext('2d'),
+          viewport: sourcePage.getViewport({ scale }),
+          transform: [1, 0, 0, 1, -crop.left * scale, -(page.height - crop.top) * scale],
+          background: 'rgb(255,255,255)',
+        }).promise;
+        await mkdir(folder, { recursive: true });
+        const name = `p${page.page}-${sequence}-${opts.sourceHash}.png`;
+        await writeFile(join(folder, name), canvas.toBuffer('image/png'));
+        const imagePath = `${opts.assetPrefix ?? `${opts.name}`}/formulas/${name}`;
+        para.image = opts.fileRoute ? `${opts.fileRoute}?path=${encodeURIComponent(imagePath)}` : imagePath;
+      } catch (err) { para.formulaWarning = true; }
+      finally { canvas.width = 0; canvas.height = 0; }
+    }
+    sourcePage?.cleanup();
+  }
+  result.stats.formulaSources = sequence;
 }
 
 // ─────────────────── 主流程 ───────────────────
@@ -890,6 +1096,7 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
 async function extract(pdfPath, opts) {
   const lib = await loadPdfjs();
   const data = new Uint8Array(await readFile(pdfPath));
+  opts.sourceHash = createHash('sha256').update(data).digest('hex').slice(0, 12);
   const task = lib.getDocument({ data, useSystemFonts: false, isEvalSupported: false, verbosity: 0 });
   const doc = await task.promise;
 
@@ -915,13 +1122,19 @@ async function extract(pdfPath, opts) {
     const page = await doc.getPage(p);
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent({ includeMarkedContent: false });
+    const rawItems = tc.items.filter((i) => typeof i.str === 'string');
+    const rawColumns = detectColumns(rawItems.filter((i) => i.str.length > 35
+      && i.width < vp.width * 0.62 && i.height > 5).map((i) => ({ x0: i.transform[4], x1: i.transform[4] + i.width })), vp.width);
+    const gutter = rawColumns.columns === 2 ? { start: rawColumns.gutterStart, end: rawColumns.gutterEnd } : null;
     const lines = groupLines(
       buildRuns(
-        tc.items.filter((i) => typeof i.str === 'string'),
-        { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width },
+        rawItems,
+        { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width, gutter },
       ),
-      { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width },
+      { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width, gutter },
     );
+    const abstract = p === 1 ? lines.find((l) => /^abstract$/iu.test(l.text.trim())) : null;
+    const frontLines = abstract ? lines.filter((l) => l.y > abstract.y + 2) : [];
     const topEdge = vp.height * 0.925;
     const bottomEdge = vp.height * 0.075;
     const inZone = (l) => l.y >= topEdge || l.y <= bottomEdge;
@@ -930,6 +1143,8 @@ async function extract(pdfPath, opts) {
       width: vp.width,
       height: vp.height,
       lines,
+      frontLines,
+      rawItems,
       bodyLines: lines.filter((l) => !inZone(l)),
       zoneLines: lines.filter(inZone),
     });
@@ -1000,6 +1215,11 @@ async function extract(pdfPath, opts) {
         pending = null;
       }
     }
+    // 无法续接时把上一页暂存段落放回，旧代码会在遇到图注/标题时静默丢段。
+    if (pending) {
+      out.pages[out.pages.length - 1]?.paragraphs.push(pending);
+      pending = null;
+    }
 
     const last = pageParas[pageParas.length - 1];
     if (last && last.type === 'para' && !endsSentence(last.text) && !last.section) {
@@ -1027,8 +1247,25 @@ async function extract(pdfPath, opts) {
     out.source.creationDate = meta?.info?.CreationDate ?? null;
   } catch { /* 元数据缺失可忽略 */ }
 
+  const front = pageCache.find((p) => p.p === 1);
+  if (front?.frontLines?.length) {
+    const titleSize = Math.max(...front.frontLines.map((l) => l.size));
+    const titleLines = front.frontLines.filter((l) => l.size >= titleSize * 0.92).sort((a, b) => b.y - a.y);
+    const titleBottom = Math.min(...titleLines.map((l) => l.y));
+    if (!out.source.title && titleSize > bodySize * 1.3) out.source.title = titleLines.map((l) => l.text).join(' ');
+    if (!out.source.author && titleSize > bodySize * 1.3) {
+      const frontBottom = Math.min(...front.frontLines.map((l) => l.y));
+      const names = front.rawItems.filter((i) => i.transform[5] < titleBottom && i.transform[5] > frontBottom
+        && i.height >= titleSize * 0.48 && i.height <= titleSize * 0.68
+        && /^[A-Z][A-Za-z.\s-]+$/u.test(i.str.trim()) && i.str.trim().split(/\s+/u).length >= 2
+        && i.str.trim().split(/\s+/u).length <= 4);
+      out.source.author = names.map((i) => i.str.trim()).join(', ') || null;
+    }
+  }
+
   out.source.metadataCandidates = collectPublicationMetadata(pageCache, out.source);
 
+  await renderFormulaSources(doc, out, opts);
   await task.destroy();
   out.stats.bodySize = Number(bodySize.toFixed(2));
   out.stats.bodyLeft = Number(bodyLeft.toFixed(1));
@@ -1085,7 +1322,11 @@ function renderMarkdown(result) {
       if (!text) continue;
       if (NOISE.test(text) && text.length < 120) continue;
       if (p.section) L.push(`===SEC:${p.section}===`);
-      if (p.type === 'heading') L.push(`## ${text}`);
+      if (p.type === 'formula-source') {
+        if (p.image) L.push(`![原文公式（第 ${page.page} 页）](${p.image})`);
+        else L.push(`> **公式抽取需核对（原文第 ${page.page} 页）**：请查看原 PDF，本段不自动重建公式。`);
+      }
+      else if (p.type === 'heading') L.push(`## ${text}`);
       else if (p.type === 'equation') L.push(`$$${text}$$`);
       else if (p.type === 'caption') L.push(`**${text}**`);
       else L.push(text);
@@ -1124,6 +1365,8 @@ async function main() {
   const pdfPath = resolve(args.positional[0]);
   const slug = args.name ?? basename(pdfPath, extname(pdfPath)).replace(/[\\/:*?"<>|\s]+/gu, '-').slice(0, 80);
   const outDir = join(resolve(args.out ?? join(WORKSPACE, 'library/extracted')), slug);
+  args.out = resolve(args.out ?? join(WORKSPACE, 'library/extracted'));
+  args.name = slug;
   await mkdir(outDir, { recursive: true });
 
   const started = Date.now();

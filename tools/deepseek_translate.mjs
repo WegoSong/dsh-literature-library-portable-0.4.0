@@ -442,6 +442,9 @@ export function buildSystemPrompt({ roleHint, extraRules } = {}) {
     '9. 只输出译文本身，不要加任何说明、前言、道歉或「以下是翻译」之类的话。',
     '10. 出版元数据由程序在本地生成，不要自行添加题名、作者、期刊、日期或 DOI 头部。',
     '11. `[原文第 n 页]` 与 `[本页版面：n 栏]` 仅用于恢复阅读顺序，不要出现在最终译文。',
+      '12. @@DSH_BLOCK_nnnnnn@@ 是原文段落/标题边界。每个标记必须恰好出现一次，顺序不变。',
+      '    每个标记后的内容只翻译该原段落，不与别段合并、不拆段、不调换顺序；标题保留 Markdown # 层级和编号。',
+      '13. @@DSH_FORMULA_nnnnnn@@ 也可能代表原 PDF 公式截图，必须放在原段落位置，绝不自行重写或补写该公式。',
     '',
     // 这一段是**实测踩坑后补的**：批量翻译的译文里有 6 条公式渲染失败，
     // 全部是「反斜杠被吃掉」造成的——`\cdot` 变成了中点字符 U+00B7、
@@ -474,7 +477,7 @@ export function buildSystemPrompt({ roleHint, extraRules } = {}) {
 export function buildUserPrompt({ chunk, index, total, title, source }) {
   return [
     `文献：《${title ?? source}》`,
-    '请准确翻译下面的正文片段；只输出该片段的译文，并逐字保留所有 @@DSH_*@@ 保护标记。',
+      '请逐段准确翻译下面的正文片段；按原顺序保留段落、标题层级和编号，逐字保留所有 @@DSH_*@@ 保护标记，每个恰好一次。',
     total > 1 ? `片段：${index + 1} / ${total}` : '',
     '',
     '----- 原文开始 -----',

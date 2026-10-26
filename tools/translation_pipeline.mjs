@@ -10,7 +10,7 @@
 
 import { createHash } from 'node:crypto';
 
-export const PIPELINE_VERSION = 'cost-quality-v4';
+export const PIPELINE_VERSION = 'layout-integrity-v6-recovery';
 export const DEFAULT_CHUNK_TOKENS = 6000;
 /**
  * 输出上限相对输入的比例（传给 resolveMaxTokens 的 inputRatio）。
@@ -61,7 +61,7 @@ export function nextOutputRatio(budgetAttempt = 0) {
  */
 const STRUCTURAL_FLUSH_RATIO = 0.85;
 
-const PLACEHOLDER_RE = /@@DSH_(?:FORMULA|URL|DOI|CITATION)_\d{6}@@/gu;
+const PLACEHOLDER_RE = /@@DSH_(?:FORMULA|URL|DOI|CITATION|BLOCK)_\d{6}@@/gu;
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 export function estimateTokens(text) {
@@ -333,6 +333,7 @@ function classifyFormula(raw) {
   if (/[_^]/u.test(body)) return 'math';
   const words = (body.match(/[A-Za-z\u3400-\u9FFF]{2,}/gu) ?? []).length;
   if (words >= 4) return 'prose';
+  if (/[\p{L}\p{N}]\s*[=≈≠≤≥]\s*[\p{L}\p{N}]/u.test(body)) return 'math';
   const alnum = (body.match(/[\p{L}\p{N}]/gu) ?? []).length;
   return alnum >= 4 ? 'math' : 'fragment';
 }
@@ -356,6 +357,9 @@ function replaceFormulas(value, regex, placeholders) {
 export function protectTechnicalTokens(text) {
   let value = String(text ?? '');
   const placeholders = [];
+
+  // 本地公式截图只传短标记，不上传图片，不消耗视觉 token。
+  value = replaceMatches(value, /!\[原文公式[^\]]*\]\([^\n)]+\)/gu, 'FORMULA', placeholders);
 
   value = replaceMatches(
     value,
@@ -392,11 +396,11 @@ function layoutHints(text) {
     .map((line) => {
       const trimmed = line.trim();
       const page = /^===PAGE\s+(\d+)===$/u.exec(trimmed);
-      if (page) return `[原文第 ${page[1]} 页]`;
+      if (page) return '';
       const columns = /^===LAYOUT:COLUMNS\s+(\d+)===$/u.exec(trimmed);
-      if (columns) return `[本页版面：${columns[1]} 栏]`;
+      if (columns) return '';
       const section = /^===SEC:([^=]+)===$/u.exec(trimmed);
-      if (section) return `[章节：${section[1]}]`;
+      if (section) return '';
       return line;
     })
     .join('\n');
@@ -411,10 +415,21 @@ export function prepareDocument(text) {
     /^<!--\s*(?:source:|本文件由 extract_pdf\.mjs)[\s\S]*?-->\s*$/gimu,
     '',
   );
-  const hinted = layoutHints(withoutGeneratorComments).replace(/\n{3,}/gu, '\n\n').trim();
+  const firstPageAt = withoutGeneratorComments.search(/^===PAGE\s+\d+===$/mu);
+  const cleanFront = meta.metadata && firstPageAt >= 0
+    ? withoutGeneratorComments.slice(0, firstPageAt).replace(/^>[^\n]*$/gmu, '') + withoutGeneratorComments.slice(firstPageAt)
+    : withoutGeneratorComments;
+  const hinted = layoutHints(cleanFront).replace(/\n{3,}/gu, '\n\n').trim();
   const protectedResult = protectTechnicalTokens(hinted);
+  const units = protectedResult.text.split(/\n{2,}/u).filter((unit) => unit.trim());
+  const structured = units.map((unit, index) => {
+    const placeholder = `@@DSH_BLOCK_${String(index + 1).padStart(6, '0')}@@`;
+    protectedResult.placeholders.push({ placeholder, type: 'block', value: '',
+      heading: /^#{1,6}\s/u.test(unit), source: unit });
+    return `${placeholder}\n${unit}`;
+  }).join('\n\n');
   return {
-    text: protectedResult.text,
+    text: structured,
     references: refs.references,
     metadata: meta.metadata,
     placeholders: protectedResult.placeholders,
@@ -524,6 +539,8 @@ export function repairDuplicatePlaceholders(source, translation, placeholders = 
     ? placeholders.filter((item) => input.includes(item.placeholder))
     : [...new Set(input.match(PLACEHOLDER_RE) ?? [])].map((placeholder) => ({ placeholder }));
   for (const item of expected) {
+    // 段落/公式重复可能意味着正文重复或移位，不能靠删标记伪装成校验通过。
+    if (!item.placeholder.startsWith('@@DSH_CITATION_')) continue;
     const want = occurrences(input, item.placeholder);
     if (want < 1) continue;
     const got = occurrences(value, item.placeholder);
@@ -546,6 +563,96 @@ export function repairDuplicatePlaceholders(source, translation, placeholders = 
   return { text: value, repairs };
 }
 
+/** 仅修复可证明等价的标记格式或原样技术内容，不猜测丢失的引文/公式。 */
+export function repairEquivalentPlaceholders(source, translation, placeholders = []) {
+  const input = String(source ?? '');
+  let text = String(translation ?? '');
+  const repairs = [];
+  const expected = placeholders.filter((p) => input.includes(p.placeholder));
+  const allowed = new Set(expected.map((p) => p.placeholder));
+  text = text.replace(/[@＠]{2}\s*DSH\s*[_＿]\s*(FORMULA|CITATION|URL|DOI|BLOCK)\s*[_＿]\s*(\d{1,6})\s*[@＠]{2}/giu,
+    (raw, type, id) => {
+      const canonical = `@@DSH_${type.toUpperCase()}_${id.padStart(6, '0')}@@`;
+      if (!allowed.has(canonical)) return raw;
+      if (canonical !== raw) repairs.push({ placeholder: canonical, kind: 'format' });
+      return canonical;
+    });
+  const values = new Map();
+  for (const item of expected) {
+    if (item.type === 'block' || !item.value) continue;
+    const count = values.get(item.value) ?? 0;
+    values.set(item.value, count + 1);
+  }
+  for (const item of expected) {
+    if (!item.value || item.type === 'block' || text.includes(item.placeholder)) continue;
+    if (values.get(item.value) !== 1 || occurrences(text, item.value) !== 1) continue;
+    text = text.replace(item.value, () => item.placeholder);
+    repairs.push({ placeholder: item.placeholder, kind: 'literal' });
+  }
+  return { text, repairs };
+}
+
+/** 仅按程序产生的边界切块；边界缺失时不能按译文段落数猜测对应关系。 */
+export function translationBlocks(source) {
+  const input = String(source ?? '');
+  const matches = [...input.matchAll(/@@DSH_BLOCK_\d{6}@@/gu)];
+  if (!matches.length) return [{ marker: '', body: input.trim(), source: input.trim() }];
+  const out = [];
+  if (input.slice(0, matches[0].index).trim()) out.push({ marker: '', body: input.slice(0, matches[0].index).trim(), source: input.slice(0, matches[0].index).trim() });
+  matches.forEach((match, index) => {
+    const end = matches[index + 1]?.index ?? input.length;
+    const body = input.slice(match.index + match[0].length, end).trim();
+    out.push({ marker: match[0], body, source: `${match[0]}\n${body}` });
+  });
+  return out;
+}
+
+/** 大块完整性失败后的段落恢复。边界由程序重建，只重译损坏段落。 */
+export async function recoverStructuredTranslation({ source, translation, placeholders = [], translateBlock, onAccepted, onProgress }) {
+  const blocks = translationBlocks(source);
+  const originalBlocks = translationBlocks(translation);
+  const originalMarkers = originalBlocks.map((b) => b.marker).filter(Boolean);
+  const expectedMarkers = blocks.map((b) => b.marker).filter(Boolean);
+  const aligned = JSON.stringify(originalMarkers) === JSON.stringify(expectedMarkers)
+    && originalBlocks.length === blocks.length;
+  const output = [];
+  let reusedBlocks = 0, translatedBlocks = 0;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    const frame = (text) => `${block.marker}${block.marker ? '\n' : ''}${text.trim()}`;
+    let candidate = aligned ? originalBlocks[index]?.body ?? '' : '';
+    const normalize = (value) => {
+      let text = String(value ?? '').replace(/@@DSH_BLOCK_\d{6}@@/gu, '').trim();
+      const heading = /^(#{1,6})\s/u.exec(block.body)?.[1];
+      if (heading && text && !/^#{1,6}\s/u.test(text)) text = `${heading} ${text}`;
+      const repaired = repairEquivalentPlaceholders(block.source, frame(text), placeholders);
+      return repairDuplicatePlaceholders(block.source, repaired.text, placeholders).text;
+    };
+    let framed = normalize(candidate);
+    let validation = validateTranslation(block.source, framed, placeholders);
+    const onlyTechnical = block.body.replace(PLACEHOLDER_RE, '').replace(/[\s*#>|-]/gu, '') === '';
+    if (onlyTechnical) {
+      framed = block.source; validation = { ok: true, errors: [], warnings: [] };
+    } else if (validation.ok && aligned) reusedBlocks += 1;
+    else {
+      onProgress?.({ index: index + 1, total: blocks.length });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await translateBlock({ ...block, index, total: blocks.length, attempt });
+        framed = normalize(result?.text ?? result);
+        validation = validateTranslation(block.source, framed, placeholders, { truncated: result?.truncated === true });
+        translatedBlocks += 1;
+        if (validation.ok) break;
+      }
+      if (!validation.ok) throw Object.assign(new Error(`第 ${index + 1} 段恢复未通过：${validation.errors.join(', ')}`), { validation });
+      await onAccepted?.({ ...block, text: framed });
+    }
+    output.push(framed);
+  }
+  const text = output.join('\n\n');
+  const validation = validateTranslation(source, text, placeholders);
+  return { text, validation, reusedBlocks, translatedBlocks };
+}
+
 /** 返回 errors（必须重译）与 warnings（记录但不阻断）。 */
 export function validateTranslation(source, translation, placeholders = [], options = {}) {
   const input = String(source ?? '');
@@ -559,25 +666,33 @@ export function validateTranslation(source, translation, placeholders = [], opti
     ? placeholders.filter((item) => input.includes(item.placeholder))
     : [...new Set(input.match(PLACEHOLDER_RE) ?? [])].map((placeholder) => ({ placeholder }));
   const sourcePlain = input.replace(PLACEHOLDER_RE, '').replace(/\s+/gu, '');
-  /*
-   * 公式占位符缺失分两种情况：
-   *   - 长块里缺几个公式：多为双栏抽取留下的碎片，模型按语义忽略它是合理的，
-   *     此时只记 warning（否则每块都要多花 2~3 倍 token 升级重译）；
-   *   - 短语块里缺公式：说明模型真的漏了内容，仍按错误处理。
-   * 引用/DOI/URL 缺失始终是错误——它们缺失通常意味着整段被跳过。
-   */
-  const formulaTolerant = sourcePlain.length >= 1500;
-  let droppedFormulas = 0;
+  // 不论正文长短，受保护的公式和结构标记都必须完整。
   for (const item of expected) {
     const count = occurrences(output, item.placeholder);
     if (count === 0) {
-      if (item.type === 'formula' && formulaTolerant) droppedFormulas += 1;
-      else errors.push(`missing-placeholder:${item.placeholder}`);
+      errors.push(`missing-placeholder:${item.placeholder}`);
     } else if (count !== 1) errors.push(`duplicate-placeholder:${item.placeholder}`);
   }
-  if (droppedFormulas > 0) warnings.push(`formula-dropped:${droppedFormulas}`);
+  for (const placeholder of new Set(output.match(PLACEHOLDER_RE) ?? [])) {
+    if (!input.includes(placeholder)) errors.push(`unexpected-placeholder:${placeholder}`);
+  }
+
+  const ordered = expected.filter((item) => ['block', 'formula'].includes(item.type))
+    .sort((a, b) => input.indexOf(a.placeholder) - input.indexOf(b.placeholder));
+  let previousPosition = -1;
+  for (const item of ordered) {
+    const position = output.indexOf(item.placeholder);
+    if (position >= 0 && position < previousPosition) errors.push(`structure-reordered:${item.placeholder}`);
+    if (position >= 0) previousPosition = position;
+    if (item.type === 'block' && item.heading && position >= 0) {
+      const headingText = output.slice(position + item.placeholder.length).split(/@@DSH_BLOCK_\d{6}@@/u)[0].trim();
+      if (!/^#{1,6}\s+\S/u.test(headingText)) errors.push(`heading-lost:${item.placeholder}`);
+    }
+  }
+  if (/\[章节：|===SEC:|\[原文第 \d+ 页\]|\[本页版面：/u.test(output)) errors.push('internal-layout-marker-leaked');
 
   const outputPlain = output.replace(PLACEHOLDER_RE, '').replace(/\s+/gu, '');
+  if (sourcePlain.length > 0 && outputPlain.length === 0) errors.push('empty-paragraph');
   if (sourcePlain.length > 300) {
     const ratio = outputPlain.length / sourcePlain.length;
     if (ratio < 0.12) errors.push(`output-too-short:${ratio.toFixed(2)}`);

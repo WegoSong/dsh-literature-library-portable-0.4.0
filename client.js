@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.5';
+    const PDFJS_REV = '0.6.6';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -2014,7 +2014,7 @@ window.__ModuleLoader__.load({
      * 翻译进度显示。优先显示**直连 API 任务**（`translate-job`）的真实进度与费用，
      * 没有直连任务时退回旧的 agent 会话进度。
      */
-    function TranslateProgress({ paper, progress, job, onOpen, onStartNow, startingNow }) {
+    function TranslateProgress({ paper, progress, job, onOpen, onStartNow, startingNow, onRetry, retrying }) {
       if (job) {
         const phase = job.phase;
         const metrics = translationUsage(job);
@@ -2022,7 +2022,9 @@ window.__ModuleLoader__.load({
           queued: job.stage || '排队中',
           running: job.stage || `翻译中 ${job.percent ?? 0}%`,
           done: '翻译完成',
-          failed: `翻译失败：${job.error ?? '未知原因'}`,
+          failed: /placeholder|structure-reordered|heading-lost|empty-paragraph|mostly-untranslated/iu.test(job.error ?? '')
+            ? '翻译未完成：部分内容校验失败，可重试续传'
+            : `翻译失败：${String(job.error ?? '未知原因').slice(0, 90)}`,
         }[phase] ?? phase;
         const cls = `ll-progress ll-progress-${phase === 'done' ? 'done' : phase === 'failed' ? 'failed' : 'running'}`;
         const metricTitle = [
@@ -2066,6 +2068,7 @@ window.__ModuleLoader__.load({
           ...metricTitle,
           job.outputPath ? `输出 ${job.outputPath}` : null,
           job.warning ? `⚠ ${job.warning}` : null,
+          job.error ? `失败详情：${job.error}` : null,
         ].filter(Boolean).join('\n');
         const hasUsage = metrics.input > 0 || metrics.output > 0 || metrics.retries > 0 || metrics.costCny !== null;
         const usageLabel = [
@@ -2088,6 +2091,11 @@ window.__ModuleLoader__.load({
               },
             })),
             h('span', { className: 'll-progress-text', key: 't' }, label),
+            phase === 'failed' && onRetry ? h('button', {
+              key: 'retry', className: 'll-btn ll-btn-xs', disabled: retrying,
+              title: '重试翻译，复用本版本已经校验通过的分块和段落',
+              onClick: (e) => { e.stopPropagation(); onRetry(); },
+            }, retrying ? '提交中…' : '重试') : null,
             job.schedule === 'offpeak' && ['queued', 'running'].includes(phase) && onStartNow
               ? h('button', {
                 key: 'now', className: 'll-btn ll-btn-xs', disabled: startingNow,
@@ -2324,6 +2332,7 @@ window.__ModuleLoader__.load({
                 key: 'pr', paper: p, progress: progressOf(p), job: jobOf(p),
                 onOpen: () => onSelect(p.slug),
                 onStartNow, startingNow: startingJob === jobOf(p)?.jobId,
+                onRetry: () => onTranslate(p), retrying: translating !== null,
               }),
             ]),
             // 置顶 / 更多。排序直接拖动整条文献。

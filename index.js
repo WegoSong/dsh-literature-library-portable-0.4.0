@@ -1951,6 +1951,8 @@ export function apply(ctx, config = {}) {
         script, pdfAbs,
         '--out', join(libraryRoot, 'extracted'),
         '--name', slug,
+        '--asset-prefix', `${libraryDir}/extracted/${slug}`,
+        '--file-route', `${prefix}/file`,
         '--no-json',
       ], { stdio: 'ignore', cwd: workspaceRoot });
 
@@ -1971,7 +1973,7 @@ export function apply(ctx, config = {}) {
     return {
       mdPath,
       md,
-      warning: '文本由 PDF 抽取而来；双栏版式的首页/摘要区可能仍有交织，请对照原文核对。',
+      warning: '独立公式优先保留原 PDF 局部图像；行内符号仍需结合原文核对。',
     };
   }
 
@@ -2215,7 +2217,7 @@ export function apply(ctx, config = {}) {
       slug: paper.slug,
     });
     if (extractedMetadata.titleEn) paper.titleEn ??= extractedMetadata.titleEn;
-    if (extractedMetadata.authors) paper.authors ??= extractedMetadata.authors;
+    if (extractedMetadata.authors && (!paper.authors || /^(?:原文标题|英文标题|PDF Subject)\s*[:：]/iu.test(paper.authors))) paper.authors = extractedMetadata.authors;
     if (extractedMetadata.year) paper.year ??= extractedMetadata.year;
     if (extractedMetadata.doi) paper.doi ??= extractedMetadata.doi;
     if (extractedMetadata.journal || extractedMetadata.issn) {
@@ -2236,17 +2238,18 @@ export function apply(ctx, config = {}) {
     if (prepared.stats.metadataChars) note(`出版元数据本地解析，少发送 ${prepared.stats.metadataChars} 字符`);
     if (prepared.stats.protectedItems) note(`已保护 ${prepared.stats.protectedItems} 个公式/引用/DOI/URL`);
 
-    const chunks = pipeline.chunkStructured(prepared.text, config.chunkTokens || 6000);
+    const targetChunkTokens = Math.min(Number(config.chunkTokens) || 3000, 3000);
+    const chunks = pipeline.chunkStructured(prepared.text, targetChunkTokens);
     if (chunks.length === 0) throw new Error('抽取后没有可翻译的内容');
     job.chunkTotal = chunks.length;
-    note(`按章节/段落切成 ${chunks.length} 块（目标 ${config.chunkTokens || 6000} token）`);
+    note(`按章节/段落切成 ${chunks.length} 块（目标 ${targetChunkTokens} token）`);
 
     const system = tools.buildSystemPrompt({
       roleHint: config.roleHint,
       extraRules: [
         config.extraRules,
         '输入中的 @@DSH_FORMULA_nnnnnn@@、@@DSH_CITATION_nnnnnn@@、@@DSH_DOI_nnnnnn@@、'
-          + '@@DSH_URL_nnnnnn@@ 是本地保护标记，必须逐字、逐个、原位置保留；不得翻译、改写、复制或遗漏。',
+          + '@@DSH_URL_nnnnnn@@、@@DSH_BLOCK_nnnnnn@@ 是本地保护标记，必须逐字、逐个、原位置保留；不得翻译、改写、复制或遗漏。',
       ].filter(Boolean).join('\n'),
     });
 
@@ -2348,7 +2351,7 @@ export function apply(ctx, config = {}) {
           Math.ceil(estimatedInput * pipeline.nextOutputRatio(level) + 768),
         );
         const canEnlarge = (currentCap) => capFor(budgetAttempt + 1) > Number(currentCap ?? 0) + 128;
-        const recordUsage = (usage, requestedAt) => {
+        const recordUsage = (usage, requestedAt, requestedModel = attempt.model) => {
           if (!usage) return;
           const requestPeriod = pipeline.isPeakShanghai(new Date(requestedAt)) ? 'peak' : 'offpeak';
           if (job.usages.length === 0) job.pricingPeriod = requestPeriod;
@@ -2356,7 +2359,7 @@ export function apply(ctx, config = {}) {
           job.usages.push({
             ...usage,
             requestedAt,
-            model: attempt.model,
+            model: requestedModel,
             reasoningEffort: attempt.reasoningEffort,
           });
           refreshUsage();
@@ -2420,8 +2423,9 @@ export function apply(ctx, config = {}) {
         }
         lastValidation = (() => {
           // 先做确定性修复（重复的引用标记），再校验：一个多余的 [12] 不值得整块重译。
+          const equivalent = pipeline.repairEquivalentPlaceholders(chunks[i], response.text, prepared.placeholders);
           const repaired = pipeline.repairDuplicatePlaceholders(
-            chunks[i], response.text, prepared.placeholders,
+            chunks[i], equivalent.text, prepared.placeholders,
           );
           if (repaired.repairs.length) {
             note(`第 ${i + 1} 块去重占位符 ${repaired.repairs.reduce((n, r) => n + r.removed, 0)} 处`);
@@ -2445,6 +2449,71 @@ export function apply(ctx, config = {}) {
         }
         job.validationFailures += 1;
         note(`第 ${i + 1} 块完整性校验未通过：${lastValidation.errors.join(', ')}`);
+        // 大块已产生译文但结构不完整时，逐段恢复而不是原样重复整个大请求。
+        if (qualityIndex === 0) {
+          try {
+            const recovered = await pipeline.recoverStructuredTranslation({
+              source: chunks[i], translation: responseText, placeholders: prepared.placeholders,
+              onProgress: ({ index, total }) => touch(`修复第 ${i + 1} 块：段落 ${index}/${total}`),
+              translateBlock: async (block) => {
+                await waitForOffpeak();
+                const paragraphKey = pipeline.chunkCacheKey({ source: block.source,
+                  promptVersion: `${pipeline.PIPELINE_VERSION}/paragraph`, model: job.model,
+                  reasoningEffort: job.reasoningEffort });
+                const paragraphFile = join(cacheDir, `${paragraphKey}.json`);
+                if (block.attempt === 0) {
+                  const cached = await readCachedChunk(paragraphFile, paragraphKey, block.source);
+                  if (cached) { job.localCacheHits += 1; return { text: cached }; }
+                }
+                job.retryCount += 1;
+                const paragraphModel = block.attempt > 0 && config.enableQualityEscalation !== false
+                  ? job.qualityModel : job.model;
+                const paragraphUser = tools.buildUserPrompt({
+                  chunk: block.body, index: block.index, total: block.total,
+                  title: paper.titleEn || paper.title, source: paper.source,
+                }) + '\n\n本次只翻译一个段落。不要生成 @@DSH_BLOCK@@ 边界；程序会自动补回。保留该段全部公式和引用保护标记。';
+                let transportRetry = 0;
+                while (true) {
+                  const at = new Date().toISOString();
+                  job.apiChunks += 1;
+                  try {
+                    const result = await tools.callDeepSeek({ baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
+                      apiKey, model: paragraphModel, system, user: paragraphUser,
+                      reasoningEffort: job.reasoningEffort,
+                      maxTokens: { min: Math.min(2048, job.maxTokens), max: job.maxTokens, inputRatio: 3.3, base: 768 },
+                      timeoutMs: config.requestTimeoutMs || 600000 });
+                    recordUsage(result.usage, at, paragraphModel);
+                    return result;
+                  } catch (err) {
+                    if (err?.usage) recordUsage(err.usage, at, paragraphModel);
+                    if (!isRetryable(err) || transportRetry >= transportRetries) throw err;
+                    transportRetry += 1; job.retryCount += 1;
+                    await wait(Math.min(8000, 1000 * (2 ** (transportRetry - 1))));
+                  }
+                }
+              },
+              onAccepted: async (block) => {
+                const key = pipeline.chunkCacheKey({ source: block.source,
+                  promptVersion: `${pipeline.PIPELINE_VERSION}/paragraph`, model: job.model,
+                  reasoningEffort: job.reasoningEffort });
+                await writeCachedChunk(join(cacheDir, `${key}.json`), { version: pipeline.PIPELINE_VERSION,
+                  key, text: block.text, createdAt: new Date().toISOString() });
+              },
+            });
+            lastValidation = recovered.validation;
+            if (lastValidation.ok) {
+              accepted = recovered.text.trim(); actualAttempt = attempt;
+              note(`第 ${i + 1} 块段落修复完成：复用 ${recovered.reusedBlocks} 段，补译请求 ${recovered.translatedBlocks} 次`);
+              break;
+            }
+          } catch (err) {
+            if (!err.validation) throw err;
+            lastValidation = err.validation;
+            note(`段落恢复失败：${err.message}`);
+          }
+          // 已经对损坏段落做了两次有界恢复，继续整块升级只会重复消耗。
+          break;
+        }
       }
 
       if (accepted === null) {
@@ -2477,11 +2546,14 @@ export function apply(ctx, config = {}) {
     const restoredParts = parts.map((part) => pipeline.restoreTechnicalTokens(
       part, prepared.placeholders,
     ).trim());
+    let translatedBody = restoredParts.join('\n\n');
+    const translatedTitle = /^#\s+(.+)$/mu.exec(translatedBody)?.[1];
+    if (translatedTitle) translatedBody = translatedBody.replace(/^#\s+.+\n*/mu, '').trim();
     job.charsOut = restoredParts.reduce((sum, part) => sum + part.length, 0) + prepared.references.length;
 
     // 合并并写入译稿
     const header = [
-      `# ${paper.titleZh ?? paper.title ?? job.slug}`,
+      `# ${translatedTitle ?? paper.titleZh ?? paper.title ?? job.slug}`,
       '',
       paper.titleEn ? `**原文标题**：${paper.titleEn}` : null,
       paper.authors ? `**作者**：${paper.authors}` : null,
@@ -2503,7 +2575,7 @@ export function apply(ctx, config = {}) {
     )) {
       references = `## References\n\n${references}`;
     }
-    const outputBody = [restoredParts.join('\n\n'), references].filter(Boolean).join('\n\n---\n\n');
+    const outputBody = [translatedBody, references].filter(Boolean).join('\n\n---\n\n');
 
     const outRel = job.outputPath;
     const outAbs = resolveInside(outRel) ?? resolve(join(libraryRoot, 'translations', job.slug, `${job.slug}.md`));
@@ -2543,7 +2615,7 @@ export function apply(ctx, config = {}) {
         slug: p.slug,
       });
       if (extractedMetadata.titleEn) p.titleEn ??= extractedMetadata.titleEn;
-      if (extractedMetadata.authors) p.authors ??= extractedMetadata.authors;
+      if (extractedMetadata.authors && (!p.authors || /^(?:原文标题|英文标题|PDF Subject)\s*[:：]/iu.test(p.authors))) p.authors = extractedMetadata.authors;
       if (extractedMetadata.year) p.year ??= extractedMetadata.year;
       if (extractedMetadata.doi) p.doi ??= extractedMetadata.doi;
       if (extractedMetadata.journal || extractedMetadata.issn) {
