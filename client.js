@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.11';
+    const PDFJS_REV = '0.6.12';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -341,8 +341,8 @@ window.__ModuleLoader__.load({
 .ll-md .ll-table-scroll table { min-width: var(--ll-table-min, 560px); }
 .ll-md figcaption { display: block; margin: .85em 0; font-family: Georgia, 'Noto Serif SC', 'Songti SC', SimSun, serif; font-style: italic; font-size: .9em; line-height: 1.6; color: #46515e; }
 .ll-root .ll-media-options { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; font-size:12px !important; line-height:1.4 !important; }
-.ll-root .ll-media-options label { display:inline-flex; align-items:center; gap:4px; font-size:12px !important; line-height:1.4 !important; margin:0 !important; white-space:nowrap; }
-.ll-root .ll-media-options input[type=checkbox] { width:13px !important; height:13px !important; min-height:13px !important; padding:0 !important; margin:0 !important; }
+.ll-root .ll-media-options label { display:inline-flex; align-items:center; gap:4px; max-width:100%; font-size:12px !important; line-height:1.4 !important; margin:0 !important; white-space:normal; }
+.ll-root .ll-media-options input[type=checkbox] { flex-shrink:0; width:13px !important; height:13px !important; min-height:13px !important; padding:0 !important; margin:0 !important; }
 .ll-md hr { border: 0; border-top: .5px solid var(--dsw-alias-border-l3); margin: 1.4em 0; }
 .ll-pane-translation .ll-md { color: var(--ll-paper-text); }
 .ll-pane-translation .ll-md h1,
@@ -1001,8 +1001,8 @@ window.__ModuleLoader__.load({
         if (typeof window !== 'undefined' && window.katex) { resolve(window.katex); return; }
 
         const sources = [
-          { label: 'CDN', base: `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist` },
           { label: '本地副本', local: true },
+          { label: 'CDN', base: `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist` },
         ];
 
         const injectCss = (href, cross) => {
@@ -2619,7 +2619,7 @@ window.__ModuleLoader__.load({
      * 但保留占位高度，所以滚动条不会跳动。父组件用 React.memo 包住它，
      * 页码变化时不会把 200 多页全部重渲染一遍。
      */
-    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式原图', table: '表格', figure:'图片',
+    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式', table: '表格', figure:'图片',
       title: '论文标题', 'front-matter': '作者信息', 'article-info': '文章信息', affiliation: '作者单位', publication: '出版信息',
       'running-matter': '页眉页脚', watermark: '忽略/水印' };
     const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
@@ -2683,6 +2683,7 @@ window.__ModuleLoader__.load({
       return h('div',{className:'ll-media-options'},[
         h('label',{key:'figures',title:'从 PDF 本地截图插入原图；只翻译图注，不翻译图内文字，不发送视觉 API'},[h('input',{key:'c',type:'checkbox',checked:value.figures===true,onChange:e=>onChange({...value,figures:e.target.checked})}),'插入图片']),
         h('label',{key:'tables',title:'按行列翻译单元格，会增加文本 token；关闭时只翻译表题'},[h('input',{key:'c',type:'checkbox',checked:value.tables===true,onChange:e=>onChange({...value,tables:e.target.checked})}),'翻译表格']),
+        h('label',{key:'formula',title:'公式始终优先输出 LaTeX；仅不确定时保留本地原图。关闭后显示待核对候选文本，不猜写缺失符号。'},[h('input',{key:'c',type:'checkbox',checked:value.formulaFallback!==false,onChange:e=>onChange({...value,formulaFallback:e.target.checked})}),'不确定公式用图片']),
       ]);
     }
     function LayoutControls({ slug, page, mode, schedule, media, view, setView, show, setShow, onJob }) {
@@ -2742,8 +2743,8 @@ window.__ModuleLoader__.load({
         ]),
         (error || s?.error || data?.stale) ? h('p', { key: 'err', role: 'alert', className: 'll-layout-error' }, error || (data.stale ? 'PDF 已变化，请重新分区' : s.error)) : null,
         ready ? h('div',{key:'media',className:'ll-layout-row'},[
-          h('span',{key:'current'},`此稿：图片${s.media?.figures?'开':'关'} · 表格${s.media?.tables?'开':'关'}`),
-          (s.needsRefresh || !!s.media?.figures!==!!media?.figures || !!s.media?.tables!==!!media?.tables) ? h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||view?.dirty,onClick:()=>act('set-media')},s.needsRefresh?'升级图表分区（保留人工框）':'应用图表选项（保留人工框）'):null,
+          h('span',{key:'current'},`此稿：图片${s.media?.figures?'开':'关'} · 表格${s.media?.tables?'开':'关'} · 公式原图兜底${s.media?.formulaFallback!==false?'开':'关'}`),
+          (s.needsRefresh || !!s.media?.figures!==!!media?.figures || !!s.media?.tables!==!!media?.tables || (s.media?.formulaFallback!==false)!==(media?.formulaFallback!==false)) ? h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||view?.dirty,onClick:()=>act('set-media')},s.needsRefresh?'升级公式/图表（保留人工框）':'应用输出选项（保留人工框）'):null,
         ]):null,
         ready && view?.page ? h('div', { key: 'tools' }, [
           h('div', { key: 'buttons', className: 'll-layout-row ll-layout-actions' }, [
@@ -2827,7 +2828,7 @@ window.__ModuleLoader__.load({
             ...[['start','分区选中'],['approve','确认已检查选中'],['translate','翻译已确认选中']].map(([action,label])=>h('button',{key:action,className:'ll-btn ll-btn-xs',disabled:busy || !chosen.size,onClick:()=>run(action)},label)),
           ]),
           h(MediaOptions,{key:'media',value:media,onChange:setMedia}),
-          h('p',{key:'hint',className:'ll-layout-hint'},'图表默认跳过内容、只译题注。图片本地截图，不译图内文字；表格翻译增加 token。分区串行执行，支持逐篇或批量确认。变更图表选项会保留人工框、重新抽取并要求确认。'),
+          h('p',{key:'hint',className:'ll-layout-hint'},'图片和表格默认只译题注。公式优先 LaTeX，不确定时原图兜底默认开启，可关闭改用待核对候选文本。图片不调用视觉 API，表格翻译增加文本 token。变更选项保留人工框、重新抽取并要求确认。'),
           notice ? h('p',{key:'notice',role:'status'},notice):null,
         ]),
         h('div',{key:'list',className:'ll-modal-body'},candidates.map(p=>{
@@ -3844,7 +3845,7 @@ window.__ModuleLoader__.load({
         try { const m=localStorage.getItem('dsh-literature-library/layout-mode'); return ['auto','semi','manual'].includes(m)?m:'semi'; } catch {return 'semi';}
       });
       const setLayoutMode = m => { changeLayoutMode(m); try {localStorage.setItem('dsh-literature-library/layout-mode',m);} catch {} };
-      const [media,setMediaState]=React.useState(()=>{try{const v=JSON.parse(localStorage.getItem('dsh-literature-library/media-v1')||'{}');return {figures:v.figures===true,tables:v.tables===true};}catch{return {figures:false,tables:false};}});
+      const [media,setMediaState]=React.useState(()=>{try{const v=JSON.parse(localStorage.getItem('dsh-literature-library/media-v1')||'{}');return {figures:v.figures===true,tables:v.tables===true,formulaFallback:v.formulaFallback!==false};}catch{return {figures:false,tables:false,formulaFallback:true};}});
       const setMedia=value=>{setMediaState(value);try{localStorage.setItem('dsh-literature-library/media-v1',JSON.stringify(value));}catch{}};
       const [selectedFolder, setSelectedFolder] = React.useState(null);
       const [busy, setBusy] = React.useState(null);

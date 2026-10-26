@@ -279,11 +279,13 @@ export function removeRepeatedPageFurniture(text) {
     const end = index + 1 < matches.length ? matches[index + 1].index : value.length;
     const raw = value.slice(start, end);
     const lines = raw.split('\n');
+    const protectedLines=new Set();let formula=false;
+    lines.forEach((line,i)=>{if(line.includes('<!--DSH_UNCERTAIN_FORMULA-->'))formula=true;if(formula)protectedLines.add(i);if(line.includes('<!--/DSH_UNCERTAIN_FORMULA-->'))formula=false;});
     const candidates = lines
       .map((line, lineIndex) => ({ line, lineIndex, norm: normalizeLine(line) }))
-      .filter((item) => item.norm && !/^===/u.test(item.norm));
+      .filter((item) => item.norm && !/^===/u.test(item.norm)&&!protectedLines.has(item.lineIndex));
     const edge = [...candidates.slice(0, 4), ...candidates.slice(-4)];
-    return { raw, lines, edge };
+    return { raw, lines, edge, protectedLines };
   });
 
   const seen = new Map();
@@ -301,7 +303,8 @@ export function removeRepeatedPageFurniture(text) {
   if (!repeated.size) return { text: value, removedLines: 0 };
 
   let removedLines = 0;
-  const rebuilt = pages.map((page) => page.lines.filter((line) => {
+  const rebuilt = pages.map((page) => page.lines.filter((line,index) => {
+    if(page.protectedLines.has(index))return true;
     if (!repeated.has(normalizeLine(line))) return true;
     removedLines += 1;
     return false;
@@ -375,6 +378,9 @@ function replaceFormulas(value, regex, placeholders) {
 export function protectTechnicalTokens(text) {
   let value = String(text ?? '');
   const placeholders = [];
+  // Keep the uncertainty notice attached to its candidate. A translator must
+  // never remove the warning while retaining a plausible-looking formula.
+  value=replaceMatches(value,/<!--DSH_UNCERTAIN_FORMULA-->[\s\S]*?<!--\/DSH_UNCERTAIN_FORMULA-->/gu,'FORMULA',placeholders);
 
   // 本地公式截图只传短标记，不上传图片，不消耗视觉 token。
   value = replaceMatches(value, /!\[原文(?:公式|图片)[^\]]*\]\([^\n)]+\)/gu, 'FORMULA', placeholders);

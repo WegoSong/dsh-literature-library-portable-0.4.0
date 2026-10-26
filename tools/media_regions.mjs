@@ -1,7 +1,7 @@
 /** Native PDF objects stay out of the prose stream, even when inclusion is off. */
 import { itemBox, unionBoxes } from './page_regions.mjs';
-export const MEDIA_POLICY = 'native-media-v1';
-export const mediaOptions = value => ({ figures: value?.figures === true, tables: value?.tables === true });
+export const MEDIA_POLICY = 'native-media-v2-latex-first';
+export const mediaOptions = value => ({ figures: value?.figures === true, tables: value?.tables === true, formulaFallback:value?.formulaFallback!==false });
 const inside = (i,b) => {const a=itemBox(i),x=(a[0]+a[2])/2,y=(a[1]+a[3])/2;return x>=b[0]&&x<=b[2]&&y>=b[1]&&y<=b[3];};
 const mult=(m,n)=>[m[0]*n[0]+m[2]*n[1],m[1]*n[0]+m[3]*n[1],m[0]*n[2]+m[2]*n[3],m[1]*n[2]+m[3]*n[3],m[0]*n[4]+m[2]*n[5]+m[4],m[1]*n[4]+m[3]*n[5]+m[5]];
 const box=(b,m)=>unionBoxes([[b[0],b[1]],[b[0],b[3]],[b[2],b[1]],[b[2],b[3]]].map(([x,y])=>{const a=m[0]*x+m[2]*y+m[4],c=m[1]*x+m[3]*y+m[5];return[a,c,a,c];}));

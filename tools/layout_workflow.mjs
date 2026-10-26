@@ -181,7 +181,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     const s = await read(slug);
     if (!s) return null; // Legacy callers retain the automatic preflight below.
     await current(s);
-    if(s.preparationPolicy!==MEDIA_POLICY)fail('图表处理已升级，请先应用图表选项重新抽取并确认；不会自动重新付费翻译。');
+    if(s.preparationPolicy!==MEDIA_POLICY)fail('公式/图表处理已升级，请先应用输出选项重新抽取并确认；不会自动重新付费翻译。');
     if (pending.has(slug) || s.phase !== 'approved') fail('请先完成分区预览与确认，再翻译');
     if (s.preparedRevision !== s.revision) fail('分区与抽取稿版本不一致，请重新检查');
     if (!s.mdHash) fail('分区尚未生成可翻译文本');
@@ -192,7 +192,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     if (!s) return null;
     const md = await readFile(s.mdPath, 'utf8');
     if (digest(md) !== s.mdHash) fail('抽取稿已变化，请重新分区并确认');
-    return { md, mdPath: s.mdPath, warning: '按已确认分区翻译；公式保留原 PDF 局部图像。',
+    return { md, mdPath: s.mdPath, warning: `按已确认分区翻译；公式优先 LaTeX，${mediaOptions(s.media).formulaFallback?'不确定时原图兜底':'不确定时保留待核对候选文本，不使用图片'}。`,
       layout: { version: (await layout(s)).version, coverage: s.coverage.sourceItems,
         reviewPages: [...new Set((s.warnings || []).map(w => w.page))], revision: s.revision } };
   }

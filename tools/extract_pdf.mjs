@@ -23,9 +23,11 @@ import { dirname, join, resolve, basename, extname } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
+import vm from 'node:vm';
 import { REGION_VERSION, itemBox, unionBoxes, detectShadedPanels, identifyPageRegions, auditCoverage } from './page_regions.mjs';
 import { ARTICLE_ROLES } from './manual_regions.mjs';
 import { MEDIA_POLICY, mediaOptions, pageGraphics, identifyMedia, tableGrid, markdownTable } from './media_regions.mjs';
+import { readMathGlyphs, reconstructFormula } from './formula_latex.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = resolve(HERE, '..');
@@ -50,6 +52,7 @@ function parseArgs(argv) {
     else if (a === '--raw-layout') args.rawLayout = true;
     else if (a === '--include-figures') args.figures = true;
     else if (a === '--translate-tables') args.tables = true;
+    else if (a === '--no-formula-images') args.formulaFallback = false;
     else if (a === '--help' || a === '-h') args.help = true;
     else args.positional.push(a);
   }
@@ -63,6 +66,7 @@ const USAGE = `用法: node tools/extract_pdf.mjs <input.pdf> [选项]
   --name <slug>   输出文件名前缀（默认取 PDF 文件名）
   --pages <范围>  只处理指定页，如 1-4 或 1,3,5
   --no-json       不输出结构化 JSON
+  --no-formula-images  公式优先 LaTeX；关闭不确定公式的原图兜底，保留待核对候选文本
   --debug-cols    打印版面划分诊断
   --preview-pages <范围>  输出指定页的区域框 PNG 与阅读顺序报告（本地，无 API）
   -h, --help      显示帮助`;
@@ -1142,7 +1146,7 @@ function splitWidthTransitions(group, width) {
   return result;
 }
 
-/** PDF 的分式、根号和矩阵并非线性文本。保留原页局部图像，避免凭残片编造 LaTeX。 */
+/** Keep native ownership/crops until unmerged glyphs can reconstruct the math. */
 function markFormulaRegions(lines, { left, right, page }) {
   const mathLike = (line) => {
     const text = line.text.normalize('NFKC');
@@ -1180,7 +1184,7 @@ async function renderFormulaSources(doc, result, opts) {
   } catch { /* 没有原生渲染器时明确提示，不把损坏文本伪装成公式。 */ }
   let sequence = 0, figureSequence = 0;
   for (const page of result.pages) {
-    const formulas = page.paragraphs.filter((p) => p.type === 'formula-source' || p.type === 'figure' && !p.omitted);
+    const formulas = page.paragraphs.filter((p) => p.type === 'formula-source' && !p.formula?.reliable && opts.formulaFallback!==false || p.type === 'figure' && !p.omitted);
     if (!formulas.length) continue;
     let sourcePage;
     if (createCanvas) sourcePage = await doc.getPage(page.page);
@@ -1212,6 +1216,32 @@ async function renderFormulaSources(doc, result, opts) {
   }
   result.stats.formulaSources = sequence;
   result.stats.figureSources = figureSequence;
+}
+
+async function resolveFormulaSources(doc,result,cache,opts){
+ let converted=0,uncertain=0;
+ let validator;
+ try{const module={exports:{}};vm.runInNewContext(await readFile(join(HERE,'../vendor/katex.min.js'),'utf8'),{module,exports:module.exports});validator=module.exports;}
+ catch{/* Missing validator must not turn an unrenderable candidate into a confirmed formula. */}
+ for(const p of result.pages){
+  const formulas=p.paragraphs.filter(b=>b.type==='formula-source');if(!formulas.length)continue;
+  const pc=cache.find(c=>c.p===p.page),page=await doc.getPage(p.page);
+  let glyphs=[],error=null;
+  try{glyphs=await readMathGlyphs(page,(await loadPdfjs()).OPS,formulas.map(f=>f.crop));}
+  catch{error='native-glyph-decoding-unavailable';}
+  for(const f of formulas){
+   f.formula=error?{latex:'',reliable:false,reasons:[error]}:reconstructFormula({glyphs,items:pc.rawItems.filter(i=>f.sourceIds.includes(i.sourceId)),paths:pc.graphics.paths,crop:f.crop});
+   if(f.formula.reliable){
+    try{if(!validator)throw new Error('validator unavailable');validator.renderToString(f.formula.latex,{throwOnError:true,displayMode:true,strict:false});}
+    catch{f.formula.reliable=false;f.formula.reasons.push('latex-render-check-failed');}
+   }
+   f.formula.format=f.formula.reliable?'latex':opts.formulaFallback!==false?'image':'unverified-text';
+   if(f.formula.reliable)converted++;
+   else{uncertain++;pc.warnings.push(`formula-review: ${f.formula.reasons.join(',')} (${f.formula.format})`);}
+  }
+  page.cleanup();
+ }
+ result.stats.formulaLatex=converted;result.stats.formulaUncertain=uncertain;
 }
 
 function nativeCanvas(width, height) {
@@ -1502,16 +1532,18 @@ async function extract(pdfPath, opts) {
     throw new Error(`版面完整性校验失败，停止翻译；见 ${opts.name}.layout-error.json`);
   }
   out.stats.paragraphs = out.pages.reduce((n, p) => n + p.paragraphs.length, 0);
+  await resolveFormulaSources(doc,out,pageCache,opts);
   const previews = await renderLayoutPreviews(doc, pageCache, opts);
   out.layout = { version: REGION_VERSION, mediaPolicy: MEDIA_POLICY, media: mediaOptions(opts), sourceHash: opts.sourceHash, coverage, previews,
     warnings: pageCache.flatMap(pc => pc.warnings.map(message => ({ page: pc.p, message }))),
     blockingWarnings: pageCache.flatMap(pc => pc.warnings.filter(message => message.startsWith('unresolved-')).map(message => ({ page: pc.p, message }))),
     blocks: out.pages.flatMap(p => p.paragraphs.map((block, index) => ({ id: `p${p.page}-b${index + 1}`, type: block.type,
-      anchorPage: p.page, sourcePages: block.sourcePages, itemIds: block.sourceIds, text: block.text }))),
+      anchorPage: p.page, sourcePages: block.sourcePages, itemIds: block.sourceIds, text: block.text, ...(block.formula?{formula:block.formula}:{}) }))),
     pages: pageCache.map(pc => ({ page: pc.p, width: pc.width, height: pc.height, regions: pc.regions,
       items: pc.rawItems.filter(i => i.str.trim()).map(i => ({ id: i.sourceId, text: i.str, bbox: itemBox(i) })),
       readingOrder: pc.regions.filter(r => r.flow === 'article').sort((a, b) => a.order - b.order).map(r => r.id) })) };
   await renderFormulaSources(doc, out, opts);
+  out.layout.formulas={latex:out.stats.formulaLatex,uncertain:out.stats.formulaUncertain,images:out.stats.formulaSources,imageFallback:opts.formulaFallback!==false};
   await task.destroy();
   out.stats.bodySize = Number(bodySize.toFixed(2));
   out.stats.bodyLeft = Number(bodyLeft.toFixed(1));
@@ -1562,7 +1594,7 @@ function renderMarkdown(result) {
     L.push('');
     for (const p of page.paragraphs) {
       const text = p.text.trim();
-      if (!text) continue;
+      if (!text&&p.type!=='formula-source') continue;
       if (p.section) L.push(`===SEC:${p.section}===`);
       if(p.type==='table') {
         if(!p.omitted) L.push('===TABLE:BEGIN===',markdownTable(p.rows),'===TABLE:END===');
@@ -1572,8 +1604,14 @@ function renderMarkdown(result) {
         else if(!p.omitted)throw new Error(`第 ${page.page} 页图片截图失败，请关闭图片选项或重新分区。`);
       }
       else if (p.type === 'formula-source') {
-        if (p.image) L.push(`![原文公式（第 ${page.page} 页）](${p.image})`);
-        else L.push(`> **公式抽取需核对（原文第 ${page.page} 页）**：请查看原 PDF，本段不自动重建公式。`);
+        if(p.formula?.reliable)L.push(`$$${p.formula.latex}$$`);
+        else if (p.image) L.push(`![原文公式（第 ${page.page} 页，识别不确定时保留原图）](${p.image})`);
+        else{
+          L.push('<!--DSH_UNCERTAIN_FORMULA-->','',`> **公式待核对（原文第 ${page.page} 页）**：已关闭原图兜底；以下是原始抽取文字，不是已核对公式。缺失符号以问号标出，请对照 PDF。`,'');
+          if(text)L.push('```text',text.replace(/[\u0000\ufffd]/gu,'?').replace(/```/gu,'\u02cb\u02cb\u02cb'),'```');
+          else L.push('本区域没有可用的原生公式文字，请对照 PDF。');
+          L.push('','<!--/DSH_UNCERTAIN_FORMULA-->');
+        }
       }
       else if (p.type === 'heading') L.push(`## ${text}`);
       else if (p.type === 'equation') L.push(`$$${text}$$`);
@@ -1593,6 +1631,7 @@ function renderReport(result) {
   L.push(`判定为双栏的页: ${twoCol} / ${result.stats.pagesProcessed}`);
   L.push(`正文字号估计: ${result.stats.bodySize}pt，正文x范围: ${result.stats.bodyLeft} ~ ${result.stats.bodyRight}`);
   L.push(`段落总数: ${result.stats.paragraphs}`);
+  L.push(`公式: LaTeX ${result.stats.formulaLatex||0}，待核对 ${result.stats.formulaUncertain||0}，原图兜底 ${result.stats.formulaSources||0}`);
   L.push(`区域版本: ${result.layout.version}，原文文字项覆盖: ${result.layout.coverage.sourceItems}，完整性: ${result.layout.coverage.ok ? '通过' : '失败'}`);
   for (const warning of result.layout.warnings) L.push(`待核对 p${warning.page}: ${warning.message}`);
   L.push('');

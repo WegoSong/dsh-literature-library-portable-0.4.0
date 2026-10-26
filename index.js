@@ -1967,6 +1967,7 @@ export function apply(ctx, config = {}) {
     if (options.rawLayout) extraArgs.push('--raw-layout');
     if (options.media?.figures === true) extraArgs.push('--include-figures');
     if (options.media?.tables === true) extraArgs.push('--translate-tables');
+    if (options.media?.formulaFallback === false) extraArgs.push('--no-formula-images');
 
     const { spawn } = await import('node:child_process');
     await new Promise((resolvePromise, rejectPromise) => {
@@ -2013,7 +2014,7 @@ export function apply(ctx, config = {}) {
       layoutPath,
       md,
       layout,
-      warning: '独立公式优先保留原 PDF 局部图像；行内符号仍需结合原文核对。'
+      warning: `公式优先输出 LaTeX；${options.media?.formulaFallback===false?'不确定公式保留待核对候选文本，不使用图片':'仅不确定公式保留原 PDF 局部图像'}。`
         + (layout?.reviewPages.length ? ` 第 ${layout.reviewPages.join('、')} 页包含需核对的版面推断，见版面检查报告。` : ''),
     };
   }
@@ -2987,19 +2988,22 @@ export function apply(ctx, config = {}) {
         }
 
         // 插件自带的静态资源（目前是 KaTeX 的本地副本，供 CDN 不可达时兜底）
-        if (sub === 'vendor') {
+        if (sub === 'vendor' || sub.startsWith('vendor/')) {
           if (req.method !== 'GET' && req.method !== 'HEAD') { sendJson(res, 405, { error: 'method-not-allowed' }); return; }
-          const name = url.searchParams.get('name') ?? '';
+          const name = sub === 'vendor' ? url.searchParams.get('name') ?? '' : sub.slice('vendor/'.length);
           // 只允许白名单文件名——绝不把任意路径拼进来
           const allowed = { 'katex.min.js': 'text/javascript; charset=utf-8', 'katex.min.css': 'text/css; charset=utf-8' };
-          const type = allowed[name];
+          const type = allowed[name] || (/^fonts\/KaTeX_[A-Za-z0-9_-]+\.woff2$/u.test(name) ? 'font/woff2' : null);
           if (!type) { sendJson(res, 404, { error: 'vendor-not-allowed', name }); return; }
           const abs = join(fileURLToPath(new URL('.', import.meta.url)), 'vendor', name);
           if (!existsSync(abs)) {
             sendJson(res, 404, { error: 'vendor-missing', name, hint: `请把 ${name} 放到插件的 vendor/ 目录` });
             return;
           }
-          const body = await readFile(abs);
+          let body = await readFile(abs);
+          // The legacy ?name= CSS route resolves relative font URLs incorrectly.
+          // Serve all fonts through the same restricted local vendor route.
+          if(name==='katex.min.css')body=Buffer.from(body.toString('utf8').replace(/url\(fonts\/(KaTeX_[A-Za-z0-9_-]+\.woff2)\)/gu,`url(${prefix}/vendor/fonts/$1)`));
           res.writeHead(200, { 'content-type': type, 'content-length': body.length, 'cache-control': 'no-store' });
           res.end(req.method === 'HEAD' ? undefined : body);
           return;
