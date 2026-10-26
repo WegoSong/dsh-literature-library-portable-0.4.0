@@ -24,6 +24,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { REGION_VERSION, itemBox, unionBoxes, detectShadedPanels, identifyPageRegions, auditCoverage } from './page_regions.mjs';
+import { ARTICLE_ROLES } from './manual_regions.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = resolve(HERE, '..');
@@ -44,6 +45,8 @@ function parseArgs(argv) {
     else if (a === '--debug-cols') args.debugCols = true;
     else if (a === '--dump-layout') { args.dumpLayout = true; args.debugCols = true; }
     else if (a === '--preview-pages') args.previewPages = argv[++i];
+    else if (a === '--overrides') args.overrides = argv[++i];
+    else if (a === '--raw-layout') args.rawLayout = true;
     else if (a === '--help' || a === '-h') args.help = true;
     else args.positional.push(a);
   }
@@ -983,6 +986,20 @@ function collectPublicationMetadata(pageCache, source) {
 
 function extractPageParagraphs(pc, furniture, ctx, opts, out) {
   const { bodyLeft, bodyRight, bodySize } = ctx;
+  if (pc.manual) {
+    out.stats.columns.push({ page: pc.p, columns: 1 });
+    return pc.regions.filter(r => ARTICLE_ROLES.includes(r.role)).sort((a,b) => a.order-b.order).flatMap(r => {
+      const lines = pc.lines.filter(l => l.manualRegion === r.id).sort((a,b) => b.y-a.y || a.x0-b.x0);
+      const sourceIds = r.itemIds, sourcePages = [pc.p], flowId = r.role === 'body' ? 'body' : `manual-${pc.p}-${r.id}`;
+      const text = lines.map(l => l.text).join(' ');
+      if (r.role === 'formula') return [{ type: 'formula-source', text, sourceIds, sourcePages, flowId,
+        crop: { page: pc.p, left: r.bbox[0], bottom: r.bbox[1], right: r.bbox[2], top: r.bbox[3] } }];
+      if (r.role === 'heading' || r.role === 'caption') return [{ type: r.role, text, sourceIds, sourcePages, flowId }];
+      const safe = markFormulaRegions(lines, { left: r.bbox[0], right: r.bbox[2], page: pc.p });
+      const paras = linesToParagraphs(safe, { bodyLeft: r.bbox[0], bodyRight: r.bbox[2], bodySize, role: r.role, page: pc.p });
+      return paras.map(p => ({ ...p, flowId }));
+    });
+  }
 
   const { kept: cleaned, dropped } = stripRunningHeads(pc.lines, pc.height, pc.p, furniture, pc.bodyLines.length);
   for (const d of dropped) out.dropped.push(d);
@@ -1253,6 +1270,8 @@ async function extract(pdfPath, opts) {
 
   // 第一趟：抽取文本，区分正文区与页眉页脚区
   const pageCache = [];
+  const overrides = opts.overrides ? JSON.parse(await readFile(opts.overrides, 'utf8')) : null;
+  if (overrides && overrides.sourceHash !== opts.sourceHash) throw new Error('人工分区已过期：PDF 内容已更改');
   for (let p = 1; p <= total; p += 1) {
     if (wanted && !wanted.has(p)) continue;
     const page = await doc.getPage(p);
@@ -1270,22 +1289,30 @@ async function extract(pdfPath, opts) {
       finally { if (rendered) { rendered.canvas.width = 0; rendered.canvas.height = 0; } }
     }
     const semantic = identifyPageRegions(originalItems, { page: p, width: vp.width, height: vp.height, panels });
+    const manual = overrides?.pages?.[p];
+    if (manual) {
+      semantic.regions = manual;
+      const owners = new Map(manual.flatMap(r => r.itemIds.map(id => [id, r.id])));
+      for (const item of semantic.items) item.regionId = owners.get(item.sourceId);
+      semantic.warnings = [];
+    }
     const rawItems = semantic.items, lines = [];
     // Build text independently inside each identified region. Once two native PDF
     // items have been fused across a panel edge, no later prompt can undo it.
-    const bundles = [...semantic.regions.map(r => ({ role: r.role, items: rawItems.filter(i => i.regionId === r.id) })),
+    const bundles = [...semantic.regions.map(r => ({ id: r.id, role: r.role, items: rawItems.filter(i => i.regionId === r.id) })),
       { role: 'body', items: rawItems.filter(i => !i.regionId) }];
     for (const bundle of bundles) {
       if (bundle.role === 'watermark') continue;
-      const rawColumns = bundle.role === 'abstract' ? { columns: 1 } : detectColumns(bundle.items.filter(i => i.str.length > 35
+      const rawColumns = manual || bundle.role === 'abstract' ? { columns: 1 } : detectColumns(bundle.items.filter(i => i.str.length > 35
         && i.width < vp.width * 0.62 && i.height > 5).map(i => ({ x0: i.transform[4], x1: i.transform[4] + i.width })), vp.width);
       const gutter = rawColumns.columns === 2 ? { start: rawColumns.gutterStart, end: rawColumns.gutterEnd } : null;
       const debug = { dumpLayout: opts.dumpLayout, page: p, pageWidth: vp.width, gutter };
-      lines.push(...groupLines(buildRuns(bundle.items, debug), debug).filter(l => l.text.trim()).map(l => ({ ...l, regionRole: bundle.role })));
+      lines.push(...groupLines(buildRuns(bundle.items, debug), debug).filter(l => l.text.trim()).map(l => ({ ...l, regionRole: bundle.role, manualRegion: bundle.id })));
     }
     const abstract = p === 1 ? lines.find((l) => /^abstract$/iu.test(l.text.trim())) : null;
-    const frontLines = lines.filter(l => !['body', 'abstract'].includes(l.regionRole)
-      || abstract && l.y > abstract.y + 2 && l.regionRole !== 'abstract');
+    const frontLines = manual ? lines.filter(l => !ARTICLE_ROLES.includes(l.regionRole))
+      : lines.filter(l => !['body', 'abstract'].includes(l.regionRole)
+        || abstract && l.y > abstract.y + 2 && l.regionRole !== 'abstract');
     const topEdge = vp.height * 0.925;
     const bottomEdge = vp.height * 0.075;
     const inZone = (l) => l.y >= topEdge || l.y <= bottomEdge;
@@ -1296,6 +1323,7 @@ async function extract(pdfPath, opts) {
       lines,
       frontLines,
       rawItems,
+      manual: !!manual,
       regions: semantic.regions,
       warnings: [...semantic.warnings, ...(panelWarning ? [panelWarning] : []),
         ...(page.rotate % 360 ? ['unresolved-page-rotation: rotated page coordinates require review'] : []),
@@ -1304,6 +1332,22 @@ async function extract(pdfPath, opts) {
       zoneLines: lines.filter(inZone),
     });
     page.cleanup();
+  }
+
+  // Manual mode can always expose native text geometry, even when automatic
+  // paragraph reconstruction fails. Scans without native text remain unsupported.
+  if (opts.rawLayout) {
+    for (const pc of pageCache) {
+      const claimed = new Set(pc.regions.flatMap(r => r.itemIds));
+      const rest = pc.rawItems.filter(i => i.str.trim() && !claimed.has(i.sourceId));
+      if (rest.length) pc.regions.push({ id: `p${pc.p}-raw-body`, role: 'body', bbox: unionBoxes(rest.map(itemBox)),
+        itemIds: rest.map(i => i.sourceId), flow: 'article', order: 1, confidence: 'unreviewed' });
+    }
+    out.layout = { version: REGION_VERSION, sourceHash: opts.sourceHash, coverage: { ok: false }, previews: [],
+      warnings: [], blockingWarnings: [], blocks: [], pages: pageCache.map(pc => ({ page: pc.p, width: pc.width, height: pc.height,
+        regions: pc.regions, items: pc.rawItems.filter(i => i.str.trim()).map(i => ({ id: i.sourceId, text: i.str, bbox: itemBox(i) })) })) };
+    await task.destroy();
+    return out;
   }
 
   // 正文字号：正文区里较长行的中位数
@@ -1560,6 +1604,10 @@ async function main() {
 
   const started = Date.now();
   const result = await extract(pdfPath, args);
+  if (args.rawLayout) {
+    await writeFile(join(outDir, `${slug}.layout.json`), JSON.stringify(result.layout), 'utf8');
+    return;
+  }
   const md = renderMarkdown(result);
 
   await writeFile(join(outDir, `${slug}.md`), md, 'utf8');

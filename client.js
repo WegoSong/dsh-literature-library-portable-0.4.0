@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.6.8';
+    const PDFJS_REV = '0.6.9';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -741,6 +741,24 @@ window.__ModuleLoader__.load({
 }
 /* PDF.js 阅读器：工具条与译文第 2 行同高，正文用 canvas 自己画 */
 .ll-pdf-viewer { flex: auto; min-height: 0; display: flex; flex-direction: column; }
+.ll-layout-controls { flex: none; max-height: 38vh; overflow: auto; padding: 8px 10px; border-bottom: 1px solid var(--ll-soft-border); background: var(--ll-panel-bg); color: var(--ll-text); font-size: 12px; }
+.ll-layout-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.ll-layout-row input[type=number] { width: 58px; margin-left: 3px; }
+.ll-layout-row select { max-width: 100%; }
+.ll-layout-hint { margin: 6px 0; color: var(--ll-muted); font-size: 12px; line-height: 1.5; }
+.ll-layout-error { margin: 6px 0; color: #c04d43; overflow-wrap: anywhere; }
+.ll-layout-region-list { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.ll-layout-region-list [aria-pressed=true] { outline: 2px solid var(--ll-accent); }
+.ll-region-overlay { position: absolute; inset: 0; z-index: 6; user-select: none; }
+.ll-region-box { position: absolute; border: 1.5px solid #1477b8; background: rgba(20,119,184,.055); box-sizing: border-box; cursor: move; }
+.ll-region-box[data-role=abstract] { border-color: #9c6011; background: rgba(156,96,17,.06); }
+.ll-region-box[data-role=publication], .ll-region-box[data-role=front-matter], .ll-region-box[data-role=article-info], .ll-region-box[data-role=affiliation], .ll-region-box[data-role=running-matter], .ll-region-box[data-role=watermark] { border-color: #646464; background: rgba(90,90,90,.06); }
+.ll-region-box.is-selected { outline: 2px solid #111; }
+.ll-region-label { position: absolute; left: 0; top: 0; background: #fff; color: #111; font: 11px/16px system-ui,sans-serif; padding: 0 3px; white-space: nowrap; pointer-events: none; }
+.ll-region-handle { position: absolute; right: -4px; bottom: -4px; width: 10px; height: 10px; background: #1477b8; border: 1px solid white; cursor: nwse-resize; }
+.ll-layout-queue-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--ll-soft-border); font-size: 13px; }
+.ll-layout-queue-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.ll-layout-queue-title span { font-size: 12px; color: var(--ll-muted); }
 .ll-pdf-tools { flex: none; }
 .ll-page-input {
   flex: none; width: 44px; box-sizing: border-box; padding: 2px 3px;
@@ -891,6 +909,16 @@ window.__ModuleLoader__.load({
     transition-duration: .001ms !important;
   }
 }
+/* Flat reader chrome; empty translation pages still need paper-colour text. */
+.ll-root { font-variant-numeric: tabular-nums; }
+.ll-nav-head { background: var(--ll-nav-head-bg); }
+.ll-head, .ll-head.ll-head-compact { background: var(--ll-head-bg); }
+.ll-btn, .ll-tab { box-shadow: none; }
+.ll-root button.ll-item { box-shadow: none; }
+.ll-root .ll-item.active:not(.ll-drop-before):not(.ll-drop-after) { box-shadow: none; }
+.ll-item.active .ll-item-journal { color: var(--ll-muted); }
+.ll-pane-body .ll-empty strong { color: var(--ll-paper-text); }
+.ll-modal-bg { backdrop-filter: none; }
 `;
 
     function injectCss() {
@@ -2541,9 +2569,217 @@ window.__ModuleLoader__.load({
      * 但保留占位高度，所以滚动条不会跳动。父组件用 React.memo 包住它，
      * 页码变化时不会把 200 多页全部重渲染一遍。
      */
+    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式原图', table: '表格文字',
+      title: '论文标题', 'front-matter': '作者信息', 'article-info': '文章信息', affiliation: '作者单位', publication: '出版信息',
+      'running-matter': '页眉页脚', watermark: '忽略/水印' };
+    const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
+    function RegionOverlay({ viewport, view, setView }) {
+      const drag = React.useRef(null);
+      if (!viewport || !view?.page) return null;
+      const regions = view.page.regions;
+      const point = e => {
+        // Selection fields and the unsaved notice may change toolbar height.
+        // Keep the pointer's coordinate frame fixed for this gesture.
+        const b = drag.current?.rect || e.currentTarget.getBoundingClientRect();
+        const [x,y] = viewport.convertToPdfPoint((e.clientX-b.left)*viewport.width/b.width, (e.clientY-b.top)*viewport.height/b.height);
+        return [Math.max(0,Math.min(view.page.width,x)), Math.max(0,Math.min(view.page.height,y))];
+      };
+      const begin = (e, r, resize) => {
+        if (!view.editing) return;
+        e.preventDefault(); e.stopPropagation();
+        const layer = e.currentTarget.closest('.ll-region-overlay');
+        const b = layer.getBoundingClientRect();
+        const p = viewport.convertToPdfPoint((e.clientX-b.left)*viewport.width/b.width, (e.clientY-b.top)*viewport.height/b.height);
+        drag.current = { id: r.id, box: [...r.bbox], start: p, resize, rect: b };
+        layer.setPointerCapture(e.pointerId);
+        setView(v => ({ ...v, selected: r.id }));
+      };
+      return h('div', { className: 'll-region-overlay', style: { pointerEvents: view.editing ? 'auto' : 'none', touchAction: 'none' },
+        onPointerDown: e => {
+          if (!view.editing || !view.drawing) return;
+          const p = point(e), id = `manual-${Date.now()}`;
+          drag.current = { id, start: p, draw: true, rect: e.currentTarget.getBoundingClientRect() }; e.currentTarget.setPointerCapture(e.pointerId);
+          setView(v => ({ ...v, dirty: true, selected: id, page: { ...v.page, regions: [...v.page.regions,
+            { id, role: 'body', bbox: [p[0],p[1],p[0]+1,p[1]+1], itemIds: [] }] } }));
+        },
+        onPointerMove: e => {
+          const d = drag.current; if (!d) return;
+          const p = point(e), [x,y] = d.start;
+          let box;
+          if (d.draw) box = [Math.min(x,p[0]),Math.min(y,p[1]),Math.max(x,p[0]),Math.max(y,p[1])];
+          else if (d.resize) box = [d.box[0],Math.min(d.box[3]-1,p[1]),Math.max(d.box[0]+1,p[0]),d.box[3]];
+          else {
+            const dx = Math.max(-d.box[0],Math.min(view.page.width-d.box[2],p[0]-x));
+            const dy = Math.max(-d.box[1],Math.min(view.page.height-d.box[3],p[1]-y));
+            box = d.box.map((n,i) => n+(i%2 ? dy : dx));
+          }
+          setView(v => ({ ...v, dirty: true, page: { ...v.page, regions: v.page.regions.map(r => r.id === d.id ? { ...r, bbox: box } : r) } }));
+        }, onPointerUp: () => { drag.current = null; }, onPointerCancel: () => { drag.current = null; },
+      }, regions.map((r,i) => {
+        const b = [...viewport.convertToViewportPoint(r.bbox[0],r.bbox[1]), ...viewport.convertToViewportPoint(r.bbox[2],r.bbox[3])];
+        const x = Math.min(b[0],b[2]), y = Math.min(b[1],b[3]);
+        return h('div', { key: r.id, className: `ll-region-box${view.selected === r.id ? ' is-selected' : ''}`,
+          'data-role': r.role, style: { left: `${x/viewport.width*100}%`, top: `${y/viewport.height*100}%`,
+            width: `${Math.abs(b[2]-b[0])/viewport.width*100}%`, height: `${Math.abs(b[3]-b[1])/viewport.height*100}%` },
+          onPointerDown: e => { if (view.drawing) return; begin(e,r,false); } }, [
+          h('span', { key: 'label', className: 'll-region-label' }, `${['body','abstract','heading','caption','formula','table'].includes(r.role)
+            ? regions.slice(0,i+1).filter(x=>['body','abstract','heading','caption','formula','table'].includes(x.role)).length : '信息'} ${REGION_LABELS[r.role] || r.role}`),
+          view.editing && !view.drawing ? h('span', { key: 'resize', className: 'll-region-handle', onPointerDown: e => begin(e,r,true) }) : null,
+        ]);
+      }));
+    }
+
+    function LayoutControls({ slug, page, mode, schedule, view, setView, show, setShow, onJob }) {
+      const [data, setData] = React.useState(null), [error,setError] = React.useState(''), [busy,setBusy] = React.useState(false);
+      const [epoch,setEpoch] = React.useState(0);
+      React.useEffect(() => {
+        const refresh = () => setEpoch(n => n+1);
+        window.addEventListener('ll-layout-changed',refresh);
+        return () => window.removeEventListener('ll-layout-changed',refresh);
+      }, []);
+      React.useEffect(() => {
+        if (view?.dirty) return undefined;
+        let cancelled = false, timer;
+        const poll = async () => {
+          try {
+            const res = await fetch(`${ROUTE_PREFIX}/layout?slug=${encodeURIComponent(slug)}&page=${page}`);
+            const d = await res.json(); if (!res.ok) throw new Error(d.message || '读取分区失败');
+            if (cancelled) return;
+            setData(d); setError('');
+            setView(v => ({ ...v, page: d.page, state: d.state, dirty: false, editing: v?.editing || false }));
+            if (['queued','partitioning'].includes(d.state?.phase)) timer = setTimeout(poll,2000);
+            else if (d.state?.mode === 'auto' && d.state.phase === 'approved' && !d.state.error) {
+              if (d.state.translationJobId) {
+                const j = await fetch(`${ROUTE_PREFIX}/translate-job?id=${encodeURIComponent(d.state.translationJobId)}`);
+                if(j.ok && !cancelled) onJob?.(await j.json());
+              } else timer = setTimeout(poll,2000);
+            }
+          } catch (err) { if (!cancelled) setError(err.message); }
+        };
+        poll(); return () => { cancelled = true; clearTimeout(timer); };
+      }, [slug,page,epoch,view?.dirty]);
+      async function act(action, extra = {}) {
+        setBusy(true); setError('');
+        try {
+          const r = await postJson('/layout', { action, slug, mode, schedule, revision: data?.state?.revision, ...extra });
+          if (r.results?.[0]?.error) throw new Error(r.results[0].error);
+          if (r.job) onJob?.(r.job);
+          setView(v => ({ ...v, dirty: false })); setEpoch(n => n+1);
+        } catch (err) { setError(err.message); }
+        finally { setBusy(false); }
+      }
+      const s = data?.state, selected = view?.page?.regions.find(r => r.id === view.selected);
+      const ready = s && !['queued','partitioning'].includes(s.phase);
+      const changeRegion = update => setView(v => ({ ...v, dirty: true, page: { ...v.page,
+        regions: v.page.regions.map(r => r.id === v.selected ? { ...r, ...update } : r) } }));
+      return h('div', { className: 'll-layout-controls' }, [
+        h('div', { key: 'top', className: 'll-layout-row' }, [
+          h('strong', { key: 'name' }, '论文分区'),
+          h('span', { key: 'status' }, s ? `${LAYOUT_PHASES[s.phase]} · 已检查 ${s.checkedPages.length}/${s.pageCount} 页` : '尚未分区'),
+          h('span', { key: 'sp', className: 'll-spacer' }),
+          h('button', { key: 'show', className: 'll-btn ll-btn-xs', disabled: !view?.page, onClick: () => setShow(!show) }, show ? '隐藏分区' : '显示分区'),
+          h('button', { key: 'start', className: 'll-btn ll-btn-xs', disabled: busy || view?.dirty || ['queued','partitioning'].includes(s?.phase), onClick: () => {
+            if (mode === 'auto' && !window.confirm('自动模式：本地分区自检通过后将调用 API 翻译并产生费用。继续？')) return;
+            if (s && !window.confirm('重新分区会清除当前人工修改与确认记录；旧版本文件仍在本地保留。继续？')) return;
+            setShow(true); act('start', { force: !!s });
+          } }, s ? '重新分区' : '开始分区'),
+        ]),
+        h('p', { key: 'hint', className: 'll-layout-hint' }, '本地分区不消耗模型 token。自动模式自检后翻译；半自动/手动须确认。分区框上的数字表示阅读顺序。'),
+        (error || s?.error || data?.stale) ? h('p', { key: 'err', role: 'alert', className: 'll-layout-error' }, error || (data.stale ? 'PDF 已变化，请重新分区' : s.error)) : null,
+        ready && view?.page ? h('div', { key: 'tools' }, [
+          h('div', { key: 'buttons', className: 'll-layout-row' }, [
+            h('span', { key: 'p' }, `第 ${view.page.page} 页`),
+            h('button', { key: 'edit', className: 'll-btn ll-btn-xs', disabled: busy, onClick: () => { setShow(true); setView(v => ({ ...v, editing: !v.editing })); } }, view.editing ? '结束编辑' : '手动纠错'),
+            h('button', { key: 'check', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => act('check-page', { page: view.page.page }) }, '此页已检查'),
+            h('button', { key: 'approve', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => {
+              if (window.confirm(`确认已检查《${s.title}》的全部 ${s.pageCount} 页？此操作仅确认，不启动翻译。`)) act('approve', { confirmAll: true });
+            } }, '确认整篇'),
+            h('button', { key: 'translate', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty || s.phase !== 'approved', onClick: () => {
+              if (window.confirm('使用当前已确认分区翻译，将产生 API 费用。继续？')) act('translate');
+            } }, '按确认分区翻译'),
+          ]),
+          view.editing ? h('div', { key: 'editor', className: 'll-layout-editor' }, [
+            h('div', { key: 'row', className: 'll-layout-row' }, [
+              h('button', { key: 'draw', className: 'll-btn ll-btn-xs', onClick: () => setView(v => ({ ...v, drawing: !v.drawing })) }, view.drawing ? '停止画框' : '画新分区'),
+              h('button', { key: 'clear', className: 'll-btn ll-btn-xs', onClick: () => { if (window.confirm('清空本页分区并从头画框？未覆盖文字将阻止保存。')) setView(v => ({ ...v, dirty: true, page: { ...v.page, regions: [] } })); } }, '清空本页重画'),
+              h('button', { key: 'save', className: 'll-btn ll-btn-xs', disabled: busy || !view.dirty && s.mode !== 'manual', onClick: () => act('save-page', { page: view.page.page, regions: view.page.regions.map(({id,role,bbox}) => ({id,role,bbox})) }) }, '保存本页并自检'),
+              h('button', { key: 'discard', className: 'll-btn ll-btn-xs', onClick: () => { setView(v => ({ ...v, dirty: false, page: data.page })); setEpoch(n => n+1); } }, '放弃未保存修改'),
+            ]),
+            h('p', { key: 'how', className: 'll-layout-hint' }, '拖框可移动，右下角可缩放；新框优先接管框内文字。正文/标题/题注/公式分开，非正文归入信息区。需整页覆盖，避免重叠。'),
+            h('div', { key: 'regions', className: 'll-layout-region-list' }, view.page.regions.map((r,i) => h('button', {
+              key: r.id, className: 'll-btn ll-btn-xs', 'aria-pressed': view.selected === r.id,
+              onClick: () => setView(v => ({ ...v, selected: r.id, drawing: false })),
+            }, `${i+1} ${REGION_LABELS[r.role] || r.role}`))),
+            selected ? h('div', { key: 'fields', className: 'll-layout-row' }, [
+              h('select', { key: 'role', 'aria-label': '分区类型', value: selected.role, onChange: e => changeRegion({ role: e.target.value }) }, Object.entries(REGION_LABELS).map(([id,label]) => h('option', { key:id,value:id },label))),
+              ...['左','下','右','上'].map((label,i) => h('label', { key: label }, [label, h('input', { type:'number',step:1,value:Math.round(selected.bbox[i]*10)/10,
+                'aria-label': `分区${label}边界`, onChange: e => { const box = [...selected.bbox]; box[i] = Number(e.target.value); changeRegion({bbox:box}); } })])),
+              ...[-1,1].map(step => h('button', { key:step, className:'ll-btn ll-btn-xs', onClick: () => setView(v => {
+                const a = [...v.page.regions], i = a.findIndex(r => r.id === v.selected), j = i+step;
+                if (j<0 || j>=a.length) return v; [a[i],a[j]]=[a[j],a[i]]; return {...v,dirty:true,page:{...v.page,regions:a}};
+              }) }, step<0 ? '提前' : '后移')),
+              h('button', { key:'delete',className:'ll-btn ll-btn-xs',onClick: () => setView(v => ({...v,dirty:true,page:{...v.page,regions:v.page.regions.filter(r => r.id !== v.selected)}})) }, '删除框'),
+            ]) : null,
+          ]) : null,
+          view.dirty ? h('p', { key:'unsaved',className:'ll-layout-error' }, '本页有未保存修改。请保存或放弃后再检查其他页。') : null,
+          data.blockingWarnings?.length ? h('p',{key:'warnings',className:'ll-layout-error'},`待处理页：${[...new Set(data.blockingWarnings.map(w => w.page))].join('、')}`) : null,
+        ]) : null,
+      ]);
+    }
+
+    function LayoutBatchDialog({ papers, mode, setMode, schedule, onClose, onSelect, onJob }) {
+      const [chosen,setChosen] = React.useState(new Set()), [states,setStates] = React.useState([]), [notice,setNotice] = React.useState(''), [busy,setBusy] = React.useState(false);
+      React.useEffect(() => {
+        let dead = false;
+        const poll = async () => { try { const r = await fetch(`${ROUTE_PREFIX}/layout`); if (!r.ok) throw new Error('无法读取分区队列'); const d = await r.json(); if (!dead) setStates(d.states || []); } catch (err) { if (!dead) setNotice(err.message); } };
+        poll(); const timer = setInterval(poll,2500); return () => { dead = true; clearInterval(timer); };
+      }, []);
+      const candidates = papers.filter(p => p.source && !p.hidden), bySlug = new Map(states.map(s => [s.slug,s]));
+      async function run(action) {
+        if (!chosen.size) return;
+        if (action === 'start' && mode === 'auto' && !window.confirm(`自动模式将分区并翻译选中的 ${chosen.size} 篇，产生 API 费用。继续？`)) return;
+        if (action === 'approve' && !window.confirm('确认已人工检查所有选中文献的全部页面？此操作不会启动翻译。')) return;
+        if (action === 'translate' && !window.confirm('翻译所有选中且已确认的文献，将产生 API 费用。继续？')) return;
+        setBusy(true); const errors = []; let count = 0;
+        try {
+          if (action === 'start') {
+            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule});
+            count = r.results.filter(x => !x.error).length; errors.push(...r.results.filter(x => x.error).map(x => x.error));
+          } else for (const slug of chosen) {
+            const s = bySlug.get(slug);
+            if (!s || action === 'translate' && s.phase !== 'approved') { errors.push(`${slug} 尚未确认`); continue; }
+            try { const r = await postJson('/layout',{action,slug,revision:s.revision,confirmAll:action==='approve',schedule}); if(r.job) onJob(r.job); count++; }
+            catch(err) { errors.push(err.message); }
+          }
+          setNotice(`已处理 ${count} 篇${errors.length ? `；${errors.length} 篇未处理：${errors.slice(0,3).join('；')}` : ''}`);
+        } catch(err) { setNotice(err.message); } finally { setBusy(false); }
+      }
+      return h('div',{className:'ll-modal-bg'},h('div',{className:'ll-modal',role:'dialog','aria-label':'分区与翻译队列'},[
+        h('div',{key:'h',className:'ll-modal-head'},['分区与翻译队列',h('span',{className:'ll-spacer',key:'sp'}),h('button',{key:'close',className:'ll-btn ll-btn-xs',onClick:onClose},'关闭')]),
+        h('div',{key:'tools',className:'ll-layout-controls'},[
+          h('div',{key:'row',className:'ll-layout-row'},[
+            h('select',{key:'mode',value:mode,'aria-label':'分区模式',onChange:e=>setMode(e.target.value)},[
+              h('option',{key:'auto',value:'auto'},'自动：分区自检后翻译'),h('option',{key:'semi',value:'semi'},'半自动：检查后翻译'),h('option',{key:'manual',value:'manual'},'手动：人工分区后翻译')]),
+            h('button',{key:'all',className:'ll-btn ll-btn-xs',onClick:()=>setChosen(chosen.size===candidates.length?new Set():new Set(candidates.map(p=>p.slug)))},'全选/取消'),
+            ...[['start','分区选中'],['approve','确认已检查选中'],['translate','翻译已确认选中']].map(([action,label])=>h('button',{key:action,className:'ll-btn ll-btn-xs',disabled:busy || !chosen.size,onClick:()=>run(action)},label)),
+          ]),
+          h('p',{key:'hint',className:'ll-layout-hint'},'分区串行在后台运行；可逐篇打开检查并翻译，也可全部检查后批量翻译。已存在的分区不会被批量覆盖，重做请在 PDF 分区工具中操作。'),
+          notice ? h('p',{key:'notice',role:'status'},notice):null,
+        ]),
+        h('div',{key:'list',className:'ll-modal-body'},candidates.map(p=>{
+          const s=bySlug.get(p.slug);
+          return h('div',{key:p.slug,className:'ll-layout-queue-row'},[
+            h('input',{key:'c',type:'checkbox','aria-label':`选择 ${chinesePaperTitle(p)}`,checked:chosen.has(p.slug),onChange:()=>setChosen(old=>{const n=new Set(old);n.has(p.slug)?n.delete(p.slug):n.add(p.slug);return n;})}),
+            h('div',{key:'title',className:'ll-layout-queue-title'},[h('strong',{key:'name'},chinesePaperTitle(p)),h('span',{key:'phase'},s?`${LAYOUT_PHASES[s.phase]} · ${s.checkedPages.length}/${s.pageCount} 页${s.error ? ` · ${s.error}` : ''}`:'未分区')]),
+            h('button',{key:'open',className:'ll-btn ll-btn-xs',onClick:()=>{onSelect(p.slug);onClose();}},'打开检查'),
+          ]);
+        })),
+      ]));
+    }
+
     const PdfPage = React.memo(function PdfPage({
       doc, pdfjs, pageNumber, width, ratio, onMeasure, registerRef, rootRef,
-      searchQuery, searchPage,
+      searchQuery, searchPage, regionView, setRegionView,
     }) {
       const wrapRef = React.useRef(null);
       const canvasRef = React.useRef(null);
@@ -2554,6 +2790,7 @@ window.__ModuleLoader__.load({
       const [active, setActive] = React.useState(pageNumber === 1);
       const [rendered, setRendered] = React.useState(false);
       const [error, setError] = React.useState(null);
+      const [regionViewport, setRegionViewport] = React.useState(null);
 
       React.useEffect(() => {
         const el = wrapRef.current;
@@ -2606,6 +2843,7 @@ window.__ModuleLoader__.load({
             const base = pageObj.getViewport({ scale: 1 });
             const scale = width / base.width;
             const viewport = pageObj.getViewport({ scale });
+            setRegionViewport(viewport);
             onMeasure(pageNumber, viewport.height / viewport.width);
             const canvas = canvasRef.current;
             if (!canvas) return;
@@ -2692,6 +2930,7 @@ window.__ModuleLoader__.load({
       }, [
         h('canvas', { key: 'c', ref: canvasRef, className: 'll-pdf-canvas' }),
         h('div', { key: 't', ref: textRef, className: 'll-pdf-text-layer textLayer' }),
+        active && regionView?.page?.page === pageNumber ? h(RegionOverlay, { key:'regions',viewport:regionViewport,view:regionView,setView:setRegionView }) : null,
         !rendered
           ? h('span', { key: 'n', className: 'll-pdf-page-no' },
             error ? `第 ${pageNumber} 页渲染失败` : `第 ${pageNumber} 页`)
@@ -2706,7 +2945,17 @@ window.__ModuleLoader__.load({
      * 直接滚 `.ll-pdf-body`，不再需要点「上一页/下一页」。工具条的页码会
      * 随滚动实时更新；输入页码/点翻页按钮则会平滑滚到对应页。
      */
-    function PdfViewer({ address, title, switching, documentKey }) {
+    function PdfViewer({ address, title, switching, documentKey, layoutMode, schedule, onJob, openLayout, onLayoutDirty }) {
+      const [layoutOpen,setLayoutOpen] = React.useState(!!openLayout);
+      const [showRegions,setShowRegions] = React.useState(!!openLayout);
+      const [regionView,setRegionView] = React.useState(null);
+      React.useEffect(() => {
+        onLayoutDirty?.(regionView?.dirty ? documentKey : null);
+        const prevent = e => { e.preventDefault(); e.returnValue = ''; };
+        if(regionView?.dirty) window.addEventListener('beforeunload',prevent);
+        return () => { window.removeEventListener('beforeunload',prevent); onLayoutDirty?.(null); };
+      },[regionView?.dirty,documentKey,onLayoutDirty]);
+      React.useEffect(() => { if(openLayout) {setLayoutOpen(true);setShowRegions(true);} },[openLayout]);
       const [doc, setDoc] = React.useState(null);
       const [pdfjs, setPdfjs] = React.useState(null);
       const [numPages, setNumPages] = React.useState(0);
@@ -2993,6 +3242,10 @@ window.__ModuleLoader__.load({
       }, []);
 
       const toolbar = h('div', { className: 'll-pane-tools ll-pdf-tools' }, [
+        h('button',{key:'layout',className:'ll-btn ll-btn-xs','aria-expanded':layoutOpen,onClick:()=>{
+          if (regionView?.dirty) { if(!window.confirm('有未保存的分区修改。放弃并关闭？')) return; setRegionView(v=>({...v,dirty:false})); }
+          setLayoutOpen(!layoutOpen); if(layoutOpen) setShowRegions(false);
+        }},'分区'),
         h('button', {
           key: 'prev', className: 'll-icon-btn', disabled: !doc || page <= 1,
           title: '上一页', 'aria-label': '上一页', onClick: () => goTo(pageRef.current - 1),
@@ -3076,10 +3329,14 @@ window.__ModuleLoader__.load({
                 rootRef: scrollRef,
                 searchQuery,
                 searchPage: searchResults[searchAt],
+                regionView: showRegions ? regionView : null,
+                setRegionView,
               })));
 
       return h('div', { className: 'll-pdf-viewer' }, [
         toolbar,
+        layoutOpen ? h(LayoutControls,{key:'layout-tools',slug:documentKey,page,mode:layoutMode,schedule,view:regionView,setView:setRegionView,
+          show:showRegions,setShow:setShowRegions,onJob}) : null,
         h('div', { className: 'll-pdf-body', ref: scrollRef }, content),
       ]);
     }
@@ -3510,6 +3767,14 @@ window.__ModuleLoader__.load({
         ? { phase: 'ready', slug: initialCachedDoc.slug, translated: initialCachedDoc.translated, error: null }
         : { phase: 'idle', slug: initialSlug, translated: null, error: null });
       const [scanDir, setScanDir] = React.useState('library/papers');
+      const [layoutBatchOpen,setLayoutBatchOpen] = React.useState(false);
+      const [layoutOpenSlug,setLayoutOpenSlug] = React.useState(null);
+      const layoutDirtyRef = React.useRef(null);
+      const recordLayoutDirty = React.useCallback(slug => {layoutDirtyRef.current=slug;},[]);
+      const [layoutMode,changeLayoutMode] = React.useState(() => {
+        try { const m=localStorage.getItem('dsh-literature-library/layout-mode'); return ['auto','semi','manual'].includes(m)?m:'semi'; } catch {return 'semi';}
+      });
+      const setLayoutMode = m => { changeLayoutMode(m); try {localStorage.setItem('dsh-literature-library/layout-mode',m);} catch {} };
       const [selectedFolder, setSelectedFolder] = React.useState(null);
       const [busy, setBusy] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
@@ -3625,6 +3890,8 @@ window.__ModuleLoader__.load({
 
       const selectPaper = React.useCallback((slug) => {
         if (!slug) return;
+        if(layoutDirtyRef.current && layoutDirtyRef.current !== slug
+          && !window.confirm('当前文献有未保存的分区修改。放弃修改并切换文献？')) return false;
         // 点击发生时旧文章的 DOM 仍在，先同步落盘，避免切换占位页覆盖精确位置。
         persistCurrentMarkdown();
         setState((s) => ({ ...s, selected: slug }));
@@ -3951,36 +4218,17 @@ window.__ModuleLoader__.load({
        * 路径可控得多——那条路径实测提示词根本进不去。
        */
       async function doTranslate(p) {
-        if (batchState.phase === 'running' || batchState.phase === 'stopping') {
-          setNotice({ kind: 'err', text: '批量串行队列正在执行，请先停止后续提交再单独翻译。' });
-          return;
-        }
-        setBusy(p.slug); setNotice(null);
+        if(selectPaper(p.slug) === false) return;
+        setLayoutOpenSlug(p.slug);
+        if (layoutMode === 'auto' && !window.confirm('自动模式：本地分区、自检通过后会付费翻译。继续？')) return;
+        setBusy(p.slug);
         try {
-          const schedule = offpeakOnly ? 'offpeak' : 'now';
-          const r = await postJson('/translate-job', { slug: p.slug, schedule });
-          setNotice({
-            kind: 'ok',
-            text: r.reused
-              ? `《${r.title}》已经有一个翻译任务在跑，继续跟进它的进度。`
-              : (schedule === 'offpeak'
-                ? `《${r.title}》已进入闲时队列；进入低价时段后自动翻译。`
-                : `已开始翻译《${r.title}》（模型 ${r.model}，共 ${r.chunkTotal || '?'} 块）。进度见条目下方。`),
-          });
-          upsertJob(r);
-          setJobPollEpoch((value) => value + 1);
-          // 立刻拉一次任务列表，让进度条马上出现
-          const list = await fetch(`${ROUTE_PREFIX}/translate-job`).then((x) => x.json()).catch(() => null);
-          if (list?.jobs) replaceJobs(list.jobs);
-        } catch (err) {
-          const msg = err.message ?? String(err);
-          setNotice({
-            kind: 'err',
-            text: msg.includes('API key')
-              ? `${msg}\n（检查 ~/.dsh/.credentials.yaml 里的 DEEPSEEK_API_KEY，或设置环境变量）`
-              : `启动翻译失败：${msg}`,
-          });
-        } finally { setBusy(null); }
+          const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,schedule:offpeakOnly?'offpeak':'now'});
+          if(r.results?.[0]?.error) throw new Error(r.results[0].error);
+          window.dispatchEvent(new Event('ll-layout-changed'));
+          setNotice({kind:'ok',text:'已打开 PDF 分区工具。半自动/手动模式检查确认后，点击「按确认分区翻译」。已有分区不会被覆盖。'});
+        } catch(err) { setNotice({kind:'err',text:err.message}); }
+        finally { setBusy(null); }
       }
 
       async function doStartNow(job) {
@@ -4596,17 +4844,19 @@ window.__ModuleLoader__.load({
             }, busy === 'fill' ? '补全中…' : '补全信息'),
             h('button', {
               key: 'all', className: 'll-btn ll-btn-xs',
-              disabled: batchState.phase === 'stopping'
-                || (!batchActive && (busy !== null || !apiConfig?.ready || runningCount > 0)),
+              disabled: batchState.phase === 'stopping' || busy !== null,
               title: batchActive
                 ? `当前第 ${batchState.current}/${batchState.total} 篇：${batchState.title || '准备中'}。点击后不再提交后续文献，当前后台任务不会被取消。`
                 : (runningCount > 0
                   ? `已有 ${runningCount} 个任务在跑`
                   : '把当前可见且未翻译的文献串行翻译：等上一篇完成后再提交下一篇'),
-              onClick: batchActive ? stopTranslateBatch : doTranslateAll,
+              onClick: batchActive ? stopTranslateBatch : () => setLayoutBatchOpen(true),
             }, batchActive
               ? `停止后续 ${batchState.current}/${batchState.total}`
-              : (runningCount > 0 ? `翻译中 ${runningCount}` : '翻译未译')),
+              : '分区/批量翻译'),
+            h('select',{key:'layout-mode',value:layoutMode,'aria-label':'翻译分区模式',title:'选择分区与翻译流程',onChange:e=>setLayoutMode(e.target.value)},[
+              h('option',{key:'auto',value:'auto'},'自动分区翻译'),h('option',{key:'semi',value:'semi'},'半自动·人工检查'),h('option',{key:'manual',value:'manual'},'手动分区'),
+            ]),
           ]),
           h('div', { className: 'll-nav-body', key: 'b' }, navBody),
           // 版本号常驻左栏底部：升级后不用翻文档就能确认运行的是哪一版
@@ -4874,11 +5124,17 @@ window.__ModuleLoader__.load({
                   documentKey: selected.slug,
                   title: selected.title ?? selected.slug,
                   switching: pdfSwitching || !pdfPaper,
+                  layoutMode, schedule: offpeakOnly ? 'offpeak' : 'now', openLayout: layoutOpenSlug === selected.slug,
+                  onJob: r => { upsertJob(r); setJobPollEpoch(v=>v+1); },
+                  onLayoutDirty: recordLayoutDirty,
                 }),
             ]),
           ]),
         ] : h('div', { className: 'll-empty', key: 'none' }, '请从左侧选择一篇文献。')),
 
+        layoutBatchOpen ? h(LayoutBatchDialog,{key:'layout-batch',papers:filteredPapers,mode:layoutMode,setMode:setLayoutMode,
+          schedule:offpeakOnly?'offpeak':'now',onClose:()=>setLayoutBatchOpen(false),onSelect:slug=>{selectPaper(slug);setLayoutOpenSlug(slug);},
+          onJob:r=>{upsertJob(r);setJobPollEpoch(v=>v+1);}}):null,
         browserOpen ? h(FolderBrowser, {
           key: 'browser',
           busy: busy === 'addfolder',

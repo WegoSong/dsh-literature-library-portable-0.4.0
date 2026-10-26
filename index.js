@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { homedir as osHomedir } from 'node:os';
 import { gunzipSync, zstdDecompressSync } from 'node:zlib';
+import { createLayoutWorkflow } from './tools/layout_workflow.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -722,6 +723,18 @@ export function apply(ctx, config = {}) {
     pdfjsRoot = resolve(join(workspaceRoot, 'node_modules', 'pdfjs-dist'));
   }
   const prefix = config.routePrefix || '/literature-library';
+  const layoutWorkflow = createLayoutWorkflow({
+    root: join(libraryRoot, 'layouts'),
+    findPaper: async slug => {
+      const { db } = await loadDb();
+      const p = (db.papers || []).find(p => p.slug === slug);
+      const pdfAbs = p?.source && resolveInside(p.source);
+      return pdfAbs ? { ...p, pdfAbs } : null;
+    },
+    extract: extractPdfText,
+    translate: handleTranslateJob,
+    isBusy: slug => [...translateJobs.values()].some(j => j.slug === slug && ['queued','running'].includes(j.phase)),
+  });
   /** 是否允许浏览文件系统（默认允许：要收的文件夹常分散在各磁盘） */
   const allowBrowse = config.allowFileSystemBrowse !== false;
 
@@ -1937,23 +1950,32 @@ export function apply(ctx, config = {}) {
    * 受限环境下「父进程读子进程管道」会被拒绝（EPERM），
    * 而我们只需要它写到磁盘上的文件，不需要它的屏幕输出。
    */
-  async function extractPdfText(pdfAbs, slug, signal) {
-    const outDir = join(libraryRoot, 'extracted', slug);
+  async function extractPdfText(pdfAbs, slug, signal, options = {}) {
+    const outputRoot = options.outputRoot || join(libraryRoot, 'extracted');
+    const outDir = join(outputRoot, slug);
     const mdPath = join(outDir, `${slug}.md`);
     const script = join(toolsRoot, 'extract_pdf.mjs');
 
     if (!existsSync(script)) throw new Error(`找不到抽取脚本：${script}`);
     await mkdir(outDir, { recursive: true });
+    const extraArgs = [];
+    if (options.overrides && Object.keys(options.overrides).length) {
+      const overridePath = join(outDir, 'manual-overrides.json');
+      await writeFile(overridePath, JSON.stringify({ sourceHash: options.sourceHash, pages: options.overrides }), 'utf8');
+      extraArgs.push('--overrides', overridePath);
+    }
+    if (options.rawLayout) extraArgs.push('--raw-layout');
 
     const { spawn } = await import('node:child_process');
     await new Promise((resolvePromise, rejectPromise) => {
       const child = spawn(process.execPath, [
         script, pdfAbs,
-        '--out', join(libraryRoot, 'extracted'),
+        '--out', outputRoot,
         '--name', slug,
-        '--asset-prefix', `${libraryDir}/extracted/${slug}`,
+        '--asset-prefix', relative(workspaceRoot, outDir).split(sep).join('/'),
         '--file-route', `${prefix}/file`,
         '--no-json',
+        ...extraArgs,
       ], { stdio: 'ignore', cwd: workspaceRoot });
 
       const onAbort = () => { try { child.kill(); } catch { /* ignore */ } };
@@ -1967,21 +1989,23 @@ export function apply(ctx, config = {}) {
       });
     });
 
+    const layoutPath = join(outDir, `${slug}.layout.json`);
+    if (options.rawLayout) return { md: '', mdPath, layoutPath };
     if (!existsSync(mdPath)) throw new Error(`抽取脚本没有产出 ${mdPath}`);
     const md = await readFile(mdPath, 'utf8');
     if (md.trim() === '') throw new Error('抽取结果为空，无法翻译');
     let layout = null;
-    const layoutPath = join(outDir, `${slug}.layout.json`);
     if (existsSync(layoutPath)) {
       const result = JSON.parse(await readFile(layoutPath, 'utf8'));
       if (!result.coverage?.ok) throw new Error('版面文字项覆盖校验未通过，停止翻译，请检查抽取报告');
-      if (result.blockingWarnings?.length) throw new Error(`第 ${[...new Set(result.blockingWarnings.map(w => w.page))].join('、')} 页存在未能可靠分区的并列文本，已停止付费翻译。请先检查 ${slug}.layout.md`);
+      if (!options.allowReview && result.blockingWarnings?.length) throw new Error(`第 ${[...new Set(result.blockingWarnings.map(w => w.page))].join('、')} 页存在未能可靠分区的并列文本，已停止付费翻译。请先检查 ${slug}.layout.md`);
       layout = { version: result.version, coverage: result.coverage.sourceItems,
         reviewPages: [...new Set((result.warnings || []).map(w => w.page))],
         reportPath: `${libraryDir}/extracted/${slug}/${slug}.layout.md` };
     }
     return {
       mdPath,
+      layoutPath,
       md,
       layout,
       warning: '独立公式优先保留原 PDF 局部图像；行内符号仍需结合原文核对。'
@@ -2007,6 +2031,7 @@ export function apply(ctx, config = {}) {
     const paper = (db.papers ?? []).find((p) => p.slug === slug);
     if (!paper) throw Object.assign(new Error(`文献库中没有 ${slug}`), { status: 404 });
     if (!paper.source) throw Object.assign(new Error(`${slug} 没有登记原始 PDF`), { status: 400 });
+    const approvedLayout = await layoutWorkflow.guard(slug);
 
     // 同一篇已经有任务在跑 → 直接返回那个任务，避免重复烧 token
     for (const [id, job] of translateJobs) {
@@ -2083,6 +2108,9 @@ export function apply(ctx, config = {}) {
       upgradedChunks: 0,
       log: [],
     };
+    const latestLayout = await layoutWorkflow.guard(slug);
+    if ((approvedLayout?.revision || 0) !== (latestLayout?.revision || 0))
+      throw Object.assign(new Error('分区在提交期间发生变化，请重新确认'), { status: 409 });
     translateJobs.set(jobId, job);
     pruneJobs();
 
@@ -2216,7 +2244,8 @@ export function apply(ctx, config = {}) {
     job.notBefore = job.actualStartedAt;
     touch('抽取 PDF 文本');
     note('开始抽取 PDF 文本');
-    const { md, warning, layout } = await extractPdfText(pdfAbs, job.slug, undefined);
+    const { md, warning, layout } = await layoutWorkflow.prepared(job.slug)
+      || await extractPdfText(pdfAbs, job.slug, undefined);
     job.warning = warning;
     job.layout = layout;
     job.charsIn = md.length;
@@ -3250,6 +3279,26 @@ export function apply(ctx, config = {}) {
             ctx.logger?.warn?.(`literature-library: ${arrangeBody?.action ?? 'reorder'} 失败 — ${err?.message ?? err}`);
             sendJson(res, err?.status ?? 500, { error: 'reorder-failed', message: String(err?.message ?? err) });
           }
+          return;
+        }
+
+        if (sub === 'layout') {
+          try {
+            if (req.method === 'POST') sendJson(res, 200, await layoutWorkflow.command(await readBody(req)));
+            else if (req.method === 'GET') {
+              const slug = url.searchParams.get('slug');
+              if (slug) sendJson(res, 200, await layoutWorkflow.get(slug, url.searchParams.get('page')));
+              else {
+                const { db } = await loadDb();
+                const states = [];
+                for (const p of db.papers || []) if (p.source) {
+                  const s = await layoutWorkflow.read(p.slug);
+                  if (s) states.push(layoutWorkflow.summary(s));
+                }
+                sendJson(res, 200, { states });
+              }
+            } else sendJson(res, 405, { error: 'use-get-or-post' });
+          } catch (err) { sendJson(res, err.status || 500, { error: 'layout-failed', message: String(err.message || err) }); }
           return;
         }
 
