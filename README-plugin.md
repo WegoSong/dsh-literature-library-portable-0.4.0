@@ -62,3 +62,19 @@ Markdown 编辑、期刊信息补全、版本号显示。详见包内 `README.md
 - Node.js `>= 22.13`
 - **pnpm**（DSH 的 Plugins/市场安装用它；例如 `npm install -g pnpm`）
 - `pdfjs-dist`（安装时由 pnpm 自动装）
+
+## 版面检查（0.6.7 起）
+
+翻译前先在本地识别区域和阅读顺序。缺少 Abstract 标签的侧边摘要由页面底板、文字与引言位置共同推断，并提示核对；不会为了识别区域额外调用付费视觉服务。独立公式仍优先显示原 PDF 局部图像，而非猜测 LaTeX。
+
+抽取目录新增 `<slug>.layout.md` 和 `<slug>.layout.json`，保存区域、原页坐标、稳定文字项编号、段落类型、跨页来源和覆盖检查。文字项遗漏/重复，或无法可靠分开的并列正文，会停止付费翻译并保留诊断；覆盖检查通过只证明原文文字项没有丢失或重复，不保证语义和翻译质量。
+
+开发工作区可只核对少量页，无需翻译全文：
+
+```powershell
+node plugin/literature-library/tools/extract_pdf.mjs "论文.pdf" --out "output/layout-review" --name "sample" --pages 1-6 --preview-pages 1,5,6
+```
+
+预览输出到 `output/layout-review/sample/layout/`，蓝框为正文阅读流，棕框为摘要，紫框为作者或出版信息；框上数字表示正文区域顺序。预览按需生成、逐页释放，不常驻浏览器。页面旋转、扫描件、复杂表格和未被规则覆盖的布局仍需核对，尚未接入视觉模型兜底。
+
+更新不自动重译已有译稿。请先检查样例版面，再手动重译确认；重译可能调用 API 并产生费用。反馈时提供原 PDF、原页码、错误译文截图和对应 `.layout.md`，无需提供密钥、Cookie 或完整浏览器 HAR。

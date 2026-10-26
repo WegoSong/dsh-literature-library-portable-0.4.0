@@ -1970,10 +1970,22 @@ export function apply(ctx, config = {}) {
     if (!existsSync(mdPath)) throw new Error(`抽取脚本没有产出 ${mdPath}`);
     const md = await readFile(mdPath, 'utf8');
     if (md.trim() === '') throw new Error('抽取结果为空，无法翻译');
+    let layout = null;
+    const layoutPath = join(outDir, `${slug}.layout.json`);
+    if (existsSync(layoutPath)) {
+      const result = JSON.parse(await readFile(layoutPath, 'utf8'));
+      if (!result.coverage?.ok) throw new Error('版面文字项覆盖校验未通过，停止翻译，请检查抽取报告');
+      if (result.blockingWarnings?.length) throw new Error(`第 ${[...new Set(result.blockingWarnings.map(w => w.page))].join('、')} 页存在未能可靠分区的并列文本，已停止付费翻译。请先检查 ${slug}.layout.md`);
+      layout = { version: result.version, coverage: result.coverage.sourceItems,
+        reviewPages: [...new Set((result.warnings || []).map(w => w.page))],
+        reportPath: `${libraryDir}/extracted/${slug}/${slug}.layout.md` };
+    }
     return {
       mdPath,
       md,
-      warning: '独立公式优先保留原 PDF 局部图像；行内符号仍需结合原文核对。',
+      layout,
+      warning: '独立公式优先保留原 PDF 局部图像；行内符号仍需结合原文核对。'
+        + (layout?.reviewPages.length ? ` 第 ${layout.reviewPages.join('、')} 页包含需核对的版面推断，见版面检查报告。` : ''),
     };
   }
 
@@ -2145,6 +2157,7 @@ export function apply(ctx, config = {}) {
       validation: { failures: job.validationFailures ?? 0 },
       upgradedChunks: job.upgradedChunks ?? 0,
       preprocessing: job.preprocessing ?? null,
+      layout: job.layout ?? null,
       log: job.log.slice(-8),
     };
   }
@@ -2202,10 +2215,13 @@ export function apply(ctx, config = {}) {
     job.notBefore = job.actualStartedAt;
     touch('抽取 PDF 文本');
     note('开始抽取 PDF 文本');
-    const { md, warning } = await extractPdfText(pdfAbs, job.slug, undefined);
+    const { md, warning, layout } = await extractPdfText(pdfAbs, job.slug, undefined);
     job.warning = warning;
+    job.layout = layout;
     job.charsIn = md.length;
     note(`抽取完成，${md.length} 字符`);
+    if (layout) note(`本地区域识别完成，${layout.coverage} 个原文文字项覆盖校验通过；报告：${layout.reportPath}`);
+    if (layout?.reviewPages.length) note(`第 ${layout.reviewPages.join('、')} 页存在版面推断，请核对区域报告；未调用视觉 API`);
 
     // 在翻译前直接从抽取稿（包括 META 块）补齐库内元数据。不能只依赖译文：
     // 否则模型漏译页眉里的作者/期刊/日期后，原始证据就永远丢了。
