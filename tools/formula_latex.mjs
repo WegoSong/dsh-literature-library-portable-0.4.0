@@ -149,7 +149,7 @@ export function reconstructFormula({glyphs=[],items=[],paths=[],crop}){
   }
   return result.join(' ').replace(/\s+/gu,' ').trim();
  };
- let latex=render(nodes,bars);
+ let latex=render(nodes,bars).replace(/\b(log|ln|sin|cos|tan|exp)\s*(?=\()/gu,'\\$1 ');
  if(bars.some(b=>!used.has(b)))reasons.add('unresolved-math-line');
  if(!/[=<>]|\\(?:approx|leq|geq|neq)/u.test(latex)&&!/[\p{L}\p{N}].*(?:[_^]\{|\\(?:frac|sqrt|int|sum|prod)\b)/u.test(latex))reasons.add('no-math-relation');
  if((chars(selected).match(/[\p{L}\p{N}]/gu)||[]).length<2)reasons.add('incomplete-expression');

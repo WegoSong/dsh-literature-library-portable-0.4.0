@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.7.0';
+    const PDFJS_REV = '0.7.1';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -1093,6 +1093,46 @@ window.__ModuleLoader__.load({
 .ll-root .ll-pane-head { padding-left:16px; }
 .ll-root.ll-compact .ll-head,.ll-root.ll-compact .ll-mobilebar { padding-left:16px; padding-right:16px; }
 .ll-root .ll-count-pill { font-size:11px; }
+
+/* 0.7.1: a small review bar; detailed edits are disclosures, not a wall of chips. */
+.ll-root .ll-layout-controls { position:relative; z-index:25; padding:8px 16px; max-height:none; overflow:visible; background:var(--ll-nav-bg); }
+.ll-root .ll-layout-mainbar { display:flex; align-items:center; gap:8px; min-height:30px; }
+.ll-root .ll-layout-mainbar > strong { flex:none; font-size:12px; }
+.ll-root .ll-layout-state { min-width:0; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--ll-muted); }
+.ll-root .ll-layout-mainbar .ll-btn,.ll-root .ll-layout-selection .ll-btn { flex:none; min-height:28px; font-size:12px!important; padding:3px 8px; }
+.ll-root .ll-layout-primary { background:var(--ll-text); color:var(--ll-bg); border-color:transparent; }
+.ll-root .ll-layout-selection { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.ll-root .ll-layout-selection select { font:12px/1.4 system-ui,sans-serif!important; height:28px!important; padding:3px 6px!important; width:auto; min-width:0; max-width:100%; border-radius:4px; }
+.ll-root .ll-layout-region-select { flex:1 1 145px; }
+.ll-root .ll-layout-selection select[aria-label="分区类型"] { flex:0 1 110px; }
+.ll-root .ll-layout-more,.ll-root .ll-layout-inspector { flex:none; }
+.ll-root .ll-layout-more > summary,.ll-root .ll-layout-inspector > summary { cursor:pointer; padding:5px 6px; min-height:18px; list-style:none; font-size:12px; border-radius:4px; color:var(--ll-text); }
+.ll-root .ll-layout-more > summary:hover,.ll-root .ll-layout-inspector > summary:hover { background:var(--ll-control-hover); }
+.ll-root .ll-layout-menu { position:absolute; bottom:calc(100% + 6px); right:16px; width:min(320px,calc(100% - 32px)); max-height:min(340px,60vh); overflow:auto; display:flex; flex-direction:column; align-items:stretch; gap:10px; padding:14px; box-sizing:border-box; background:var(--ll-nav-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; box-shadow:0 8px 24px #0003; z-index:50; }
+.ll-root .ll-layout-menu .ll-btn { align-self:flex-start; min-height:28px; }
+.ll-root .ll-layout-menu label { display:flex; align-items:center; gap:8px; font-size:12px!important; }
+.ll-root .ll-layout-menu label input[type="checkbox"] { flex:none; }
+.ll-root .ll-layout-menu > strong { font-size:13px; }
+.ll-root .ll-layout-menu :is(p,summary) { font-size:12px!important; line-height:1.5!important; }
+.ll-root .ll-layout-advanced .ll-btn { margin-top:8px; }
+.ll-root .ll-layout-coordinates { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.ll-root .ll-layout-coordinates label { display:flex; min-width:0; }
+.ll-root .ll-layout-coordinates input { width:80px!important; height:28px!important; font:12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-layout-counts { font-size:11px; color:var(--ll-muted); margin-top:2px; }
+.ll-root .ll-layout-controls .ll-layout-unsaved { color:var(--ll-muted); font-size:11px!important; margin:4px 0 0!important; }
+.ll-root .ll-layout-upgrade { display:flex; align-items:center; gap:8px; font-size:12px; margin-top:6px; }
+.ll-root .ll-region-box { background:transparent; border-width:1px; }
+.ll-root .ll-region-box[data-role="formula"] { border-color:#a16bd4; }
+.ll-root .ll-region-box[data-role="caption"] { border-color:#b7791f; }
+.ll-root .ll-region-box[data-role="table"],.ll-root .ll-region-box[data-role="figure"] { border-color:#27806c; }
+.ll-root .ll-region-box .ll-region-label { display:none; top:-15px; left:-1px; max-width:100%; overflow:hidden; text-overflow:ellipsis; background:#fff; color:#111; padding:1px 3px; font:11px/13px system-ui,sans-serif!important; }
+.ll-root .ll-region-box:is(:hover,.is-selected) .ll-region-label,.ll-root .ll-region-box[data-labels="all"] .ll-region-label { display:block; }
+.ll-root .ll-region-handle { width:7px; height:7px; right:-3px; bottom:-3px; }
+@container (max-width:520px) {
+ .ll-layout-mainbar { flex-wrap:wrap; gap:5px!important; }
+ .ll-layout-mainbar > .ll-layout-state { flex:1; max-width:none; }
+ .ll-layout-mainbar > .ll-spacer { display:none; }
+}
 
 `;
 
@@ -2846,6 +2886,11 @@ window.__ModuleLoader__.load({
       title: '论文标题', 'front-matter': '作者信息', 'article-info': '文章信息', affiliation: '作者单位', publication: '出版信息',
       'running-matter': '页眉页脚', watermark: '忽略/水印' };
     const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
+    const isArticleRegion=r=>['body','abstract','heading','caption','formula','table','figure'].includes(r.role);
+    function regionDisplayLabel(region,regions){
+      const prefix=isArticleRegion(region)?String(regions.filter(isArticleRegion).findIndex(r=>r.id===region.id)+1):'信息';
+      return prefix+' · '+(REGION_LABELS[region.role]||region.role);
+    }
     function RegionOverlay({ viewport, view, setView }) {
       const drag = React.useRef(null);
       React.useEffect(()=>()=>drag.current?.cleanup?.(),[]);
@@ -2913,15 +2958,14 @@ window.__ModuleLoader__.load({
           setView(v => ({ ...v, dirty: true, selected: id, page: { ...v.page, regions: [...v.page.regions,
             { id, role: 'body', bbox: [p[0],p[1],p[0]+1,p[1]+1], itemIds: [] }] } }));
         },
-      }, regions.map((r,i) => {
+      }, regions.filter(r=>view.showInfo||isArticleRegion(r)||r.id===view.selected).map((r,i) => {
         const b = [...viewport.convertToViewportPoint(r.bbox[0],r.bbox[1]), ...viewport.convertToViewportPoint(r.bbox[2],r.bbox[3])];
         const x = Math.min(b[0],b[2]), y = Math.min(b[1],b[3]);
         return h('div', { key: r.id, className: `ll-region-box${view.selected === r.id ? ' is-selected' : ''}`,
-          'data-role': r.role, 'data-region-id':r.id,style: { left: `${x/viewport.width*100}%`, top: `${y/viewport.height*100}%`,
+          'data-role': r.role, 'data-region-id':r.id,'data-labels':view.showLabels?'all':'selection','aria-label':regionDisplayLabel(r,regions),style: { left: `${x/viewport.width*100}%`, top: `${y/viewport.height*100}%`,
             width: `${Math.abs(b[2]-b[0])/viewport.width*100}%`, height: `${Math.abs(b[3]-b[1])/viewport.height*100}%` },
           onPointerDown: e => { if (view.drawing) return; begin(e,r,false); } }, [
-          h('span', { key: 'label', className: 'll-region-label' }, `${['body','abstract','heading','caption','formula','table','figure'].includes(r.role)
-            ? regions.slice(0,i+1).filter(x=>['body','abstract','heading','caption','formula','table','figure'].includes(x.role)).length : '信息'} ${REGION_LABELS[r.role] || r.role}`),
+          h('span', { key: 'label', className: 'll-region-label' }, regionDisplayLabel(r,regions)),
           view.editing && !view.drawing ? h('span', { key: 'resize', className: 'll-region-handle', onPointerDown: e => begin(e,r,true) }) : null,
         ]);
       }));
@@ -2958,6 +3002,9 @@ window.__ModuleLoader__.load({
       ]));
     }
     function LayoutControls({ slug, page, mode, schedule, media, view, setView, show, setShow, onJob }) {
+      const controlsRef=React.useRef(null);
+      React.useEffect(()=>readerRuntime.bindMenuDismissal({window,document,element:()=>controlsRef.current,close:()=>controlsRef.current?.querySelectorAll('details[open]').forEach(d=>d.open=false)}),[]);
+      const toggleDisclosure=e=>{if(e.currentTarget.open)controlsRef.current?.querySelectorAll('.ll-layout-more[open],.ll-layout-inspector[open]').forEach(d=>{if(d!==e.currentTarget&&!d.contains(e.currentTarget))d.open=false;});};
       const [data, setData] = React.useState(null), [error,setError] = React.useState(''), [busy,setBusy] = React.useState(false);
       const [epoch,setEpoch] = React.useState(0);
       React.useEffect(() => {
@@ -2996,69 +3043,85 @@ window.__ModuleLoader__.load({
         } catch (err) { setError(err.message); }
         finally { setBusy(false); }
       }
-      const s = data?.state, selected = view?.page?.regions.find(r => r.id === view.selected);
-      const ready = s && !['queued','partitioning'].includes(s.phase);
-      const changeRegion = update => setView(v => ({ ...v, dirty: true, page: { ...v.page,
-        regions: v.page.regions.map(r => r.id === v.selected ? { ...r, ...update } : r) } }));
-      return h('div', { className: 'll-layout-controls' }, [
-        h('div', { key: 'top', className: 'll-layout-row' }, [
-          h('strong', { key: 'name' }, '论文分区'),
-          h('span', { key: 'status', className: 'll-layout-state', title: s ? `${LAYOUT_PHASES[s.phase]} · 已检查 ${s.checkedPages.length}/${s.pageCount} 页` : '尚未分区' }, s ? `${LAYOUT_PHASES[s.phase]} · ${s.checkedPages.length}/${s.pageCount} 页` : '尚未分区'),
-          h('span', { key: 'sp', className: 'll-spacer' }),
-          h('button', { key: 'show', className: 'll-btn ll-btn-xs', disabled: !view?.page, onClick: () => setShow(!show) }, show ? '隐藏分区' : '显示分区'),
-          h('button', { key: 'start', className: 'll-btn ll-btn-xs', disabled: busy || view?.dirty || ['queued','partitioning'].includes(s?.phase), onClick: () => {
-            if (mode === 'auto' && !window.confirm('自动模式：本地分区自检通过后将调用 API 翻译并产生费用。继续？')) return;
-            if (s && !window.confirm('重新分区会清除当前人工修改与确认记录；旧版本文件仍在本地保留。继续？')) return;
-            setShow(true); act('start', { force: !!s });
-          } }, s ? '重新分区' : '开始分区'),
-        ]),
-        (error || s?.error || data?.stale) ? h('p', { key: 'err', role: 'alert', className: 'll-layout-error' }, error || (data.stale ? 'PDF 已变化，请重新分区' : s.error)) : null,
-        ready ? h('div',{key:'media',className:'ll-layout-row'},[
-          h('span',{key:'current'},`此稿：图片${s.media?.figures?'开':'关'} · 表格${s.media?.tables?'开':'关'} · 公式原图兜底${s.media?.formulaFallback!==false?'开':'关'}`),
-          (s.needsRefresh || !!s.media?.figures!==!!media?.figures || !!s.media?.tables!==!!media?.tables || (s.media?.formulaFallback!==false)!==(media?.formulaFallback!==false)) ? h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||view?.dirty,onClick:()=>act('set-media')},s.needsRefresh?'升级公式/图表（保留人工框）':'应用输出选项（保留人工框）'):null,
-        ]):null,
-        ready && view?.page ? h('div', { key: 'tools' }, [
-          h('div', { key: 'buttons', className: 'll-layout-row ll-layout-actions' }, [
-            h('span', { key: 'p' }, `第 ${view.page.page} 页`),
-            h('button', { key: 'edit', className: 'll-btn ll-btn-xs', disabled: busy, onClick: () => { setShow(true); setView(v => ({ ...v, editing: !v.editing })); } }, view.editing ? '结束编辑' : '手动纠错'),
-            !view.editing && h('button', { key: 'check', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => act('check-page', { page: view.page.page }) }, '此页已检查'),
-            !view.editing && s.phase !== 'approved' && h('button', { key: 'approve', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => {
-              if (window.confirm(`确认已检查《${s.title}》的全部 ${s.pageCount} 页？此操作仅确认，不启动翻译。`)) act('approve', { confirmAll: true });
-            } }, '确认整篇'),
-            !view.editing && s.phase === 'approved' && h('button', { key: 'translate', className: 'll-btn ll-btn-xs', disabled: busy || view.dirty, onClick: () => {
-              if (window.confirm('使用当前已确认分区翻译，将产生 API 费用。继续？')) act('translate');
-            } }, '按确认分区翻译'),
-          ]),
-          view.editing ? h('div', { key: 'editor', className: 'll-layout-editor' }, [
-            h('div', { key: 'row', className: 'll-layout-row ll-layout-actions' }, [
-              h('button', { key: 'draw', className: 'll-btn ll-btn-xs', onClick: () => setView(v => ({ ...v, drawing: !v.drawing })) }, view.drawing ? '停止画框' : '画新分区'),
-              h('button', { key: 'clear', className: 'll-btn ll-btn-xs', onClick: () => { if (window.confirm('清空本页分区并从头画框？未覆盖文字将阻止保存。')) setView(v => ({ ...v, dirty: true, page: { ...v.page, regions: [] } })); } }, '清空本页重画'),
-              h('button', { key: 'save', className: 'll-btn ll-btn-xs', disabled: busy || !view.dirty && s.mode !== 'manual', onClick: () => act('save-page', { page: view.page.page, regions: view.page.regions.map(({id,role,bbox}) => ({id,role,bbox})) }) }, '保存本页并自检'),
-              h('button', { key: 'discard', className: 'll-btn ll-btn-xs', onClick: () => { setView(v => ({ ...v, dirty: false, page: data.page })); setEpoch(n => n+1); } }, '放弃未保存修改'),
+      const s=data?.state,regions=view?.page?.regions||[],selected=regions.find(r=>r.id===view?.selected);
+      const ready=!!s&&!['queued','partitioning'].includes(s.phase);
+      const editing=!!view?.editing,dirty=!!view?.dirty,needsRefresh=!!s?.needsRefresh;
+      const articles=regions.filter(isArticleRegion),visibleRegions=regions.filter(r=>view?.showInfo||isArticleRegion(r)||r.id===view?.selected);
+      const counts=[['formula','公式'],['caption','图注'],['table','表格'],['figure','图片']].map(([role,label])=>{
+        const n=articles.filter(r=>r.role===role).length;return n?n+' '+label:null;
+      }).filter(Boolean).join(' · ');
+      const changeRegion=update=>setView(v=>({...v,dirty:true,page:{...v.page,regions:v.page.regions.map(r=>r.id===v.selected?{...r,...update}:r)}}));
+      const checkPage=()=>act('check-page',{page:view.page.page});
+      const approve=()=>{if(window.confirm('确认已检查《'+s.title+'》的全部 '+s.pageCount+' 页？仅确认，不启动翻译。'))act('approve',{confirmAll:true});};
+      const translate=()=>{if(window.confirm('使用已确认分区翻译，将产生 API 费用。继续？'))act('translate');};
+      const restart=()=>{
+        if(mode==='auto'&&!window.confirm('自动模式自检后会调用 API 翻译并产生费用。继续？'))return;
+        if(s&&!window.confirm('重新分区会清除当前人工修改和确认；旧版本文件仍保留。继续？'))return;
+        setShow(true);act('start',{force:!!s});
+      };
+      const edit=()=>{
+        if(editing&&dirty){setError('请先保存，或在更多中放弃修改。');return;}
+        setShow(true);setView(v=>({...v,editing:!v?.editing}));
+      };
+      const summary=s?(LAYOUT_PHASES[s.phase]||s.phase)+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页':'尚未分区';
+      return h('section',{ref:controlsRef,className:'ll-layout-controls','aria-label':'论文分区检查'},[
+        h('div',{key:'bar',className:'ll-layout-mainbar'},[
+          h('strong',{key:'page'},'分区'+(view?.page?' · 第 '+view.page.page+' 页':'')),
+          h('span',{key:'state',className:'ll-layout-state',title:summary},summary),
+          h('span',{key:'sp',className:'ll-spacer'}),
+          ready&&view?.page?h('button',{key:'edit',className:'ll-btn ll-btn-xs',disabled:busy,onClick:edit},editing?'结束编辑':'手动纠错'):null,
+          ready&&view?.page&&!needsRefresh?h('button',{key:'primary',className:'ll-btn ll-btn-xs ll-layout-primary',disabled:busy||(editing?!dirty&&s.mode!=='manual':dirty),
+            'aria-label':editing?'保存本页并自检':s.phase==='approved'?'按确认分区翻译':'此页已检查',
+            onClick:editing?()=>act('save-page',{page:view.page.page,regions:regions.map(({id,role,bbox})=>({id,role,bbox}))}):s.phase==='approved'?translate:checkPage},editing?'保存':s.phase==='approved'?'翻译':'此页已检查'):null,
+          !s?h('button',{key:'start',className:'ll-btn ll-btn-xs',disabled:busy,onClick:restart},'开始分区'):null,
+          h('details',{key:'more',className:'ll-layout-more',onToggle:toggleDisclosure},[
+            h('summary',{key:'toggle','aria-label':'分区更多操作'},'更多'),
+            h('div',{key:'panel',className:'ll-layout-menu'},[
+              h('strong',{key:'view'},'预览显示'),
+              h('button',{key:'show',className:'ll-btn ll-btn-xs',disabled:!view?.page,onClick:()=>setShow(!show)},show?'隐藏分区':'显示分区'),
+              h('label',{key:'info'},[h('input',{type:'checkbox',checked:!!view?.showInfo,onChange:e=>setView(v=>({...v,showInfo:e.target.checked}))}),'显示页眉、作者等信息区']),
+              h('label',{key:'labels'},[h('input',{type:'checkbox',checked:!!view?.showLabels,onChange:e=>setView(v=>({...v,showLabels:e.target.checked}))}),'显示全部框标签']),
+              ready?h('p',{key:'options'},'此稿：图片'+(s.media?.figures?'开':'关')+' · 表格'+(s.media?.tables?'开':'关')+' · 公式原图兜底'+(s.media?.formulaFallback!==false?'开':'关')):null,
+              ready&&(needsRefresh||!!s.media?.figures!==!!media?.figures||!!s.media?.tables!==!!media?.tables||(s.media?.formulaFallback!==false)!==(media?.formulaFallback!==false))?
+                h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||dirty,onClick:()=>act('set-media')},'更新识别（保留人工框）'):null,
+              ready&&!editing&&s.phase!=='approved'?h('button',{key:'approve',className:'ll-btn ll-btn-xs',disabled:busy||dirty||needsRefresh,onClick:approve},'确认整篇'):null,
+              h('details',{key:'advanced',className:'ll-layout-advanced'},[
+                h('summary',{key:'s'},'重新识别与修改恢复'),
+                h('button',{key:'restart',className:'ll-btn ll-btn-xs',disabled:busy||dirty||!ready,onClick:restart},s?'重新分区':'开始分区'),
+                editing?h('button',{key:'discard',className:'ll-btn ll-btn-xs',disabled:busy||!dirty,onClick:()=>{setError('');setView(v=>({...v,dirty:false,page:data.page}));setEpoch(n=>n+1);}},'放弃未保存修改'):null,
+                editing?h('button',{key:'clear',className:'ll-btn ll-btn-xs',disabled:busy,onClick:()=>{if(window.confirm('清空本页分区重新画框？未覆盖文字会阻止保存。'))setView(v=>({...v,dirty:true,selected:null,page:{...v.page,regions:[]}}));}},'清空本页重画'):null,
+              ]),
+              h('details',{key:'help',className:'ll-layout-help'},[
+                h('summary',{key:'s'},'操作说明与费用'),
+                h('p',{key:'p'},'分区与检查均在本地完成。框号与下方选择项一致；点框选择，拖动移动，右下角调整大小。公式、图注、表格和图片独立分类。确认后翻译才调用 API。'),
+              ]),
             ]),
-            h('div', { key: 'regions', className: 'll-layout-region-list' }, view.page.regions.map((r,i) => h('button', {
-              key: r.id, className: 'll-btn ll-btn-xs', 'aria-pressed': view.selected === r.id,
-              onClick: () => setView(v => ({ ...v, selected: r.id, drawing: false })),
-            }, `${i+1} ${REGION_LABELS[r.role] || r.role}`))),
-            selected ? h('div', { key: 'fields', className: 'll-layout-row' }, [
-              h('select', { key: 'role', 'aria-label': '分区类型', value: selected.role, onChange: e => changeRegion({ role: e.target.value }) }, Object.entries(REGION_LABELS).map(([id,label]) => h('option', { key:id,value:id },label))),
-              ...['左','下','右','上'].map((label,i) => h('label', { key: label }, [label, h('input', { type:'number',step:1,value:Math.round(selected.bbox[i]*10)/10,
-                'aria-label': `分区${label}边界`, onChange: e => { const box = [...selected.bbox]; box[i] = Number(e.target.value); changeRegion({bbox:box}); } })])),
-              ...[-1,1].map(step => h('button', { key:step, className:'ll-btn ll-btn-xs', onClick: () => setView(v => {
-                const a = [...v.page.regions], i = a.findIndex(r => r.id === v.selected), j = i+step;
-                if (j<0 || j>=a.length) return v; [a[i],a[j]]=[a[j],a[i]]; return {...v,dirty:true,page:{...v.page,regions:a}};
-              }) }, step<0 ? '提前' : '后移')),
-              h('button', { key:'delete',className:'ll-btn ll-btn-xs',onClick: () => setView(v => ({...v,dirty:true,page:{...v.page,regions:v.page.regions.filter(r => r.id !== v.selected)}})) }, '删除框'),
-            ]) : null,
-          ]) : null,
-          view.dirty ? h('p', { key:'unsaved',className:'ll-layout-error' }, '本页有未保存修改。请保存或放弃后再检查其他页。') : null,
-          data.blockingWarnings?.length ? h('p',{key:'warnings',className:'ll-layout-error'},`待处理页：${[...new Set(data.blockingWarnings.map(w => w.page))].join('、')}`) : null,
-        ]) : null,
-        h('details', { key: 'help', className: 'll-layout-help' }, [
-          h('summary', { key: 'summary' }, '操作说明与费用'),
-          h('p', { key: 'hint', className: 'll-layout-hint' }, '本地分区与人工检查不消耗模型 token；自动模式自检后翻译，半自动/手动须确认。框号表示阅读顺序。'),
-          h('p', { key: 'how', className: 'll-layout-hint' }, '拖框移动，右下角缩放；新框接管框内文字。正文、标题、题注、公式分开；非正文归入信息区。需整页覆盖，避免重叠。'),
+          ]),
         ]),
+        needsRefresh?h('div',{key:'upgrade',className:'ll-layout-upgrade'},['此稿是旧版识别结果。',h('button',{key:'refresh',className:'ll-btn ll-btn-xs',disabled:busy||dirty,onClick:()=>act('set-media'),title:'更新公式、图注与分区显示，保留原人工框，不调用翻译 API'},'更新识别')]):null,
+        ready&&view?.page&&editing?h('div',{key:'selection',className:'ll-layout-selection'},[
+          h('select',{key:'region',className:'ll-layout-region-select','aria-label':'选择分区',value:selected?.id||'',onChange:e=>setView(v=>({...v,selected:e.target.value,drawing:false}))},
+            [h('option',{key:'none',value:''},'选择分区（'+visibleRegions.length+'）'),...visibleRegions.map(r=>h('option',{key:r.id,value:r.id},regionDisplayLabel(r,regions)))]),
+          h('select',{key:'role','aria-label':'分区类型',disabled:!selected,value:selected?.role||'body',onChange:e=>changeRegion({role:e.target.value})},Object.entries(REGION_LABELS).map(([id,label])=>h('option',{key:id,value:id},label))),
+          h('button',{key:'draw',className:'ll-btn ll-btn-xs','aria-label':view.drawing?'停止画框':'画新分区','aria-pressed':!!view.drawing,onClick:()=>setView(v=>({...v,drawing:!v.drawing}))},view.drawing?'停止画框':'+ 画框'),
+          selected?h('details',{key:'precise',className:'ll-layout-inspector',onToggle:toggleDisclosure},[
+            h('summary',{key:'s'},'精确调整'),
+            h('div',{key:'panel',className:'ll-layout-menu'},[
+              h('strong',{key:'title'},regionDisplayLabel(selected,regions)),
+              h('div',{key:'coords',className:'ll-layout-coordinates'},['左','下','右','上'].map((label,i)=>h('label',{key:label},[label,h('input',{type:'number',step:1,value:Math.round(selected.bbox[i]*10)/10,'aria-label':'分区'+label+'边界',onChange:e=>{const box=[...selected.bbox];box[i]=Number(e.target.value);changeRegion({bbox:box});}})]))),
+              h('div',{key:'order',className:'ll-layout-row'},[
+                ...[-1,1].map(step=>h('button',{key:step,className:'ll-btn ll-btn-xs',onClick:()=>setView(v=>{
+                  const a=[...v.page.regions],i=a.findIndex(r=>r.id===v.selected),j=i+step;if(j<0||j>=a.length)return v;
+                  [a[i],a[j]]=[a[j],a[i]];return{...v,dirty:true,page:{...v.page,regions:a}};
+                })},step<0?'提前':'后移')),
+                h('button',{key:'delete',className:'ll-btn ll-btn-xs ll-danger',onClick:()=>setView(v=>({...v,dirty:true,selected:null,page:{...v.page,regions:v.page.regions.filter(r=>r.id!==v.selected)}}))},'删除框'),
+              ]),
+            ]),
+          ]):null,
+        ]):ready&&counts?h('div',{key:'counts',className:'ll-layout-counts'},counts):null,
+        (error||s?.error||data?.stale)?h('p',{key:'error',role:'alert',className:'ll-layout-error'},error||(data.stale?'PDF 已变化，请重新分区':s.error)):null,
+        dirty?h('p',{key:'dirty',className:'ll-layout-unsaved'},'本页有未保存修改。请保存或放弃后再检查其他页。'):null,
+        data?.blockingWarnings?.length?h('p',{key:'warnings',className:'ll-layout-error'},'待处理页：'+[...new Set(data.blockingWarnings.map(w=>w.page))].join('、')):null,
       ]);
     }
 

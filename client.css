@@ -914,3 +914,43 @@
 .ll-root.ll-compact .ll-head,.ll-root.ll-compact .ll-mobilebar { padding-left:16px; padding-right:16px; }
 .ll-root .ll-count-pill { font-size:11px; }
 
+/* 0.7.1: a small review bar; detailed edits are disclosures, not a wall of chips. */
+.ll-root .ll-layout-controls { position:relative; z-index:25; padding:8px 16px; max-height:none; overflow:visible; background:var(--ll-nav-bg); }
+.ll-root .ll-layout-mainbar { display:flex; align-items:center; gap:8px; min-height:30px; }
+.ll-root .ll-layout-mainbar > strong { flex:none; font-size:12px; }
+.ll-root .ll-layout-state { min-width:0; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; color:var(--ll-muted); }
+.ll-root .ll-layout-mainbar .ll-btn,.ll-root .ll-layout-selection .ll-btn { flex:none; min-height:28px; font-size:12px!important; padding:3px 8px; }
+.ll-root .ll-layout-primary { background:var(--ll-text); color:var(--ll-bg); border-color:transparent; }
+.ll-root .ll-layout-selection { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.ll-root .ll-layout-selection select { font:12px/1.4 system-ui,sans-serif!important; height:28px!important; padding:3px 6px!important; width:auto; min-width:0; max-width:100%; border-radius:4px; }
+.ll-root .ll-layout-region-select { flex:1 1 145px; }
+.ll-root .ll-layout-selection select[aria-label="分区类型"] { flex:0 1 110px; }
+.ll-root .ll-layout-more,.ll-root .ll-layout-inspector { flex:none; }
+.ll-root .ll-layout-more > summary,.ll-root .ll-layout-inspector > summary { cursor:pointer; padding:5px 6px; min-height:18px; list-style:none; font-size:12px; border-radius:4px; color:var(--ll-text); }
+.ll-root .ll-layout-more > summary:hover,.ll-root .ll-layout-inspector > summary:hover { background:var(--ll-control-hover); }
+.ll-root .ll-layout-menu { position:absolute; bottom:calc(100% + 6px); right:16px; width:min(320px,calc(100% - 32px)); max-height:min(340px,60vh); overflow:auto; display:flex; flex-direction:column; align-items:stretch; gap:10px; padding:14px; box-sizing:border-box; background:var(--ll-nav-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; box-shadow:0 8px 24px #0003; z-index:50; }
+.ll-root .ll-layout-menu .ll-btn { align-self:flex-start; min-height:28px; }
+.ll-root .ll-layout-menu label { display:flex; align-items:center; gap:8px; font-size:12px!important; }
+.ll-root .ll-layout-menu label input[type="checkbox"] { flex:none; }
+.ll-root .ll-layout-menu > strong { font-size:13px; }
+.ll-root .ll-layout-menu :is(p,summary) { font-size:12px!important; line-height:1.5!important; }
+.ll-root .ll-layout-advanced .ll-btn { margin-top:8px; }
+.ll-root .ll-layout-coordinates { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.ll-root .ll-layout-coordinates label { display:flex; min-width:0; }
+.ll-root .ll-layout-coordinates input { width:80px!important; height:28px!important; font:12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-layout-counts { font-size:11px; color:var(--ll-muted); margin-top:2px; }
+.ll-root .ll-layout-controls .ll-layout-unsaved { color:var(--ll-muted); font-size:11px!important; margin:4px 0 0!important; }
+.ll-root .ll-layout-upgrade { display:flex; align-items:center; gap:8px; font-size:12px; margin-top:6px; }
+.ll-root .ll-region-box { background:transparent; border-width:1px; }
+.ll-root .ll-region-box[data-role="formula"] { border-color:#a16bd4; }
+.ll-root .ll-region-box[data-role="caption"] { border-color:#b7791f; }
+.ll-root .ll-region-box[data-role="table"],.ll-root .ll-region-box[data-role="figure"] { border-color:#27806c; }
+.ll-root .ll-region-box .ll-region-label { display:none; top:-15px; left:-1px; max-width:100%; overflow:hidden; text-overflow:ellipsis; background:#fff; color:#111; padding:1px 3px; font:11px/13px system-ui,sans-serif!important; }
+.ll-root .ll-region-box:is(:hover,.is-selected) .ll-region-label,.ll-root .ll-region-box[data-labels="all"] .ll-region-label { display:block; }
+.ll-root .ll-region-handle { width:7px; height:7px; right:-3px; bottom:-3px; }
+@container (max-width:520px) {
+ .ll-layout-mainbar { flex-wrap:wrap; gap:5px!important; }
+ .ll-layout-mainbar > .ll-layout-state { flex:1; max-width:none; }
+ .ll-layout-mainbar > .ll-spacer { display:none; }
+}
+

@@ -1,6 +1,6 @@
 /** Native PDF objects stay out of the prose stream, even when inclusion is off. */
 import { itemBox, unionBoxes } from './page_regions.mjs';
-export const MEDIA_POLICY = 'document-v3-editable-math';
+export const MEDIA_POLICY = 'document-v4-semantic-preview';
 export const mediaOptions = value => ({ figures: value?.figures === true, tables: value?.tables === true, formulaFallback:value?.formulaFallback!==false });
 const inside = (i,b) => {const a=itemBox(i),x=(a[0]+a[2])/2,y=(a[1]+a[3])/2;return x>=b[0]&&x<=b[2]&&y>=b[1]&&y<=b[3];};
 const mult=(m,n)=>[m[0]*n[0]+m[2]*n[1],m[1]*n[0]+m[3]*n[1],m[0]*n[2]+m[2]*n[3],m[1]*n[2]+m[3]*n[3],m[0]*n[4]+m[2]*n[5]+m[4],m[1]*n[4]+m[3]*n[5]+m[5]];
@@ -26,6 +26,24 @@ function nativeLines(items){
  }
  return rows.map(r=>({...r,items:r.items.sort((a,b)=>a.transform[4]-b.transform[4]),text:r.items.map(i=>i.str).join(' ')}));
 }
+/** Human table boxes often include their title. Split that title only when a
+ * native TABLE label and a matching top table rule both support the boundary. */
+export function separateManualTableCaptions(regions,items,graphics){
+ const result=[];
+ for(const region of regions){
+  if(region.role!=='table'){result.push(region);continue;}
+  const owned=new Set(region.itemIds),members=items.filter(i=>owned.has(i.sourceId)),lines=nativeLines(members);
+  const label=lines.find(l=>/^(?:TABLE|Table)\s*\d+\b/u.test(l.text.trim()));
+  const top=label&&graphics.rules.filter(b=>b[3]<label.y&&label.y-b[3]<40&&Math.abs(b[0]-region.bbox[0])<14&&Math.abs(b[2]-region.bbox[2])<14).sort((a,b)=>b[3]-a[3])[0];
+  if(!top){result.push(region);continue;}
+  const cap=members.filter(i=>i.transform[5]>top[3]+.5&&i.height<=label.items[0].height*1.1),ids=new Set(cap.map(i=>i.sourceId));
+  if(!cap.length){result.push(region);continue;}
+  const title=/^(?:Table)\s*\d+/iu.exec(label.text.trim())?.[0];
+  result.push({id:region.id+'-caption',role:'caption',bbox:unionBoxes(cap.map(itemBox)),itemIds:[...ids],flow:'article',order:region.order,evidence:'native-table-title-inside-human-box',confidence:'rule-supported'});
+  result.push({...region,label:title||region.label,bbox:[region.bbox[0],region.bbox[1],region.bbox[2],Math.min(region.bbox[3],top[3]+1)],itemIds:region.itemIds.filter(id=>!ids.has(id))});
+ }
+ return result;
+}
 export function identifyMedia(semantic,{page,width,height,graphics,previousTables=[]}){
  const items=semantic.items.filter(i=>i.str.trim()&&!i.regionId), lines=nativeLines(items), objects=[];
  const claim=(role,bbox,evidence)=>{
@@ -41,7 +59,10 @@ export function identifyMedia(semantic,{page,width,height,graphics,previousTable
    const r=claim('table',unionBoxes(rotated.filter(i=>!i.regionId).map(itemBox)),'rotated-native-table');r.label=rotatedLabel.str;r.rotation=90;
  }
  // A bare label is unambiguous. A sentence such as "Table 1 presents ..." is not.
- const seeds=lines.filter(l=>/^(?:Table|Fig(?:ure)?\.?)\s*\d+\s*(?:[.:]|$)/iu.test(l.text.trim())&&!l.items.some(i=>i.regionId));
+ const normalSizes=items.filter(i=>i.height>4&&i.str.trim().length>2).map(i=>i.height).sort((a,b)=>a-b),normalSize=normalSizes[Math.floor(normalSizes.length/2)]||10;
+ const seeds=lines.filter(l=>/^(?:Table|Fig(?:ure)?\.?)\s*\d+\b/iu.test(l.text.trim())&&!l.items.some(i=>i.regionId)
+   && (/^(?:Table|Fig(?:ure)?\.?)\s*\d+\s*(?:[.:]|$)/iu.test(l.text.trim())
+    ||/^(?:TABLE|FIGURE)\s*\d+\b/u.test(l.text.trim())||l.items[0].height<normalSize*.95));
  for(const seed of seeds){
   const table=/^Table/iu.test(seed.text), sb=unionBoxes(seed.items.map(itemBox));
   const near=graphics.rules.filter(b=>b[3]<sb[1]+3&&sb[1]-b[3]<45&&b[0]<=sb[0]+12&&b[2]>sb[0]+80).sort((a,b)=>b[3]-a[3]);
@@ -68,14 +89,15 @@ export function identifyMedia(semantic,{page,width,height,graphics,previousTable
    continue;
   }
   const capWidth=table?bounds[2]-bounds[0]:Math.max(bounds[2]-bounds[0],sb[2]-sb[0]);
-  const following=lines.filter(l=>l.y<=seed.y&&seed.y-l.y<240&&l.items[0].transform[4]>=sb[0]-2&&l.items[0].transform[4]<sb[0]+capWidth
-    &&l.items.every(i=>Math.abs(i.height-seed.items[0].height)<1.1));
+  const following=lines.map(l=>({...l,items:l.items.filter(i=>i.transform[4]>=sb[0]-2&&i.transform[4]+i.width<=sb[0]+capWidth+3)}))
+    .filter(l=>l.items.length&&l.y<=seed.y&&seed.y-l.y<240
+    &&l.items.every(i=>i.height<=seed.items[0].height*1.1));
   const caption=[];
   for(const l of following){if(caption.length&&caption.at(-1).y-l.y>seed.items[0].height*1.8)break;
    if(table&&l.y<bounds[3])break;caption.push(l);}
   claim('caption',unionBoxes(caption.flatMap(l=>l.items).map(itemBox)),'native-media-caption');
   const r=claim(table?'table':'figure',bounds,table?'caption+matching-table-rules':'caption+native-image-bounds');
-  r.label=seed.text.trim();
+  r.label=/^(?:Table|Fig(?:ure)?\.?)\s*\d+/iu.exec(seed.text.trim())?.[0]||seed.text.trim();
  }
  // Repeated headers/outer rules on the next page: keep a continued table isolated.
  if(!objects.some(r=>r.role==='table'))for(const prev of previousTables){

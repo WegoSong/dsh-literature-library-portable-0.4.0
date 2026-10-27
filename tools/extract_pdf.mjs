@@ -26,10 +26,11 @@ import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { REGION_VERSION, itemBox, unionBoxes, detectShadedPanels, identifyPageRegions, auditCoverage } from './page_regions.mjs';
 import { ARTICLE_ROLES } from './manual_regions.mjs';
-import { MEDIA_POLICY, mediaOptions, pageGraphics, identifyMedia, tableGrid, markdownTable } from './media_regions.mjs';
+import { MEDIA_POLICY, mediaOptions, pageGraphics, identifyMedia, separateManualTableCaptions, tableGrid, markdownTable } from './media_regions.mjs';
 import { readMathGlyphs, reconstructFormula } from './formula_latex.mjs';
 import { buildDocumentModel } from './document_structure.mjs';
 import { attachNativeScripts } from './native_scripts.mjs';
+import {refineSemanticRegions} from './semantic_regions.mjs';
 import { nativePageCache } from './native_page_cache.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1007,8 +1008,18 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
       if (r.role === 'formula') return [{ type: 'formula-source', text, sourceIds, sourcePages, flowId,
         crop: { page: pc.p, left: r.bbox[0], bottom: r.bbox[1], right: r.bbox[2], top: r.bbox[3] } }];
       if (r.role === 'heading' || r.role === 'caption') return [{ type: r.role, text:r.captionText||text, sourceIds, sourcePages, flowId }];
-      const safe = markFormulaRegions(lines, { left: r.bbox[0], right: r.bbox[2], page: pc.p });
-      const paras = linesToParagraphs(safe, { bodyLeft: r.bbox[0], bodyRight: r.bbox[2], bodySize, role: r.role, page: pc.p });
+      // A human body box can contain two columns. Keep its order relative to
+      // other human boxes, but never interleave those columns by baseline y.
+      const groups=r.role==='body'&&r.bbox[2]-r.bbox[0]>pc.width*.65
+        ?pageBlocks(lines,pc.width).flatMap(g=>splitWidthTransitions(g,pc.width)):[{lines,gutter:null}];
+      if(groups.some(g=>g.gutter))out.stats.columns.at(-1).columns=2;
+      const paras=groups.flatMap(g=>{
+        const merged=mergeFragments([...g.lines].sort((a,b)=>Math.round(b.y*4)-Math.round(a.y*4)||a.x0-b.x0),g.gutter);
+        if(!merged.length)return [];
+        const left=Math.min(...merged.map(l=>l.x0)),right=Math.max(...merged.map(l=>l.x1));
+        const safe=markFormulaRegions(merged,{left,right,page:pc.p});
+        return linesToParagraphs(safe,{bodyLeft:left,bodyRight:right,bodySize,role:r.role,page:pc.p});
+      });
       return paras.map(p => ({ ...p, flowId }));
     });
   }
@@ -1153,7 +1164,7 @@ function splitWidthTransitions(group, width) {
 /** Keep native ownership/crops until unmerged glyphs can reconstruct the math. */
 function markFormulaRegions(lines, { left, right, page }) {
   const mathLike = (line) => {
-    const text = line.text.normalize('NFKC');
+    const text = line.text.normalize('NFKC').replace(/[_^]\{[^{}]*\}/gu,'');
     if(/\b(?:the|and|are|was|were|for|with|from|this|that|where|when|these|using|at)\b/iu.test(text))return false;
     const words = text.match(/[A-Za-z]{3,}/gu) ?? [];
     return words.filter((w) => !['approx', 'times', 'leq', 'geq', 'frac', 'neq'].includes(w)).length <= 2
@@ -1360,13 +1371,19 @@ async function extract(pdfPath, opts) {
     const glyphsOnDisk=!!cached||!!(mathGlyphs&&await nativeCache.write(p,{items:originalItems,panels,panelWarning,graphics,mathGlyphs}));
     const manual = overrides?.pages?.[p];
     if (manual) {
-      semantic.regions = manual;
-      const owners = new Map(manual.flatMap(r => r.itemIds.map(id => [id, r.id])));
+      semantic.regions = separateManualTableCaptions(manual,semantic.items,graphics);
+      const owners = new Map(semantic.regions.flatMap(r => r.itemIds.map(id => [id, r.id])));
       for (const item of semantic.items) item.regionId = owners.get(item.sourceId);
       semantic.warnings = [];
     }
     else identifyMedia(semantic,{page:p,width:vp.width,height:vp.height,graphics,
       previousTables:pageCache.at(-1)?.regions.filter(r=>r.role==='table')||[]});
+    // Blank PDF text items carry real word spacing. Keep them in the same
+    // semantic bundle without adding them to meaningful-source ownership counts.
+    for(const item of semantic.items.filter(i=>!i.str.trim())){
+      const b=itemBox(item),x=(b[0]+b[2])/2,y=(b[1]+b[3])/2;
+      item.regionId=semantic.regions.find(r=>x>=r.bbox[0]-.2&&x<=r.bbox[2]+.2&&y>=r.bbox[1]-.2&&y<=r.bbox[3]+.2)?.id;
+    }
     const rawItems = semantic.items, lines = [];
     // Build text independently inside each identified region. Once two native PDF
     // items have been fused across a panel edge, no later prompt can undo it.
@@ -1538,6 +1555,8 @@ async function extract(pdfPath, opts) {
 
   out.source.metadataCandidates = collectPublicationMetadata(pageCache, out.source);
 
+  await resolveFormulaSources(doc,out,pageCache,opts);
+  for(const pc of pageCache)refineSemanticRegions(pc,out.pages.flatMap(p=>p.paragraphs));
   const sourceItems = pageCache.flatMap(pc => pc.rawItems);
   const regions = pageCache.flatMap(pc => pc.regions);
   const coverage = auditCoverage(sourceItems, regions, out.pages.flatMap(p => p.paragraphs));
@@ -1559,7 +1578,6 @@ async function extract(pdfPath, opts) {
     throw new Error(`版面完整性校验失败，已保留问题页供纠错，停止翻译；见 ${opts.name}.layout-error.json`);
   }
   out.stats.paragraphs = out.pages.reduce((n, p) => n + p.paragraphs.length, 0);
-  await resolveFormulaSources(doc,out,pageCache,opts);
   out.document = buildDocumentModel(out.pages,opts.sourceHash,coverage);
   const previews = await renderLayoutPreviews(doc, pageCache, opts);
   out.layout = { version: REGION_VERSION, documentVersion: out.document.version, performance:{nativeCacheHits:out.stats.nativeCacheHits||0,nativeScriptItems:out.stats.nativeScriptItems||0}, mediaPolicy: MEDIA_POLICY, media: mediaOptions(opts), sourceHash: opts.sourceHash, coverage, previews,
