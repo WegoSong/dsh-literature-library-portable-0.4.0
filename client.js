@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.7.1';
+    const PDFJS_REV = '0.7.2';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -2206,10 +2206,13 @@ window.__ModuleLoader__.load({
       try{return !!event?.target&&node.contains(event.target);}catch{return false;}
     };
     const outside=e=>{if(!inside(e))close();},always=()=>close();
+    // Window capture also sees non-bubbling blur from every descendant control.
+    // Internal focus changes must finish their click before any dismissal occurs.
+    const windowBlur=e=>{if(e.target===win)close();};
     const key=e=>{if(e.key==='Escape'){e.preventDefault?.();close();}};
     const visibility=()=>{if(doc?.visibilityState==='hidden')close();};
     const bindings=[['pointerdown',outside],['mousedown',outside],['contextmenu',outside],['wheel',outside],
-      ['scroll',outside],['resize',always],['blur',always],['pagehide',always],['keydown',key]];
+      ['scroll',outside],['resize',always],['blur',windowBlur],['pagehide',always],['keydown',key]];
     const capture={capture:true};
     for(const [name,fn]of bindings)win.addEventListener(name,fn,capture);
     doc?.addEventListener?.('visibilitychange',visibility);

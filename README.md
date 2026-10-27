@@ -6,7 +6,9 @@
 这是可在 **DSH Web → Plugins** 中安装的 bundle 包，不再需要 `install.mjs` 或手工改
 `cordis.patch.yml`。
 
-## 0.7.1 操作入口
+## 0.7.2 操作入口
+
+已修复「更多」内复选框/按钮无法点击及坐标、PDF 工具焦点误关闭。升级并重启 DSH/刷新插件页面即可，无须重新翻译。
 
 - 「文献管理」：扫描路径、文件夹整理、隐藏与信息补全。
 - 「翻译与任务」：自动/半自动/手动、图表与公式选项、批量分区队列。
@@ -28,7 +30,7 @@
 对应的 CLI 写法：
 
 ```powershell
-dsh plugin add "E:/path/to/dsh-literature-library-0.7.1.tgz"
+dsh plugin add "E:/path/to/dsh-literature-library-0.7.2.tgz"
 ```
 
 ### 方式 B：插件市场
