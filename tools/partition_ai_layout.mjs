@@ -78,7 +78,8 @@ export function validateProvider(input){
 /** Restrict vendor-only parameters to the official endpoint, not names or lookalike hosts. */
 export function requestPolicy(config){
  const url=new URL(config.endpoint),deepseek=url.protocol==='https:'&&url.hostname==='api.deepseek.com'&&(!url.port||url.port==='443');
- return deepseek?{version:'deepseek-layout-v2',thinking:'disabled',json:true}:{version:'compatible-layout-v1',thinking:'provider-default',json:false};
+ const native=url.protocol==='https:'&&url.hostname==='dsh-account.invalid';
+ return deepseek||native?{version:native?'dsh-account-layout-v1':'deepseek-layout-v2',thinking:'disabled',json:true}:{version:'compatible-layout-v1',thinking:'provider-default',json:false};
 }
 export function numericUsage(raw){
  const usage={};for(const k of ['prompt_tokens','completion_tokens','total_tokens','prompt_cache_hit_tokens','prompt_cache_miss_tokens'])if(Number.isFinite(raw?.[k])&&raw[k]>=0)usage[k]=raw[k];
@@ -96,7 +97,7 @@ export async function callVision(config,context,image,{signal,fetchImpl=fetch,pr
  const failure=(message,kind)=>Object.assign(Error(message+' '+diagnosticSummary(diagnostic)),{diagnostic:{...diagnostic,kind}});
  const official=policy.json;
  const body={model:config.model,stream:false,max_tokens:config.maxTokens,...(official?{thinking:{type:policy.thinking},...(policy.thinking==='enabled'?{reasoning_effort:policy.effort}:{}),response_format:{type:'json_object'}}:{}),messages:[{role:'system',content:prompt},{role:'user',content:[{type:'text',text:JSON.stringify(context)},...(image?[{type:'image_url',image_url:{url:image.dataUrl}}]:[])]}]};
- let res;try{res=await fetchImpl(config.endpoint,{method:'POST',headers:{'content-type':'application/json',...(config.apiKey?{authorization:'Bearer '+config.apiKey}:{})},body:JSON.stringify(body),redirect:'error',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(90000)]):AbortSignal.timeout(90000)});}catch(e){if(signal?.aborted)throw failure('AI 请求已取消；服务商可能已计费','cancelled');throw failure('视觉接口连接失败或超时；未自动重试，服务商可能已计费','connection');}
+ let res;try{res=await fetchImpl(config.endpoint,{method:'POST',headers:{'content-type':'application/json',...(config.apiKey?{authorization:'Bearer '+config.apiKey}:{})},body:JSON.stringify(body),redirect:'error',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(90000)]):AbortSignal.timeout(90000)});}catch(e){if(e.diagnosticUsage)diagnostic.usage=numericUsage(e.diagnosticUsage);if(signal?.aborted)throw failure('AI 请求已取消；服务商可能已计费','cancelled');if(e.accountFailure)throw failure(e.message,'account-provider');throw failure('视觉接口连接失败或超时；未自动重试，服务商可能已计费','connection');}
  diagnostic.httpStatus=res.status;
  if(!res.ok){await res.body?.cancel();throw failure(`视觉接口返回 HTTP ${res.status}；未自动重试，请核对模型权限与配置`,'http');}
  let text='',size=0;const decoder=new TextDecoder();try{for await(const chunk of res.body){size+=chunk.length;if(size>2_000_000)throw Error('响应过大');text+=decoder.decode(chunk,{stream:true});}text+=decoder.decode();}catch{throw failure('视觉接口响应读取失败或超出 2 MB 预算；未自动重试','response-read');}

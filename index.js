@@ -33,6 +33,8 @@ import {BLOCK_PROTOCOL,blockPayload,decodeBlockResponse} from './tools/block_tra
 import {classifyTaskFailure} from './tools/task_diagnostics.mjs';
 import {createPartitionIntegration} from './tools/partition_integration.mjs';
 import {canonicalSegment} from './tools/translation_segment_cache.mjs';
+import {createDshAccountTransport,ACCOUNT_ENDPOINT} from './tools/dsh_account_transport.mjs';
+import {writeJsonAtomic} from './tools/atomic_json.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -727,10 +729,13 @@ export function apply(ctx, config = {}) {
     pdfjsRoot = resolve(join(workspaceRoot, 'node_modules', 'pdfjs-dist'));
   }
   const prefix = config.routePrefix || '/literature-library';
-  const partitionAI=createPartitionIntegration({root:join(libraryRoot,'layouts'),credentials:async()=>{
-    const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href),resolved=await tools.resolveApiKey(config);
-    return{key:resolved.key,baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,model:config.model||tools.DEFAULT_MODEL};
-  }});
+  const accountTransport=createDshAccountTransport({getLlm:()=>ctx.get?.('llm'),getAttachments:()=>ctx.get?.('attachments')});
+  const providerFile=join(libraryRoot,'model-provider.json');
+  async function providerPreference(){try{const p=JSON.parse(await readFile(providerFile,'utf8'));return{mode:p.mode==='account'?'account':'api',model:typeof p.model==='string'?p.model:'deepseek-flash'};}catch(e){if(e.code!=='ENOENT')throw e;return{mode:'api',model:'deepseek-flash'};}}
+  async function modelCredential(){const p=await providerPreference();if(p.mode==='account'){const state=await accountTransport.status();return{key:state.ready?'DSH-managed-account':null,source:'DSH 管理的 DeepSeek 账号',baseUrl:new URL(ACCOUNT_ENDPOINT).origin,model:p.model,transport:'account',account:state};}
+    const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href),resolved=await tools.resolveApiKey(config);return{key:resolved.key,source:resolved.source,baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,model:config.model||tools.DEFAULT_MODEL,transport:'api'};}
+  const partitionAI=createPartitionIntegration({root:join(libraryRoot,'layouts'),credentials:modelCredential,
+    fetchImpl:(url,options)=>url===ACCOUNT_ENDPOINT?accountTransport.fetchChat(url,options):fetch(url,options)});
   const layoutWorkflow = createLayoutWorkflow({
     root: join(libraryRoot, 'layouts'),
     findPaper: async slug => {
@@ -2061,14 +2066,18 @@ export function apply(ctx, config = {}) {
     const stamp = Date.now();
     const tools = await import(`${pathToFileURL(join(toolsRoot, 'deepseek_translate.mjs')).href}?t=${stamp}`);
     const pipeline = await import(`${pathToFileURL(join(toolsRoot, 'translation_pipeline.mjs')).href}?t=${stamp}`);
-    const { key, source: keySource } = await tools.resolveApiKey(config);
+    const credential=await modelCredential(),{key,source:keySource}=credential;
     if (!key) {
+      if(credential.transport==='account')throw Object.assign(Error(credential.account?.message||'请先在 DSH 登录 DeepSeek 账号'),{status:501});
       throw Object.assign(
         new Error('没有可用的 DeepSeek API key。请设置环境变量 DEEPSEEK_API_KEY，'
           + '或确认 ~/.dsh/.credentials.yaml 里有 DEEPSEEK_API_KEY，或在插件配置里给 apiKey。'),
         { status: 501 },
       );
     }
+
+    const billingSettings=await partitionAI.settings();
+    if(!!billingSettings.nativeAccount!==(credential.transport==='account')||billingSettings.translationModel!==credential.model)throw Object.assign(Error('提交期间调用方式或模型已变化，请重新提交'),{status:409});
 
     const jobId = newJobId();
     const now = new Date().toISOString();
@@ -2095,7 +2104,8 @@ export function apply(ctx, config = {}) {
       outputPath: paper.translation
         || paper.translationPath
         || `${libraryDir}/translations/${slug}/${slug}.md`,
-      model: typeof body.model === 'string' && body.model.trim() !== '' ? body.model.trim() : (config.model || tools.DEFAULT_MODEL),
+      model: typeof body.model === 'string' && body.model.trim() !== '' ? body.model.trim() : credential.model,
+      providerMode:credential.transport,
       maxTokens: Number.isFinite(body.maxTokens) && body.maxTokens > 0
         ? Math.floor(body.maxTokens)
         : (Number.isFinite(Number(config.maxTokens)) && Number(config.maxTokens) > 0
@@ -2111,7 +2121,7 @@ export function apply(ctx, config = {}) {
       charsIn: 0,
       charsOut: 0,
       usages: [],
-      billingSettings:{...await partitionAI.settings(),qualityModel:typeof body.qualityModel==='string'?body.qualityModel:config.qualityModel||'deepseek-v4-pro'},
+      billingSettings:{...billingSettings,qualityModel:typeof body.qualityModel==='string'?body.qualityModel:config.qualityModel||'deepseek-v4-pro'},
       pendingRegions:approvedLayout?.pendingRegions||[],costReport:null,
       usage: {
         inputTokens: 0, outputTokens: 0, cacheHitTokens: 0,
@@ -2139,13 +2149,13 @@ export function apply(ctx, config = {}) {
       notBefore: requestedStart.getTime(),
       execute: () => runTranslateJob(job, paper, tools, pipeline, key, body),
       onError: async (err) => {
-        job.phase = 'failed';
         job.error = String(err?.message ?? err);
         job.failure=classifyTaskFailure(err);
-        job.stage = '失败（已保存完成的分块，下次可续传）';
+        job.stage = '记录失败与费用';
         job.finishedAt = new Date().toISOString();
         job.updatedAt = job.finishedAt;
-        try{job.costReport=await partitionAI.finishTranslation(job.slug,job);}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
+        try{job.costReport=await partitionAI.finishTranslation(job.slug,{...job,phase:'failed'});}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
+        job.phase='failed';job.stage='失败（已保存完成的分块，下次可续传）';
         ctx.logger?.warn?.(`literature-library: 翻译任务 ${jobId} 失败 — ${job.error}`);
       },
     });
@@ -2217,6 +2227,7 @@ export function apply(ctx, config = {}) {
 
   /** 真正执行翻译：抽取 → 分块 → 逐块调 API → 合并写入 */
   async function runTranslateJob(job, paper, tools, pipeline, apiKey, body) {
+    const callModel=job.providerMode==='account'?accountTransport.generate:tools.callDeepSeek;
     const pdfAbs = resolveInside(paper.source);
     if (pdfAbs === undefined) throw new Error(`PDF 路径越权或不存在：${paper.source}`);
 
@@ -2421,7 +2432,7 @@ export function apply(ctx, config = {}) {
         // Batch missing paragraphs, rather than turning a corrected page into
         // many small requests with repeated prompt overhead.
         if(missing.length>1){const source=missing.map(b=>b.source).join('\n\n'),at=new Date().toISOString();job.apiChunks++;
-          try{const result=await tools.callDeepSeek({baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,apiKey,model:job.model,system,reasoningEffort:job.reasoningEffort,
+          try{const result=await callModel({baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,apiKey,model:job.model,system,reasoningEffort:job.reasoningEffort,
             user:tools.buildUserPrompt({chunk:JSON.stringify(blockPayload(source)),index:i,total:chunks.length,title:paper.titleEn||paper.title,source:paper.source})+'\n返回 JSON blocks，保持 id；只翻译这些未完成段落。',maxTokens:{min:Math.min(2048,job.maxTokens),max:job.maxTokens,inputRatio:3.3,base:768},timeoutMs:config.requestTimeoutMs||600000});recordJobUsage(result.usage,at,job.model);
             const decoded=decodeBlockResponse(source,result.text),values=pipeline.translationBlocks(decoded.text);
             if(!result.truncated&&!decoded.errors.length&&values.length===missing.length)for(let n=0;n<missing.length;n++){const b=missing[n],candidate=values[n].source;if(pipeline.validateTranslation(b.source,candidate,prepared.placeholders).ok){segmentTexts[segmentSources.indexOf(b)]=candidate;await persistSegments(b.source,candidate);}}
@@ -2429,7 +2440,7 @@ export function apply(ctx, config = {}) {
         }
         const recovered=await pipeline.recoverStructuredTranslation({source:chunks[i],translation:segmentSources.map((b,n)=>segmentTexts[n]||b.marker+'\n').join('\n\n'),placeholders:prepared.placeholders,
           translateBlock:async block=>{await waitForOffpeak();const at=new Date().toISOString(),model=block.attempt&&config.enableQualityEscalation!==false?job.qualityModel:job.model;job.apiChunks++;
-            try{const result=await tools.callDeepSeek({baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,apiKey,model,system,reasoningEffort:job.reasoningEffort,
+            try{const result=await callModel({baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,apiKey,model,system,reasoningEffort:job.reasoningEffort,
               user:tools.buildUserPrompt({chunk:block.body,index:block.index,total:block.total,title:paper.titleEn||paper.title,source:paper.source})+'\n只翻译本段，保留全部技术标记；不生成段落边界。',maxTokens:{min:Math.min(2048,job.maxTokens),max:job.maxTokens,inputRatio:3.3,base:768},timeoutMs:config.requestTimeoutMs||600000});recordJobUsage(result.usage,at,model);return result;}catch(e){if(e.usage)recordJobUsage(e.usage,at,model);throw e;}
           },onAccepted:b=>persistSegments(b.source,b.text)});
         if(!recovered.validation.ok)throw Error('补译内容未通过结构校验');job.localCacheHits+=reused;parts.push(recovered.text);await persistSegments(chunks[i],recovered.text);await writeCachedChunk(cacheFile,{version:pipeline.PIPELINE_VERSION,key:cacheKey,text:recovered.text});note(`第 ${i+1} 块复用 ${reused} 段，仅补译未完成内容`);continue;
@@ -2494,7 +2505,7 @@ export function apply(ctx, config = {}) {
           const requestedAt = new Date().toISOString();
           job.apiChunks += 1;
           try {
-            const result = await tools.callDeepSeek({
+            const result = await callModel({
               baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
               apiKey,
               model: attempt.model,
@@ -2606,7 +2617,7 @@ export function apply(ctx, config = {}) {
                   const at = new Date().toISOString();
                   job.apiChunks += 1;
                   try {
-                    const result = await tools.callDeepSeek({ baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
+                    const result = await callModel({ baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
                       apiKey, model: paragraphModel, system, user: paragraphUser,
                       reasoningEffort: job.reasoningEffort,
                       maxTokens: { min: Math.min(2048, job.maxTokens), max: job.maxTokens, inputRatio: 3.3, base: 768 },
@@ -2718,8 +2729,8 @@ export function apply(ctx, config = {}) {
     const output = header + outputBody;
     await writeFile(outAbs, output, 'utf8');
     note(`已写入 ${outRel}`);
-    job.phase=job.pendingRegions?.length?'partial':'done';
-    try{job.costReport=await partitionAI.finishTranslation(job.slug,job);}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
+    // The public job stays running until Markdown, settlement and index are all saved.
+    try{job.costReport=await partitionAI.finishTranslation(job.slug,{...job,phase:job.pendingRegions?.length?'partial':'done'});}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
 
     // 登记为已翻译并刷新索引
     const { db, path: dbPath } = await loadDb();
@@ -2730,10 +2741,11 @@ export function apply(ctx, config = {}) {
       p.translation = outRel;
       p.status = job.pendingRegions?.length?'extracted':'translated';
       p.translatedAt = new Date().toISOString();
-      p.translateMethod = 'deepseek-api';
+      p.translateMethod = job.providerMode==='account'?'dsh-account':'deepseek-api';
       p.translateModel = job.model;
       p.translationStats = {
         ...job.usage,
+        providerMode:job.providerMode||'api',
         estimatedCostCny: job.estimatedCostCny,
         costReport:job.costReport,partial:!!job.pendingRegions?.length,pendingRegions:job.pendingRegions||[],
         localCacheHits: job.localCacheHits,
@@ -3354,6 +3366,16 @@ export function apply(ctx, config = {}) {
           return;
         }
 
+        if(sub==='model-provider'){
+          try{if(req.method==='POST'){
+            const input=await readBody(req);
+            if(!['api','account'].includes(input.mode)||typeof input.model!=='string'||!/^[A-Za-z0-9._:/-]{1,180}$/u.test(input.model))throw Error('请选择调用方式和有效模型');
+            if(input.mode==='account'&&!(await accountTransport.status()).ready)throw Error('DSH 账号提供方未就绪，请先在 DSH 登录');
+            await writeJsonAtomic(providerFile,{mode:input.mode,model:input.model});
+          }else if(req.method!=='GET'){sendJson(res,405,{error:'method-not-allowed'});return;}
+          sendJson(res,200,{...await providerPreference(),account:await accountTransport.status()});}
+          catch(e){sendJson(res,400,{error:'provider-config',message:String(e.message)});}return;
+        }
         if(sub==='partition-ai-config'){
           if(!['GET','POST'].includes(req.method)){sendJson(res,405,{error:'method-not-allowed'});return;}
           try{sendJson(res,200,req.method==='POST'?await partitionAI.configure(await readBody(req)):await partitionAI.settings());}
@@ -3485,13 +3507,13 @@ export function apply(ctx, config = {}) {
           if (req.method !== 'GET') { sendJson(res, 405, { error: 'use-get' }); return; }
           try {
             const tools = await import(`${pathToFileURL(join(toolsRoot, 'deepseek_translate.mjs')).href}?t=${Date.now()}`);
-            const { key, source: keySource } = await tools.resolveApiKey(config);
+            const credential=await modelCredential(),{key,source:keySource}=credential;
             sendJson(res, 200, {
               ready: Boolean(key),
               keySource,
-              keyPrefix: key ? `${key.slice(0, 6)}…` : null,
-              baseUrl: config.baseUrl || tools.DEFAULT_BASE_URL,
-              model: config.model || tools.DEFAULT_MODEL,
+              keyPrefix: credential.transport==='api'&&key ? `${key.slice(0, 6)}…` : null,
+              baseUrl: credential.transport==='account'?'DSH deepseek-account':config.baseUrl || tools.DEFAULT_BASE_URL,
+              model: credential.model,providerMode:credential.transport,
               maxTokens: config.maxTokens || 32000,
               chunkTokens: config.chunkTokens || 6000,
               reasoningEffort: 'none',

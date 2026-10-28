@@ -347,7 +347,7 @@
 .ll-nav-head {
   padding: 10px 10px 9px;
   gap: 7px;
-  background: linear-gradient(180deg, var(--ll-nav-head-bg), var(--ll-nav-bg));
+  background: var(--ll-nav-head-bg);
 }
 .ll-nav-title { gap: 7px; font-size: calc(13px * var(--ll-font-scale, 1)); letter-spacing: .3px; }
 .ll-nav-title > svg { color: var(--ll-accent); flex: none; }
@@ -498,10 +498,10 @@
 .ll-item:hover .ll-item-actions,
 .ll-item:focus-within .ll-item-actions {
   padding-left: 12px;
-  background: linear-gradient(90deg, transparent, var(--ll-hover) 26%);
+  background: var(--ll-hover);
 }
 .ll-item.active:hover .ll-item-actions {
-  background: linear-gradient(90deg, transparent, var(--ll-selected-bg) 26%);
+  background: var(--ll-selected-bg);
 }
 .ll-item:hover .ll-item-actions .ll-icon-btn,
 .ll-item:focus-within .ll-item-actions .ll-icon-btn { display: inline-flex; }
@@ -517,7 +517,7 @@
 .ll-progress-failed .ll-progress-fill { background: var(--ll-danger); }
 .ll-head {
   padding: 10px 14px; gap: 8px 14px;
-  background: linear-gradient(180deg, var(--ll-head-bg), var(--ll-panel-bg));
+  background: var(--ll-head-bg);
 }
 .ll-head.ll-head-compact { padding-top: 9px; padding-bottom: 9px; }
 .ll-head-titles { flex: 1 1 460px; }
@@ -966,3 +966,11 @@
 .ll-root .ll-job-billing summary { cursor:pointer; white-space:normal; }
 .ll-root .ll-modal .ll-layout-row { flex-wrap:wrap; overflow:visible; }
 .ll-root .ll-region-box[data-role="pending"] { border-color:#ad843e; border-style:dashed; }
+.ll-root .ll-partition-quick { display:flex; align-items:center; gap:8px; padding:8px 12px; min-width:0; background:var(--ll-nav-bg); }
+.ll-root .ll-partition-quick label { display:flex; flex:1; min-width:0; align-items:center; gap:6px; font:12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-partition-quick select { min-width:0; flex:1; width:100%; height:30px; font:12px/1.4 system-ui,sans-serif!important; background:var(--ll-control-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:4px; }
+.ll-root .ll-partition-quick button { flex:none; font-size:12px!important; min-height:30px; }
+.ll-root .ll-provider-options { margin:12px; padding:12px; display:grid; gap:12px; background:var(--ll-nav-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; }
+.ll-root .ll-provider-options label { display:grid; gap:6px; font:13px/1.5 system-ui,sans-serif!important; }
+.ll-root .ll-provider-options select { min-height:32px; max-width:100%; color:var(--ll-text); background:var(--ll-control-bg); }
+.ll-root .ll-provider-options p { font:12px/1.5 system-ui,sans-serif!important; margin:0!important; }

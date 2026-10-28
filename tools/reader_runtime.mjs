@@ -1,5 +1,18 @@
 /** Pure reader infrastructure, embedded by build_client.mjs for DSH's single-file client loader. */
 export function createReaderRuntime() {
+  function createPreferences(storage) {
+    const key='dsh-literature-library/preferences-v1';
+    const valid=(name,value)=>{
+      if(['readerSurface','mdMode','partitionEngine'].includes(name))return ({readerSurface:['split','translation','pdf'],mdMode:['preview','source','edit'],partitionEngine:['local','ai']})[name].includes(value);
+      if(name==='scanDir')return typeof value==='string'&&value.length<=2048;
+      return ['focusMode','detailsOpen','showHidden','regionInfo','regionLabels','regionVisible','layoutTools','comparisonEnabled'].includes(name)&&typeof value==='boolean';
+    };
+    const all=()=>{try{const x=JSON.parse(storage().getItem(key)||'{}');return x&&typeof x==='object'&&!Array.isArray(x)?x:{};}catch{return {};}};
+    return {read(name,fallback,scope='global'){const value=all()[scope]?.[name];return valid(name,value)?value:fallback;},
+      write(name,value,scope='global'){if(!valid(name,value)||typeof scope!=='string'||scope==='__proto__'||scope==='constructor')return false;try{const current=all();current[scope]={...(current[scope]||{}),[name]:value};storage().setItem(key,JSON.stringify(current));return true;}catch{return false;}},
+      // A narrow viewport changes only presentation, never the remembered choice.
+      surface(value,width){return value==='split'&&width<1000?'translation':value;}};
+  }
   function createRenderQueue(limit=1) {
     let running=0,sequence=0;const pending=[];
     const cancelled=()=>Object.assign(new Error('Render request cancelled'),{name:'AbortException'});
@@ -53,5 +66,5 @@ export function createReaderRuntime() {
     if(!target.closest?.('.ll-pane-translation'))return null;
     return {delta:values[event.key]};
   }
-  return {createRenderQueue,bindMenuDismissal,readingZoomShortcut};
+  return {createRenderQueue,bindMenuDismissal,readingZoomShortcut,createPreferences};
 }

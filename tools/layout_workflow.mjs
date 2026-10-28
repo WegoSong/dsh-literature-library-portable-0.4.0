@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { validatePageRegions } from './manual_regions.mjs';
 import { MEDIA_POLICY, mediaOptions } from './media_regions.mjs';
+import {writeJsonAtomic} from './atomic_json.mjs';
 
 const digest = data => createHash('sha256').update(data).digest('hex');
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
@@ -33,8 +34,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     await mkdir(dir(s.slug), { recursive: true });
     s.updatedAt = new Date().toISOString();
     const file = join(dir(s.slug), 'state.json');
-    await writeFile(`${file}.tmp`, JSON.stringify(s), 'utf8');
-    await rename(`${file}.tmp`, file);
+    await writeJsonAtomic(file,s);
     return s;
   }
   function serial(slug, fn) {

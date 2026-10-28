@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.8.1';
+    const PDFJS_REV = '0.9.0';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -527,7 +527,7 @@ window.__ModuleLoader__.load({
 .ll-nav-head {
   padding: 10px 10px 9px;
   gap: 7px;
-  background: linear-gradient(180deg, var(--ll-nav-head-bg), var(--ll-nav-bg));
+  background: var(--ll-nav-head-bg);
 }
 .ll-nav-title { gap: 7px; font-size: calc(13px * var(--ll-font-scale, 1)); letter-spacing: .3px; }
 .ll-nav-title > svg { color: var(--ll-accent); flex: none; }
@@ -678,10 +678,10 @@ window.__ModuleLoader__.load({
 .ll-item:hover .ll-item-actions,
 .ll-item:focus-within .ll-item-actions {
   padding-left: 12px;
-  background: linear-gradient(90deg, transparent, var(--ll-hover) 26%);
+  background: var(--ll-hover);
 }
 .ll-item.active:hover .ll-item-actions {
-  background: linear-gradient(90deg, transparent, var(--ll-selected-bg) 26%);
+  background: var(--ll-selected-bg);
 }
 .ll-item:hover .ll-item-actions .ll-icon-btn,
 .ll-item:focus-within .ll-item-actions .ll-icon-btn { display: inline-flex; }
@@ -697,7 +697,7 @@ window.__ModuleLoader__.load({
 .ll-progress-failed .ll-progress-fill { background: var(--ll-danger); }
 .ll-head {
   padding: 10px 14px; gap: 8px 14px;
-  background: linear-gradient(180deg, var(--ll-head-bg), var(--ll-panel-bg));
+  background: var(--ll-head-bg);
 }
 .ll-head.ll-head-compact { padding-top: 9px; padding-bottom: 9px; }
 .ll-head-titles { flex: 1 1 460px; }
@@ -1146,6 +1146,14 @@ window.__ModuleLoader__.load({
 .ll-root .ll-job-billing summary { cursor:pointer; white-space:normal; }
 .ll-root .ll-modal .ll-layout-row { flex-wrap:wrap; overflow:visible; }
 .ll-root .ll-region-box[data-role="pending"] { border-color:#ad843e; border-style:dashed; }
+.ll-root .ll-partition-quick { display:flex; align-items:center; gap:8px; padding:8px 12px; min-width:0; background:var(--ll-nav-bg); }
+.ll-root .ll-partition-quick label { display:flex; flex:1; min-width:0; align-items:center; gap:6px; font:12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-partition-quick select { min-width:0; flex:1; width:100%; height:30px; font:12px/1.4 system-ui,sans-serif!important; background:var(--ll-control-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:4px; }
+.ll-root .ll-partition-quick button { flex:none; font-size:12px!important; min-height:30px; }
+.ll-root .ll-provider-options { margin:12px; padding:12px; display:grid; gap:12px; background:var(--ll-nav-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; }
+.ll-root .ll-provider-options label { display:grid; gap:6px; font:13px/1.5 system-ui,sans-serif!important; }
+.ll-root .ll-provider-options select { min-height:32px; max-width:100%; color:var(--ll-text); background:var(--ll-control-bg); }
+.ll-root .ll-provider-options p { font:12px/1.5 system-ui,sans-serif!important; margin:0!important; }
 `;
 
     function injectCss() {
@@ -2189,6 +2197,19 @@ window.__ModuleLoader__.load({
      */
     /* READER_RUNTIME:BEGIN */
     const readerRuntime = (function createReaderRuntime() {
+  function createPreferences(storage) {
+    const key='dsh-literature-library/preferences-v1';
+    const valid=(name,value)=>{
+      if(['readerSurface','mdMode','partitionEngine'].includes(name))return ({readerSurface:['split','translation','pdf'],mdMode:['preview','source','edit'],partitionEngine:['local','ai']})[name].includes(value);
+      if(name==='scanDir')return typeof value==='string'&&value.length<=2048;
+      return ['focusMode','detailsOpen','showHidden','regionInfo','regionLabels','regionVisible','layoutTools','comparisonEnabled'].includes(name)&&typeof value==='boolean';
+    };
+    const all=()=>{try{const x=JSON.parse(storage().getItem(key)||'{}');return x&&typeof x==='object'&&!Array.isArray(x)?x:{};}catch{return {};}};
+    return {read(name,fallback,scope='global'){const value=all()[scope]?.[name];return valid(name,value)?value:fallback;},
+      write(name,value,scope='global'){if(!valid(name,value)||typeof scope!=='string'||scope==='__proto__'||scope==='constructor')return false;try{const current=all();current[scope]={...(current[scope]||{}),[name]:value};storage().setItem(key,JSON.stringify(current));return true;}catch{return false;}},
+      // A narrow viewport changes only presentation, never the remembered choice.
+      surface(value,width){return value==='split'&&width<1000?'translation':value;}};
+  }
   function createRenderQueue(limit=1) {
     let running=0,sequence=0;const pending=[];
     const cancelled=()=>Object.assign(new Error('Render request cancelled'),{name:'AbortException'});
@@ -2242,7 +2263,7 @@ window.__ModuleLoader__.load({
     if(!target.closest?.('.ll-pane-translation'))return null;
     return {delta:values[event.key]};
   }
-  return {createRenderQueue,bindMenuDismissal,readingZoomShortcut};
+  return {createRenderQueue,bindMenuDismissal,readingZoomShortcut,createPreferences};
 })();
     /* READER_RUNTIME:END */
     const PDF_RENDER_QUEUE = readerRuntime.createRenderQueue(1);
@@ -2908,9 +2929,23 @@ window.__ModuleLoader__.load({
       'running-matter': '页眉页脚', watermark: '忽略/水印' };
     const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
     const isArticleRegion=r=>['body','abstract','heading','caption','formula','table','figure','pending','references'].includes(r.role);
-    const partitionEngine=()=>{try{return localStorage.getItem('dsh-literature-library/partition-engine')==='ai'?'ai':'local';}catch{return'local';}};
+    const preferences=readerRuntime.createPreferences(()=>window.localStorage);
+    function usePreference(name,fallback,scope='global'){
+      const [value,setValue]=React.useState(()=>preferences.read(name,fallback,scope));
+      React.useEffect(()=>{setValue(preferences.read(name,fallback,scope));const sync=()=>setValue(preferences.read(name,fallback,scope));window.addEventListener('ll-preferences-changed',sync);window.addEventListener('storage',sync);return()=>{window.removeEventListener('ll-preferences-changed',sync);window.removeEventListener('storage',sync);};},[name,scope]);
+      const update=React.useCallback(next=>{const v=typeof next==='function'?next(value):next;preferences.write(name,v,scope);setValue(v);window.dispatchEvent(new Event('ll-preferences-changed'));},[name,scope,value]);
+      return[value,update];
+    }
+    const partitionEngine=()=>{try{return preferences.read('partitionEngine',localStorage.getItem('dsh-literature-library/partition-engine')==='ai'?'ai':'local');}catch{return'local';}};
+    function PartitionEngineControl({mode,setMode,onConfigure}){
+      const [engine,setEngine]=usePreference('partitionEngine',partitionEngine());
+      return h('div',{className:'ll-partition-quick'},[
+        h('label',{key:'engine'},['分区',h('select',{'aria-label':'常用分区引擎',value:engine,onChange:e=>{const v=e.target.value;setEngine(v);try{localStorage.setItem('dsh-literature-library/partition-engine',v);}catch{}if(v==='ai'&&mode==='manual')setMode('semi');window.dispatchEvent(new Event('ll-preferences-changed'));}},[h('option',{key:'local',value:'local'},'本地规则'),h('option',{key:'ai',value:'ai'},'AI 三阶段')])]),
+        onConfigure?h('button',{key:'settings',className:'ll-btn',onClick:onConfigure},'AI 设置'):null,
+      ]);
+    }
     function costTotals(totals){if(!totals?.length)return'0（无 API 调用）';return totals.map(c=>{if(c.low==null||c.high==null)return`${c.currency} 金额未知`;const f=n=>n>0&&n<.00001?'<0.00001':Number(n).toFixed(5);return`${c.currency} ${c.low===c.high?f(c.low):f(c.low)+'—'+f(c.high)}`;}).join(' / ');}
-    async function confirmPartitionAI(engine,count=1){if(engine!=='ai')return true;const r=await fetch(`${ROUTE_PREFIX}/partition-ai-config`),c=await r.json();if(!r.ok||!c.ready)throw Error(c.message||'请先在分区/批量翻译中保存 AI 分区配置，并在原 API 配置中设置统一密钥');return window.confirm(`AI 三阶段分区：${count} 篇，每页最多 3 次请求。\n服务 ${c.endpoint}\n模型 ${c.model}\n使用统一翻译 API 密钥；发送论文页面图像及相邻页原文，不发送人工稿。\n分区和翻译分别计费，结束后汇总；待确认区域先跳过。继续？`);}
+    async function confirmPartitionAI(engine,count=1){if(engine!=='ai')return true;const r=await fetch(`${ROUTE_PREFIX}/partition-ai-config`),c=await r.json();if(!r.ok||!c.ready)throw Error(c.message||c.account?.message||'请先完成 AI 分区的调用方式、授权和视觉模型配置');return window.confirm(`AI 三阶段分区：${count} 篇，每页最多 3 次请求。\n服务 ${c.nativeAccount?'DSH 内置 deepseek-account':c.endpoint}\n模型 ${c.model}\n${c.nativeAccount?'使用 DSH 登录账号，按账号服务规则收费，不自动切换到 API Key':'使用统一翻译 API 密钥'}；发送论文页面图像及相邻页原文，不发送人工稿。\n分区和翻译分别计费，结束后汇总；待确认区域先跳过。继续？`);}
     function regionDisplayLabel(region,regions){
       const prefix=isArticleRegion(region)?String(regions.filter(isArticleRegion).findIndex(r=>r.id===region.id)+1):'信息';
       return prefix+' · '+(REGION_LABELS[region.role]||region.role);
@@ -3152,13 +3187,25 @@ window.__ModuleLoader__.load({
       ]);
     }
 
-    function PartitionAIOptions(){
+    function ModelProviderOptions(){
+      const [value,setValue]=React.useState(null),[message,setMessage]=React.useState('');
+      React.useEffect(()=>{let dead=false;fetch(`${ROUTE_PREFIX}/model-provider`).then(r=>r.json()).then(v=>{if(!dead)setValue(v);}).catch(e=>setMessage(e.message));return()=>{dead=true;};},[]);
+      if(!value)return h('p',null,message||'读取调用方式…');
+      return h('form',{className:'ll-provider-options',onSubmit:async e=>{e.preventDefault();try{const v=await postJson('/model-provider',{mode:value.mode,model:value.model||'deepseek-flash'});setValue(v);setMessage('调用方式已保存；未发起付费请求。');window.dispatchEvent(new Event('ll-model-provider-changed'));}catch(e){setMessage(e.message);}}},[
+        h('label',{key:'mode'},['翻译与分区的调用方式',h('select',{'aria-label':'模型调用方式',value:value.mode,onChange:e=>setValue(v=>({...v,mode:e.target.value}))},[h('option',{key:'api',value:'api'},'API Key'),h('option',{key:'account',value:'account',disabled:!value.account?.ready},'DSH 登录账号'+(value.account?.ready?'':'（未就绪）'))])]),
+        value.mode==='account'?h('label',{key:'model'},['账号翻译模型',h('select',{'aria-label':'账号翻译模型',value:value.model,onChange:e=>setValue(v=>({...v,model:e.target.value}))},(value.account?.models||[]).map(m=>h('option',{key:m.id,value:m.id},m.name)))]):null,
+        h('p',{key:'help'},value.account?.message||'账号模式由 DSH 管理授权，插件不读取登录令牌。'),
+        h('p',{key:'billing'},'账号与 API Key 单价分别保存。账号额度、订阅及实际扣费以 DSH/DeepSeek 显示为准，不假定网页订阅等同 API 余额。'),
+        h('button',{key:'save',type:'submit',className:'ll-btn'},'保存调用方式'),message?h('p',{key:'message',role:'status'},message):null,
+      ]);
+    }
+    function PartitionAIOptions({expanded=false}={}){
       const [c,setC]=React.useState(null),[message,setMessage]=React.useState(''),[saving,setSaving]=React.useState(false);
-      React.useEffect(()=>{let dead=false;fetch(`${ROUTE_PREFIX}/partition-ai-config`).then(r=>r.json()).then(x=>{if(!dead)setC(x);}).catch(e=>setMessage(e.message));return()=>{dead=true;};},[]);
+      React.useEffect(()=>{let dead=false;const refresh=()=>fetch(`${ROUTE_PREFIX}/partition-ai-config`).then(r=>r.json()).then(x=>{if(!dead)setC(x);}).catch(e=>{if(!dead)setMessage(e.message);});refresh();window.addEventListener('ll-model-provider-changed',refresh);return()=>{dead=true;window.removeEventListener('ll-model-provider-changed',refresh);};},[]);
       const field=(name,label,type='text')=>h('label',{key:name},[label,h('input',{value:c[name]??'',type,min:type==='number'?1024:undefined,max:type==='number'?16000:undefined,onChange:e=>setC(x=>({...x,[name]:type==='number'?Number(e.target.value):e.target.value}))})]);
       const prices=(name,title)=>h('fieldset',{key:name},[h('legend',{key:'l'},title),h('label',{key:'currency'},['币种',h('select',{value:c[name]?.currency||'CNY',onChange:e=>setC(x=>({...x,[name]:{...x[name],currency:e.target.value}}))},['CNY','USD','EUR'].map(v=>h('option',{key:v},v)))]),...['inputPerMillion','cacheHitPerMillion','outputPerMillion'].map((f,i)=>h('label',{key:f},[['输入未命中','输入命中','生成（含思考）'][i],h('input',{type:'number',min:0,step:'any',value:c[name]?.[f]??'',onChange:e=>setC(x=>({...x,[name]:{...x[name],[f]:e.target.value===''?null:Number(e.target.value)}}))})]))]);
-      return h('details',{className:'ll-ai-options'},[h('summary',{key:'s'},'AI 分区与费用设置（共用翻译密钥）'),c?h('form',{key:'f',onSubmit:async e=>{e.preventDefault();setSaving(true);try{const result=await postJson('/partition-ai-config',{endpoint:c.endpoint,model:c.model,maxTokens:c.maxTokens,semanticThinking:c.semanticThinking,pricing:c.pricing,translationPricing:c.translationPricing,qualityPricing:c.qualityPricing});setC(result);setMessage('已保存，不含密钥；尚未调用 AI。');}catch(e){setMessage(e.message);}finally{setSaving(false);}}},[
-        h('p',{key:'h'},'密钥使用原“配置 API”中的同一份，不另存、不显示。分区模型须支持视觉；共享密钥只发送到与翻译服务同源的接口。'),field('endpoint','视觉接口完整地址','url'),field('model','支持视觉的分区模型'),field('maxTokens','每阶段最大生成 token（含思考）','number'),
+      return h('details',{className:'ll-ai-options',open:expanded||undefined},[h('summary',{key:'s'},'AI 分区与费用设置'),c?h('form',{key:'f',onSubmit:async e=>{e.preventDefault();setSaving(true);try{const result=await postJson('/partition-ai-config',{endpoint:c.endpoint,model:c.model,maxTokens:c.maxTokens,semanticThinking:c.semanticThinking,pricing:c.pricing,translationPricing:c.translationPricing,qualityPricing:c.qualityPricing});setC(result);setMessage('已保存，不含密钥；尚未调用 AI。');}catch(e){setMessage(e.message);}finally{setSaving(false);}}},[
+        h('p',{key:'h'},c.nativeAccount?'当前使用 DSH 账号路由，授权由 DSH 管理，不填写接口地址或密钥；分区模型须支持图片。':'密钥使用原“配置 API”中的同一份，不另存、不显示。分区模型须支持视觉；共享密钥只发送到与翻译服务同源的接口。'),c.nativeAccount?null:field('endpoint','视觉接口完整地址','url'),field('model','支持视觉的分区模型'),field('maxTokens','每阶段最大生成 token（含思考）','number'),
         h('label',{key:'think'},['语义与跨页思考（官方 DeepSeek）',h('select',{value:c.semanticThinking||'low',onChange:e=>setC(x=>({...x,semanticThinking:e.target.value}))},[['low','低强度'],['high','高强度'],['disabled','关闭思考模式']].map(([v,l])=>h('option',{key:v,value:v},l)))]),
         h('p',{key:'unit'},`以下为每百万 token 单价，未知留空。翻译模型：${c.translationModel||'默认'}；更换模型须核对单价。失败调用也累计，结束后分别汇总，不把未知金额计为零。`),prices('pricing','页面划分单价'),prices('translationPricing','翻译单价'),h('details',{key:'quality'},[h('summary',{key:'s'},'升级模型单价（可选）'),prices('qualityPricing','质量升级模型；未知留空')]),
         h('button',{key:'save',type:'submit',className:'ll-btn',disabled:saving},saving?'保存中…':'保存 AI 与费用设置'),
@@ -3166,7 +3213,8 @@ window.__ModuleLoader__.load({
     }
     function LayoutBatchDialog({ papers, mode, setMode, schedule, media, setMedia, onClose, onSelect, onJob }) {
       const [chosen,setChosen] = React.useState(new Set()), [states,setStates] = React.useState([]), [notice,setNotice] = React.useState(''), [busy,setBusy] = React.useState(false);
-      const [engine,setEngine]=React.useState(partitionEngine);
+      const [engine,changeEngine]=usePreference('partitionEngine',partitionEngine());
+      const setEngine=v=>{changeEngine(v);try{localStorage.setItem('dsh-literature-library/partition-engine',v);}catch{}window.dispatchEvent(new Event('ll-preferences-changed'));};
       React.useEffect(() => {
         let dead = false;
         const poll = async () => { try { const r = await fetch(`${ROUTE_PREFIX}/layout`); if (!r.ok) throw new Error('无法读取分区队列'); const d = await r.json(); if (!dead) setStates(d.states || []); } catch (err) { if (!dead) setNotice(err.message); } };
@@ -3398,9 +3446,10 @@ window.__ModuleLoader__.load({
      * 随滚动实时更新；输入页码/点翻页按钮则会平滑滚到对应页。
      */
     function PdfViewer({ address, title, switching, documentKey, layoutMode, schedule, media, onJob, openLayout, onLayoutDirty }) {
-      const [layoutOpen,setLayoutOpen] = React.useState(!!openLayout);
-      const [showRegions,setShowRegions] = React.useState(!!openLayout);
-      const [regionView,setRegionView] = React.useState(null);
+      const [layoutOpen,setLayoutOpen] = usePreference('layoutTools',!!openLayout);
+      const [showRegions,setShowRegions] = usePreference('regionVisible',!!openLayout);
+      const [regionView,setRegionView] = React.useState(()=>({showInfo:preferences.read('regionInfo',false),showLabels:preferences.read('regionLabels',false)}));
+      React.useEffect(()=>{if(regionView){preferences.write('regionInfo',!!regionView.showInfo);preferences.write('regionLabels',!!regionView.showLabels);}},[regionView?.showInfo,regionView?.showLabels]);
       React.useEffect(() => {
         const open = () => { setLayoutOpen(true); setShowRegions(true); };
         window.addEventListener('ll-layout-changed',open);
@@ -4236,15 +4285,18 @@ window.__ModuleLoader__.load({
       const [doc, setDoc] = React.useState(initialCachedDoc
         ? { phase: 'ready', slug: initialCachedDoc.slug, translated: initialCachedDoc.translated, error: null }
         : { phase: 'idle', slug: initialSlug, translated: null, error: null });
-      const [scanDir, setScanDir] = React.useState('library/papers');
+      const [scanDir, setScanDir] = usePreference('scanDir','library/papers');
       const [layoutBatchOpen,setLayoutBatchOpen] = React.useState(false);
       const [toolsTab,setToolsTab] = React.useState(null);
+      const [aiSettingsOpen,setAISettingsOpen]=React.useState(false);
       const [navOpen,setNavOpen] = React.useState(false);
       const [compact,setCompact] = React.useState(()=>window.innerWidth<700);
-      const [readerSurface,setReaderSurface] = React.useState(()=>window.innerWidth<1000?'translation':'split');
+      const [preferredSurface,setReaderSurface]=usePreference('readerSurface',window.innerWidth<1000?'translation':'split');
+      const [readerWidth,setReaderWidth]=React.useState(window.innerWidth);
+      const readerSurface=preferences.surface(preferredSurface,readerWidth);
       React.useEffect(()=>{
         const resize=()=>{const width=containerRef.current?.clientWidth||window.innerWidth;
-          if(width<1000)setReaderSurface(v=>v==='split'?'translation':v);
+          setReaderWidth(width);
           setCompact(width<700);
         };
         const observer=new ResizeObserver(resize);if(containerRef.current)observer.observe(containerRef.current);resize();
@@ -4266,19 +4318,19 @@ window.__ModuleLoader__.load({
 
       // 译文编辑器状态
       const [text, setText] = React.useState('');
-      const [mode, setMode] = React.useState('preview');   // preview | source | edit
+      const [mode, setMode] = usePreference('mdMode','preview');   // preview | source | edit
       const [dirty, setDirty] = React.useState(false);
       const [copied, setCopied] = React.useState(false);
 
       // 期刊信息编辑器
       const [metaOpen, setMetaOpen] = React.useState(false);
-      const [detailsOpen, setDetailsOpen] = React.useState(false);
-      const [focusMode, setFocusMode] = React.useState(false);
+      const [detailsOpen, setDetailsOpen] = usePreference('detailsOpen',false,'paper:'+state.selected);
+      const [focusMode, setFocusMode] = usePreference('focusMode',false);
       // 文件夹浏览器
       const [browserOpen, setBrowserOpen] = React.useState(false);
       // 折叠的文件夹路径 + 是否显示隐藏文献 + 搜索词
       const [collapsed, setCollapsed] = React.useState(loadCollapsed);
-      const [showHidden, setShowHidden] = React.useState(false);
+      const [showHidden, setShowHidden] = usePreference('showHidden',false);
       const [query, setQuery] = React.useState('');
       const searchRef = React.useRef(null);
       // 右键菜单 { x, y, kind: 'paper'|'folder', ... }
@@ -4529,10 +4581,10 @@ window.__ModuleLoader__.load({
         else { setText(''); setDirty(false); setCopied(false); }
       }, [doc.phase, doc.translated]);
       React.useEffect(() => {
-        const rememberedMode = loadReadingMemory().markdowns?.[selected?.slug]?.mode;
+        const rememberedMode = loadReadingMemory().markdowns?.[selected?.slug]?.mode??preferences.read('mdMode','preview');
         setMode(['preview', 'source', 'edit'].includes(rememberedMode) ? rememberedMode : 'preview');
         setMetaOpen(false);
-        setDetailsOpen(false);
+        setDetailsOpen(preferences.read('detailsOpen',false,'paper:'+selected?.slug));
       }, [selected?.slug]);
 
       // Markdown 阅读位置：预览用“可见块 + 块内偏移”精确定位，源码/编辑模式保存自身滚动条。
@@ -4836,14 +4888,14 @@ window.__ModuleLoader__.load({
       // 查一次 API 配置，顶部显示「直连翻译是否就绪」
       React.useEffect(() => {
         let cancelled = false;
-        (async () => {
+        const refresh=async () => {
           try {
             const res = await fetch(`${ROUTE_PREFIX}/translate-config`);
             const data = res.ok ? await res.json() : null;
             if (!cancelled) setApiConfig(data);
           } catch { /* 忽略 */ }
-        })();
-        return () => { cancelled = true; };
+        };refresh();window.addEventListener('ll-model-provider-changed',refresh);
+        return () => { cancelled = true;window.removeEventListener('ll-model-provider-changed',refresh); };
       }, []);
 
       // 查一次版本号：显示在左栏底部；失败时显示 v…，不影响其它功能
@@ -5241,6 +5293,7 @@ window.__ModuleLoader__.load({
             h('button',{key:'lib',className:'ll-btn',onClick:()=>setToolsTab('library')},'文献管理'),
             h('button',{key:'tasks',className:'ll-btn',onClick:()=>setToolsTab('translation')},'翻译与任务'),
           ]),
+          h(PartitionEngineControl,{key:'partition-quick',mode:layoutMode,setMode:setLayoutMode,onConfigure:()=>setAISettingsOpen(true)}),
           // 直连翻译：就绪状态 + 配置入口 + 批量入口
           h('div', { className: 'll-nav-body', key: 'b' }, navBody),
           // 版本号常驻左栏底部：升级后不用翻文档就能确认运行的是哪一版
@@ -5284,6 +5337,7 @@ window.__ModuleLoader__.load({
               }, englishPaperTitle(selected) || '英文题名待自动识别'),
             ]),
             h('div', { className: 'll-head-actions', key: 'actions' }, [
+              compact||focusMode?h('button',{key:'ai-settings',className:'ll-btn',onClick:()=>setAISettingsOpen(true)},'AI 分区'):null,
               h('select',{key:'surface',className:'ll-reader-select','aria-label':'阅读布局',value:readerSurface,onChange:e=>setReaderSurface(e.target.value)},[
                 h('option',{key:'split',value:'split'},'双栏对照'),h('option',{key:'translation',value:'translation'},'只看译文'),h('option',{key:'pdf',value:'pdf'},'只看原文'),
               ]),
@@ -5489,6 +5543,10 @@ window.__ModuleLoader__.load({
           ]),
         ] : h('div', { className: 'll-empty', key: 'none' }, '请从左侧选择一篇文献。')),
 
+        aiSettingsOpen?h('div',{key:'ai-settings',className:'ll-modal-bg',onClick:e=>{if(e.target===e.currentTarget)setAISettingsOpen(false);}},h('div',{className:'ll-modal',role:'dialog','aria-label':'AI 分区设置'},[
+          h('div',{key:'h',className:'ll-modal-head'},['AI 分区',h('span',{key:'sp',className:'ll-spacer'}),h('button',{key:'x',className:'ll-btn',onClick:()=>setAISettingsOpen(false)},'关闭')]),
+          h('div',{key:'b',className:'ll-modal-body'},[h(PartitionEngineControl,{key:'engine',mode:layoutMode,setMode:setLayoutMode}),h(ModelProviderOptions,{key:'provider'}),h(PartitionAIOptions,{key:'options',expanded:true})]),
+        ])):null,
         layoutBatchOpen ? h(LayoutBatchDialog,{key:'layout-batch',papers:filteredPapers,mode:layoutMode,setMode:setLayoutMode,
           media,setMedia,
           schedule:offpeakOnly?'offpeak':'now',onClose:()=>setLayoutBatchOpen(false),onSelect:slug=>{selectPaper(slug);setLayoutOpenSlug(slug);},
@@ -5563,6 +5621,7 @@ window.__ModuleLoader__.load({
             }, busy === 'fill' ? '补全中…' : '补全信息'),
           ]) : null,
           toolsTab==='translation' ? h('section',{key:'translation',className:'ll-tool-section'},[
+            h(PartitionEngineControl,{key:'partition',mode:layoutMode,setMode:setLayoutMode,onConfigure:()=>setAISettingsOpen(true)}),
             h('h3',{key:'h'},'翻译默认选项'),
             h('p',{key:'hint'},'本地分区不产生模型费用；确认后才进入翻译。图表默认只译题注，公式优先写为可编辑 LaTeX。'),
           h('div', { className: 'll-toolbar', key: 'tr' }, [

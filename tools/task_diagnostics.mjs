@@ -1,6 +1,7 @@
 /** Public remediation metadata only. Raw provider credentials/headers are never copied here. */
 export function classifyTaskFailure(error){
  const message=String(error?.message??error);
+ if(/DSH.*账号|账号.*授权/iu.test(message))return {code:'dsh-account',label:'DSH 账号调用未完成',action:'检查 DSH 登录与额度',canResume:false};
  if(/版面|抽取|分区|ownership|coverage|layout-error|OCR/iu.test(message))return {code:'layout',label:'原文解析需要纠错',action:'检查问题页',canResume:false};
  if(/\b(?:401|403)\b|api\s*key|鉴权/iu.test(message))return {code:'authorization',label:'API 配置未通过',action:'检查 API 配置',canResume:false};
  if(/\b402\b|余额|balance/iu.test(message))return {code:'balance',label:'服务额度不足',action:'检查服务额度',canResume:false};

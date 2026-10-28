@@ -5,21 +5,26 @@ import {AIService} from './partition_ai_service.mjs';
 import {renderPageImage,validateProvider} from './partition_ai_layout.mjs';
 import {validatePricing,priceUsage,sumCosts} from './partition_ai_cost.mjs';
 import {validatePageRegions} from './manual_regions.mjs';
+import {ACCOUNT_ENDPOINT} from './dsh_account_transport.mjs';
+import {writeJsonAtomic} from './atomic_json.mjs';
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
 const optional=async file=>{try{return await json(file);}catch(e){if(e.code==='ENOENT')return null;throw e;}};
 const hash=s=>createHash('sha256').update(s).digest('hex');
-async function atomic(file,value){await mkdir(dirname(file),{recursive:true});const t=file+'.'+randomUUID()+'.tmp';await writeFile(t,JSON.stringify(value));await rename(t,file);}
+const atomic=writeJsonAtomic;
 const article=new Set(['body','abstract','heading','caption','formula','figure','table','references']);
 const unknownCost=currency=>({currency,amount:null,low:null,high:null,known:false});
 export function createPartitionIntegration({root,credentials,fetchImpl,render=renderPageImage}){
  const file=join(root,'ai-settings.json');
  async function settings(){const saved=await optional(file)||{},c=await credentials(),base=new URL(c.baseUrl),official=base.origin==='https://api.deepseek.com';
+  if(c.transport==='account')return{endpoint:ACCOUNT_ENDPOINT,model:saved.accountModel||c.model,maxTokens:saved.accountMaxTokens||8192,semanticThinking:saved.accountThinking||'low',pricing:validatePricing(saved.accountPricing),translationPricing:validatePricing(saved.accountTranslationPricing),qualityPricing:validatePricing(saved.accountQualityPricing),translationModel:c.model,ready:!!c.key,sharedKey:false,nativeAccount:true,hasKey:false,account:c.account};
   const endpoint=saved.endpoint||(official?'https://api.deepseek.com/chat/completions':'');
   return{...saved,endpoint,model:saved.model||c.model||'deepseek-flash',maxTokens:saved.maxTokens||8192,semanticThinking:saved.semanticThinking||'low',pricing:validatePricing(saved.pricing),translationPricing:validatePricing(saved.translationPricing||saved.pricing),translationModel:c.model||'deepseek-flash',qualityPricing:validatePricing(saved.qualityPricing),ready:!!c.key&&!!endpoint,sharedKey:true,hasKey:!!c.key};
  }
  async function configure(input){if(input.apiKey!==undefined)throw Error('分区使用统一翻译 API 密钥；请在原有 API 配置中设置，不在这里另存密钥');
   const c=await credentials(),provider=validateProvider({...input,apiKey:''});if(new URL(provider.endpoint).origin!==new URL(c.baseUrl).origin)throw Error('共享密钥仅允许发往翻译服务的同一来源；如需其他服务，请先配置对应翻译服务，不能将现有密钥转发到另一域名');
-  await atomic(file,{endpoint:provider.endpoint,model:provider.model,maxTokens:provider.maxTokens,semanticThinking:provider.semanticThinking,pricing:provider.pricing,translationPricing:validatePricing(input.translationPricing||input.pricing),qualityPricing:validatePricing(input.qualityPricing)});return settings();
+  if(c.transport==='account'&&!c.account?.models?.some(m=>m.id===provider.model&&m.vision))throw Error('请选择 DSH 账号目录中声明支持图片的视觉模型');
+  const previous=await optional(file)||{};
+  await atomic(file,c.transport==='account'?{...previous,accountModel:provider.model,accountMaxTokens:provider.maxTokens,accountThinking:provider.semanticThinking,accountPricing:provider.pricing,accountTranslationPricing:validatePricing(input.translationPricing),accountQualityPricing:validatePricing(input.qualityPricing)}:{...previous,endpoint:provider.endpoint,model:provider.model,maxTokens:provider.maxTokens,semanticThinking:provider.semanticThinking,pricing:provider.pricing,translationPricing:validatePricing(input.translationPricing||input.pricing),qualityPricing:validatePricing(input.qualityPricing)});return settings();
  }
  function directory(slug){if(!slug||/[\\/:*?"<>|]|^\.+$/u.test(slug))throw Error('无效文献编号');return join(root,slug,'ai');}
  async function service(slug,{pdf,layout,sourceHash}={}){
@@ -59,7 +64,7 @@ export function createPartitionIntegration({root,credentials,fetchImpl,render=re
     pages.push({page:p.page,runId:run.id,pipeline:issues});
    }catch(e){
     if(signal?.aborted)throw Error('AI 分区已停止，已发送请求可能收费；成功阶段缓存与用量已保留');
-    if([400,401,402,403,404].includes(e.diagnostic?.httpStatus))providerStopped=true;
+    if([400,401,402,403,404].includes(e.diagnostic?.httpStatus)||e.diagnostic?.kind==='account-provider')providerStopped=true;
     overrides[p.page]=validatePageRegions(p,[{id:'ai-pending-page-'+p.page,role:'pending',bbox:[0,0,p.width,p.height]}]);pending.push({page:p.page,id:'ai-pending-page-'+p.page,originalRole:'unknown',reason:'AI 阶段失败或覆盖冲突，请人工分区'});errors.push({page:p.page,message:String(e.message).slice(0,2000)});
    }
   }
