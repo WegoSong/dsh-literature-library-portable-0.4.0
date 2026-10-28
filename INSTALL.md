@@ -278,13 +278,13 @@ library/
 2. 回到文献库，点工具条的 **「配置」**。
 3. 粘贴 key 并保存。
 
-key 会写入：
+key 通过 DSH 凭据服务保存到 refs.DEEPSEEK_API_KEY，默认凭据文件：
 
 ```text
 ~/.dsh/.credentials.yaml
 ```
 
-写前会自动备份。也可以用环境变量：
+插件不直接改写共享凭据文件。也可以用环境变量：
 
 ```text
 DEEPSEEK_API_KEY

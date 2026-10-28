@@ -1487,6 +1487,8 @@ async function extract(pdfPath, opts) {
   let pending = null;
 
   for (const pc of pageCache) {
+    // Nonconsecutive selected pages are not continuations of each other.
+    if(out.pages.length&&out.pages.at(-1).page!==pc.p-1)pending=null;
     const pageParas = extractPageParagraphs(pc, furniture, { bodyLeft, bodyRight, bodySize }, opts, out);
     const columns = out.stats.columns[out.stats.columns.length - 1].columns;
 

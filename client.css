@@ -974,3 +974,18 @@
 .ll-root .ll-provider-options label { display:grid; gap:6px; font:13px/1.5 system-ui,sans-serif!important; }
 .ll-root .ll-provider-options select { min-height:32px; max-width:100%; color:var(--ll-text); background:var(--ll-control-bg); }
 .ll-root .ll-provider-options p { font:12px/1.5 system-ui,sans-serif!important; margin:0!important; }
+
+/* Page tasks sit immediately below PDF paging; fixed type never inherits reader zoom. */
+.ll-root .ll-page-tasks { flex:0 0 auto; min-width:0; padding:8px 16px; max-height:240px; overflow:auto; background:var(--ll-nav-bg); color:var(--ll-text); font:12px/1.4 system-ui,sans-serif; }
+.ll-root .ll-page-task-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.ll-root .ll-page-task-head strong { font:600 12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-page-task-head span { flex:1; min-width:0; color:var(--ll-muted); font:11px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-page-task-row { display:grid; grid-template-columns:64px 88px minmax(52px,1fr) 70px; align-items:center; gap:6px; margin-top:4px; }
+.ll-root .ll-page-task-row label { font:12px/1.4 system-ui,sans-serif!important; white-space:nowrap; }
+.ll-root .ll-page-tasks :is(button,input,select) { box-sizing:border-box; font:12px/1.4 system-ui,sans-serif!important; height:28px!important; min-height:28px!important; min-width:0; max-width:100%; padding:3px 6px!important; color:var(--ll-text); background:var(--ll-control-bg); border:1px solid var(--ll-soft-border); border-radius:4px; }
+.ll-root .ll-page-task-row :is(input,select) { width:100%; }
+.ll-root .ll-page-task-all { color:var(--ll-muted); font-variant-numeric:tabular-nums; }
+.ll-root .ll-page-task-assignment { margin-top:6px; color:var(--ll-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
+.ll-root .ll-page-task-error,.ll-root .ll-page-task-note { margin-top:6px; overflow-wrap:anywhere; font:12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-page-task-error { color:var(--ll-danger,#ef9a8a); }
+@container (max-width:420px) { .ll-root .ll-page-tasks { padding:6px 8px; } .ll-root .ll-page-task-row { grid-template-columns:58px 80px minmax(44px,1fr) 64px; gap:4px; } }

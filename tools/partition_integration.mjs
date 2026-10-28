@@ -7,6 +7,7 @@ import {validatePricing,priceUsage,sumCosts} from './partition_ai_cost.mjs';
 import {validatePageRegions} from './manual_regions.mjs';
 import {ACCOUNT_ENDPOINT} from './dsh_account_transport.mjs';
 import {writeJsonAtomic} from './atomic_json.mjs';
+import {pageScope} from './page_scope.mjs';
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
 const optional=async file=>{try{return await json(file);}catch(e){if(e.code==='ENOENT')return null;throw e;}};
 const hash=s=>createHash('sha256').update(s).digest('hex');
@@ -41,14 +42,17 @@ export function createPartitionIntegration({root,credentials,fetchImpl,render=re
   }};
   const ai=new AIService(store,{render:(_unused,n)=>render(pdf,n),...(fetchImpl?{fetchImpl}:{})});return{ai,documentHash,baseId,dir};
  }
- async function partition({slug,pdf,layout,sourceHash,onProgress=()=>{},consent=false,force=false,signal}){
+ async function partition({slug,pdf,layout,sourceHash,onProgress=()=>{},consent=false,force=false,signal,selectedPages}){
   if(consent!==true)throw Error('AI 分区需要确认上传页面图像、相邻页原文及费用');const options=await settings(),c=await credentials();
   if(!options.endpoint||!c.key)throw Error('请先配置统一翻译 API 密钥与视觉模型');if(new URL(options.endpoint).origin!==new URL(c.baseUrl).origin)throw Error('分区与翻译服务来源不一致，拒绝共享密钥');
   const session=await service(slug,{pdf,layout,sourceHash}),{ai,documentHash,baseId}=session;ai.configure({...options,apiKey:c.key});
   const overrides={},pending=[],pages=[],errors=[],crossHolds=[];let activeBaseId=baseId,providerStopped=false;
+  const targets=new Set(selectedPages?pageScope.parse(selectedPages,Math.max(...layout.pages.map(p=>p.page))):layout.pages.map(p=>p.page));
+  let stopped=false;
   await atomic(join(session.dir,'latest.json'),{sourceHash,documentHash,baseId,pages:[],pending:[],phase:'running'});
   for(const p of layout.pages){
-   signal?.throwIfAborted();
+   if(!targets.has(p.page))continue;
+   if(signal?.aborted){stopped=true;overrides[p.page]=validatePageRegions(p,[{id:'ai-pending-page-'+p.page,role:'pending',bbox:[0,0,p.width,p.height]}]);pending.push({page:p.page,id:'ai-pending-page-'+p.page,originalRole:'unknown',reason:'用户停止，AI 分区尚未完成'});continue;}
    onProgress({page:p.page,total:layout.pages.length,stage:'visual'});
    try{if(providerStopped)throw Error('服务鉴权、余额或配置失败，已停止后续页面请求；请修正配置后重试');const input={baseRunId:activeBaseId,pages:[p.page],workflow:'semantic-v1',consent:true,force},quote=await ai.estimate(documentHash,input),run=await ai.run(documentHash,{...input,quoteHash:quote.quoteHash},{signal,progress:progress=>onProgress({...progress,total:layout.pages.length})});activeBaseId=run.id;
     const corrected=run.pages.find(x=>x.page===p.page),issues=corrected.ai.pipeline,byId=new Map(),flag=(id,reason)=>{if(id)byId.set(id,[...(byId.get(id)||[]),reason]);};
@@ -63,13 +67,13 @@ export function createPartitionIntegration({root,credentials,fetchImpl,render=re
     for(const r of corrected.regions)if(byId.has(r.id)||r.role==='unknown')pending.push({page:p.page,id:r.id,originalRole:r.role,reason:(byId.get(r.id)||['未分类区域']).join('；')});
     pages.push({page:p.page,runId:run.id,pipeline:issues});
    }catch(e){
-    if(signal?.aborted)throw Error('AI 分区已停止，已发送请求可能收费；成功阶段缓存与用量已保留');
+    if(signal?.aborted)stopped=true;
     if([400,401,402,403,404].includes(e.diagnostic?.httpStatus)||e.diagnostic?.kind==='account-provider')providerStopped=true;
-    overrides[p.page]=validatePageRegions(p,[{id:'ai-pending-page-'+p.page,role:'pending',bbox:[0,0,p.width,p.height]}]);pending.push({page:p.page,id:'ai-pending-page-'+p.page,originalRole:'unknown',reason:'AI 阶段失败或覆盖冲突，请人工分区'});errors.push({page:p.page,message:String(e.message).slice(0,2000)});
+    overrides[p.page]=validatePageRegions(p,[{id:'ai-pending-page-'+p.page,role:'pending',bbox:[0,0,p.width,p.height]}]);pending.push({page:p.page,id:'ai-pending-page-'+p.page,originalRole:'unknown',reason:stopped?'用户停止，AI 分区尚未完成':'AI 阶段失败或覆盖冲突，请人工分区'});errors.push({page:p.page,message:stopped?'用户停止后续 AI；缓存和用量已保留':String(e.message).slice(0,2000)});
    }
   }
   for(const issue of crossHolds){const affected=overrides[issue.page]||[],exact=affected.some(r=>r.id===issue.region);for(const r of affected){if(r.role==='pending')continue;if(!article.has(r.role)||exact&&r.id!==issue.region)continue;pending.push({page:issue.page,id:r.id,originalRole:r.role,reason:issue.message});r.role='pending';r.confidence='review-required';}}
-  const result={version:'plugin-ai-partition-v1',sourceHash,baseId,documentHash,pages,pending,errors,completedAt:new Date().toISOString()};await atomic(join(session.dir,'latest.json'),result);return{...result,overrides};
+  const result={version:'plugin-ai-partition-v1',sourceHash,baseId,documentHash,pages,pending,errors,stopped,selectedPages:[...targets],completedAt:new Date().toISOString()};await atomic(join(session.dir,'latest.json'),result);return{...result,overrides};
  }
  async function partitionCosts(slug){const last=await optional(join(directory(slug),'latest.json'));if(!last)return{pages:[],totals:[],note:'未调用 AI 分区，本地规则分区无 API 费用'};
   const {ai}=await service(slug,{sourceHash:last.sourceHash});const data=await ai.costs(last.documentHash),currencies=[...new Set(data.pages.flatMap(p=>p.totals.map(t=>t.currency)))];return{...data,totals:currencies.map(c=>sumCosts(data.pages.flatMap(p=>p.attempts.filter(a=>a.cost.currency===c).map(a=>a.cost)),c))};

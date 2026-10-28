@@ -26,6 +26,7 @@ import {
 import { resolve, join, extname, sep, normalize, relative, basename, dirname, parse } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { homedir as osHomedir } from 'node:os';
 import { gunzipSync, zstdDecompressSync } from 'node:zlib';
 import { createLayoutWorkflow } from './tools/layout_workflow.mjs';
@@ -35,6 +36,7 @@ import {createPartitionIntegration} from './tools/partition_integration.mjs';
 import {canonicalSegment} from './tools/translation_segment_cache.mjs';
 import {createDshAccountTransport,ACCOUNT_ENDPOINT} from './tools/dsh_account_transport.mjs';
 import {writeJsonAtomic} from './tools/atomic_json.mjs';
+import {resolveHostApiKey,storeHostApiKey} from './tools/dsh_credentials.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -571,43 +573,6 @@ async function readCredentialKey() {
 }
 
 /**
- * 把 API key 写进 DSH 的凭据文件（`DEEPSEEK_API_KEY`）。
- *
- * 为什么写 `~/.dsh/.credentials.yaml` 而不是插件自己的配置：
- * 那是 DSH 放凭据的地方，写在那里意味着 **DSH 自己的对话与插件共用同一个 key**，
- * 也符合本机现有布局（之前已经手工放好了一个）。写之前会先备份原文件。
- *
- * 只改这一行，其余内容逐字保留——绝不整体重写 YAML（用户的加密记录不能被破坏）。
- */
-async function writeCredentialKey(newKey) {
-  const home = process.env.DSH_HOME && process.env.DSH_HOME.trim() !== ''
-    ? process.env.DSH_HOME
-    : join(osHomedir(), '.dsh');
-  const file = join(home, '.credentials.yaml');
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const hadOriginal = existsSync(file);
-
-  let original = '';
-  if (hadOriginal) {
-    original = await readFile(file, 'utf8');
-    await writeFile(`${file}.bak-${stamp}`, original, 'utf8');
-  } else {
-    await mkdir(home, { recursive: true });
-  }
-
-  const line = `DEEPSEEK_API_KEY: ${newKey}`;
-  const re = /(^|\n)(\s*DEEPSEEK_API_KEY\s*:\s*['"]?[A-Za-z0-9_\-]{10,}['"]?)(\s*)(?=\n|$)/;
-  let next;
-  if (re.test(original)) {
-    next = original.replace(re, (_m, pre) => `${pre}${line}`);
-  } else {
-    next = `${original.replace(/\n*$/u, '')}\n${line}\n`;
-  }
-  await writeFile(file, next, 'utf8');
-  return { file, backup: hadOriginal ? `${file}.bak-${stamp}` : null };
-}
-
-/**
  * DSH 的会话根目录。
  * 优先用 `DSH_HOME` 环境变量（DSH 自己就是这么定位 home 的），退回 `~/.dsh`。
  * 好处：部署可以重定向；测试也能指到临时目录里造样本，不必碰真实会话。
@@ -733,7 +698,7 @@ export function apply(ctx, config = {}) {
   const providerFile=join(libraryRoot,'model-provider.json');
   async function providerPreference(){try{const p=JSON.parse(await readFile(providerFile,'utf8'));return{mode:p.mode==='account'?'account':'api',model:typeof p.model==='string'?p.model:'deepseek-flash'};}catch(e){if(e.code!=='ENOENT')throw e;return{mode:'api',model:'deepseek-flash'};}}
   async function modelCredential(){const p=await providerPreference();if(p.mode==='account'){const state=await accountTransport.status();return{key:state.ready?'DSH-managed-account':null,source:'DSH 管理的 DeepSeek 账号',baseUrl:new URL(ACCOUNT_ENDPOINT).origin,model:p.model,transport:'account',account:state};}
-    const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href),resolved=await tools.resolveApiKey(config);return{key:resolved.key,source:resolved.source,baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,model:config.model||tools.DEFAULT_MODEL,transport:'api'};}
+    const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href),resolved=await resolveHostApiKey(ctx, config, tools.resolveApiKey);return{key:resolved.key,source:resolved.source,baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,model:config.model||tools.DEFAULT_MODEL,transport:'api'};}
   const partitionAI=createPartitionIntegration({root:join(libraryRoot,'layouts'),credentials:modelCredential,
     fetchImpl:(url,options)=>url===ACCOUNT_ENDPOINT?accountTransport.fetchChat(url,options):fetch(url,options)});
   const layoutWorkflow = createLayoutWorkflow({
@@ -1973,6 +1938,7 @@ export function apply(ctx, config = {}) {
     if (!existsSync(script)) throw new Error(`找不到抽取脚本：${script}`);
     await mkdir(outDir, { recursive: true });
     const extraArgs = [];
+    if (options.pages) extraArgs.push('--pages', options.pages.join(','));
     if (options.overrides && Object.keys(options.overrides).length) {
       const overridePath = join(outDir, 'manual-overrides.json');
       await writeFile(overridePath, JSON.stringify({ sourceHash: options.sourceHash, pages: options.overrides }), 'utf8');
@@ -2101,7 +2067,7 @@ export function apply(ctx, config = {}) {
       finishedAt: null,
       error: null,
       warning: null,
-      outputPath: paper.translation
+      outputPath: approvedLayout?.translationSelection?.mode==='selected'?`${libraryDir}/translations/${slug}/${slug}.md`:paper.completeTranslation || (!paper.translationStats?.translationPages?.length&&paper.translation)
         || paper.translationPath
         || `${libraryDir}/translations/${slug}/${slug}.md`,
       model: typeof body.model === 'string' && body.model.trim() !== '' ? body.model.trim() : credential.model,
@@ -2123,6 +2089,7 @@ export function apply(ctx, config = {}) {
       usages: [],
       billingSettings:{...billingSettings,qualityModel:typeof body.qualityModel==='string'?body.qualityModel:config.qualityModel||'deepseek-v4-pro'},
       pendingRegions:approvedLayout?.pendingRegions||[],costReport:null,
+      translationPages:approvedLayout?.translationSelection?.mode==='selected'?approvedLayout.translationSelection.pages:null,
       usage: {
         inputTokens: 0, outputTokens: 0, cacheHitTokens: 0,
         cacheMissTokens: 0, reasoningTokens: 0,
@@ -2140,6 +2107,8 @@ export function apply(ctx, config = {}) {
     const latestLayout = await layoutWorkflow.guard(slug);
     if ((approvedLayout?.revision || 0) !== (latestLayout?.revision || 0))
       throw Object.assign(new Error('分区在提交期间发生变化，请重新确认'), { status: 409 });
+    if(JSON.stringify(approvedLayout?.translationSelection)!==JSON.stringify(latestLayout?.translationSelection))throw Object.assign(Error('翻译页数在提交期间变化，请重新提交'),{status:409});
+    if(job.translationPages?.length)job.outputPath=job.outputPath.replace(/(?:\.partial)?\.md$/iu,`.pages-${createHash('sha256').update(job.translationPages.join(',')).digest('hex').slice(0,12)}.md`);
     translateJobs.set(jobId, job);
     pruneJobs();
 
@@ -2198,7 +2167,7 @@ export function apply(ctx, config = {}) {
       estimatedCostCny: job.estimatedCostCny ?? 0,
       costCny: job.estimatedCostCny ?? 0,
       costEstimated: true,
-      costReport:job.costReport||null,billingError:job.billingError||null,partial:!!job.pendingRegions?.length,pendingRegions:job.pendingRegions||[],
+      costReport:job.costReport||null,billingError:job.billingError||null,partial:!!job.pendingRegions?.length||!!job.translationPages?.length,pendingRegions:job.pendingRegions||[],translationPages:job.translationPages||null,
       pricingUpdatedAt: '2026-10-21',
       cacheHitTokens: job.usage?.cacheHitTokens ?? 0,
       cacheMissTokens: job.usage?.cacheMissTokens ?? 0,
@@ -2703,7 +2672,8 @@ export function apply(ctx, config = {}) {
       paper.doi ? `**DOI**：${paper.doi}` : null,
       paper.source ? `**原文**：\`${paper.source}\`` : null,
       '',
-      '> 本文由「文献库」面板直连 DeepSeek API 翻译生成。',
+      job.providerMode==='account'?'> 本文由「文献库」面板通过 DSH 账号服务翻译生成。':'> 本文由「文献库」面板直连 DeepSeek API 翻译生成。',
+      job.translationPages?.length?`> **指定页译文**：PDF 第 ${job.translationPages.join(', ')} 页；不是全文译文。`:null,
       warning ? `> ⚠ ${warning}` : null,
       '',
       '---',
@@ -2730,7 +2700,7 @@ export function apply(ctx, config = {}) {
     await writeFile(outAbs, output, 'utf8');
     note(`已写入 ${outRel}`);
     // The public job stays running until Markdown, settlement and index are all saved.
-    try{job.costReport=await partitionAI.finishTranslation(job.slug,{...job,phase:job.pendingRegions?.length?'partial':'done'});}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
+    try{job.costReport=await partitionAI.finishTranslation(job.slug,{...job,phase:job.pendingRegions?.length||job.translationPages?.length?'partial':'done'});}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
 
     // 登记为已翻译并刷新索引
     const { db, path: dbPath } = await loadDb();
@@ -2738,8 +2708,12 @@ export function apply(ctx, config = {}) {
     if (p) {
       // 抽取产物也记上，便于面板显示与追溯
       p.extracted = relative(workspaceRoot, join(libraryRoot, 'extracted', job.slug, `${job.slug}.md`)).replace(/\\/g, '/');
+      if(job.translationPages?.length){
+        if(p.status==='translated'&&p.translation&&!p.completeTranslation)p.completeTranslation=p.translation;
+        p.translationExports=[...(p.translationExports||[]).filter(x=>x.path!==outRel),{path:outRel,pages:job.translationPages,at:new Date().toISOString()}].slice(-64);
+      }
       p.translation = outRel;
-      p.status = job.pendingRegions?.length?'extracted':'translated';
+      p.status = job.pendingRegions?.length||job.translationPages?.length?'extracted':'translated';
       p.translatedAt = new Date().toISOString();
       p.translateMethod = job.providerMode==='account'?'dsh-account':'deepseek-api';
       p.translateModel = job.model;
@@ -2747,7 +2721,7 @@ export function apply(ctx, config = {}) {
         ...job.usage,
         providerMode:job.providerMode||'api',
         estimatedCostCny: job.estimatedCostCny,
-        costReport:job.costReport,partial:!!job.pendingRegions?.length,pendingRegions:job.pendingRegions||[],
+        costReport:job.costReport,partial:!!job.pendingRegions?.length||!!job.translationPages?.length,pendingRegions:job.pendingRegions||[],translationPages:job.translationPages||null,
         localCacheHits: job.localCacheHits,
         apiChunks: job.apiChunks,
         retryCount: job.retryCount,
@@ -2781,8 +2755,8 @@ export function apply(ctx, config = {}) {
       await refreshIndex();
     }
 
-    job.phase = job.pendingRegions?.length?'partial':'done';
-    touch(job.pendingRegions?.length?`部分完成，${job.pendingRegions.length} 个分区待确认补译`:'完成');
+    job.phase = job.pendingRegions?.length||job.translationPages?.length?'partial':'done';
+    touch(job.translationPages?.length?`指定 ${job.translationPages.length} 页翻译完成` : job.pendingRegions?.length?`部分完成，${job.pendingRegions.length} 个分区待确认补译`:'完成');
     job.finishedAt = new Date().toISOString();
     job.notBefore = null;
     ctx.logger?.info?.(
@@ -3441,7 +3415,7 @@ export function apply(ctx, config = {}) {
           if (req.method === 'GET') {
             try {
               const tools = await import(`${pathToFileURL(join(toolsRoot, 'deepseek_translate.mjs')).href}?t=${Date.now()}`);
-              const { key, source: keySource } = await tools.resolveApiKey(config);
+              const { key, source: keySource } = await resolveHostApiKey(ctx, config, tools.resolveApiKey);
               const cred = await readCredentialKey();
               sendJson(res, 200, {
                 ready: Boolean(key),
@@ -3479,12 +3453,12 @@ export function apply(ctx, config = {}) {
                   { status: 400 },
                 );
               }
-              const written = await writeCredentialKey(key);
+              const written = await storeHostApiKey(ctx, key);
               ctx.logger?.info?.(`literature-library: 已更新 API key → ${written.file}`);
 
               // 立刻回读一次，确认真的生效（而不是只报告「写入成功」）
               const tools = await import(`${pathToFileURL(join(toolsRoot, 'deepseek_translate.mjs')).href}?t=${Date.now()}`);
-              const { key: readBack, source: keySource } = await tools.resolveApiKey(config);
+              const { key: readBack, source: keySource } = await resolveHostApiKey(ctx, config, tools.resolveApiKey);
               sendJson(res, 200, {
                 ok: true,
                 file: written.file,

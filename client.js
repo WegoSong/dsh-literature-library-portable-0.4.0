@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.9.0';
+    const PDFJS_REV = '0.10.0';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -1154,6 +1154,21 @@ window.__ModuleLoader__.load({
 .ll-root .ll-provider-options label { display:grid; gap:6px; font:13px/1.5 system-ui,sans-serif!important; }
 .ll-root .ll-provider-options select { min-height:32px; max-width:100%; color:var(--ll-text); background:var(--ll-control-bg); }
 .ll-root .ll-provider-options p { font:12px/1.5 system-ui,sans-serif!important; margin:0!important; }
+
+/* Page tasks sit immediately below PDF paging; fixed type never inherits reader zoom. */
+.ll-root .ll-page-tasks { flex:0 0 auto; min-width:0; padding:8px 16px; max-height:240px; overflow:auto; background:var(--ll-nav-bg); color:var(--ll-text); font:12px/1.4 system-ui,sans-serif; }
+.ll-root .ll-page-task-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.ll-root .ll-page-task-head strong { font:600 12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-page-task-head span { flex:1; min-width:0; color:var(--ll-muted); font:11px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-page-task-row { display:grid; grid-template-columns:64px 88px minmax(52px,1fr) 70px; align-items:center; gap:6px; margin-top:4px; }
+.ll-root .ll-page-task-row label { font:12px/1.4 system-ui,sans-serif!important; white-space:nowrap; }
+.ll-root .ll-page-tasks :is(button,input,select) { box-sizing:border-box; font:12px/1.4 system-ui,sans-serif!important; height:28px!important; min-height:28px!important; min-width:0; max-width:100%; padding:3px 6px!important; color:var(--ll-text); background:var(--ll-control-bg); border:1px solid var(--ll-soft-border); border-radius:4px; }
+.ll-root .ll-page-task-row :is(input,select) { width:100%; }
+.ll-root .ll-page-task-all { color:var(--ll-muted); font-variant-numeric:tabular-nums; }
+.ll-root .ll-page-task-assignment { margin-top:6px; color:var(--ll-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
+.ll-root .ll-page-task-error,.ll-root .ll-page-task-note { margin-top:6px; overflow-wrap:anywhere; font:12px/1.4 system-ui,sans-serif!important; }
+.ll-root .ll-page-task-error { color:var(--ll-danger,#ef9a8a); }
+@container (max-width:420px) { .ll-root .ll-page-tasks { padding:6px 8px; } .ll-root .ll-page-task-row { grid-template-columns:58px 80px minmax(44px,1fr) 64px; gap:4px; } }
 `;
 
     function injectCss() {
@@ -2202,6 +2217,8 @@ window.__ModuleLoader__.load({
     const valid=(name,value)=>{
       if(['readerSurface','mdMode','partitionEngine'].includes(name))return ({readerSurface:['split','translation','pdf'],mdMode:['preview','source','edit'],partitionEngine:['local','ai']})[name].includes(value);
       if(name==='scanDir')return typeof value==='string'&&value.length<=2048;
+      if(['aiPageMode','localPageMode','translatePageMode'].includes(name))return ['all','selected'].includes(value);
+      if(['aiPageRange','localPageRange','translatePageRange'].includes(name))return typeof value==='string'&&value.length<=4096;
       return ['focusMode','detailsOpen','showHidden','regionInfo','regionLabels','regionVisible','layoutTools','comparisonEnabled'].includes(name)&&typeof value==='boolean';
     };
     const all=()=>{try{const x=JSON.parse(storage().getItem(key)||'{}');return x&&typeof x==='object'&&!Array.isArray(x)?x:{};}catch{return {};}};
@@ -2264,6 +2281,36 @@ window.__ModuleLoader__.load({
     return {delta:values[event.key]};
   }
   return {createRenderQueue,bindMenuDismissal,readingZoomShortcut,createPreferences};
+})();
+    const pageScope = (function createPageScope() {
+  function parse(value,total) {
+    if(!Number.isInteger(total)||total<1||total>100000)throw Error('PDF 总页数无效');
+    if(Array.isArray(value)) {
+      if(!value.length||value.length>total||value.some(n=>!Number.isInteger(n)||n<1||n>total))throw Error('指定页码为空或超出 PDF 范围');
+      return [...new Set(value)].sort((a,b)=>a-b);
+    }
+    if(typeof value!=='string'||!value.trim()||value.length>4096)throw Error('请填写页码，例如 1-5,8,12-20');
+    const pages=new Set();
+    for(const part of value.trim().replace(/[，、；;]/gu,',').replace(/[–—~～]/gu,'-').split(',')) {
+      const match=/^\s*(\d+)\s*(?:-\s*(\d+))?\s*$/u.exec(part);
+      if(!match)throw Error('页码格式无效，请使用 1-5,8,12-20');
+      const a=Number(match[1]),b=Number(match[2]||match[1]);
+      if(a<1||b<a||b>total)throw Error(`页码必须在 1-${total} 内，范围起点不能大于终点`);
+      for(let n=a;n<=b;n++)pages.add(n);
+    }
+    return [...pages].sort((a,b)=>a-b);
+  }
+  function resolve(scope,total) {
+    if(!scope||scope.mode==='all')return Array.from({length:total},(_,i)=>i+1);
+    if(scope.mode!=='selected')throw Error('页数模式无效');
+    return parse(scope.pages,total);
+  }
+  function format(pages) {
+    const sorted=[...new Set(pages)].sort((a,b)=>a-b),parts=[];
+    for(let i=0;i<sorted.length;i++){let end=sorted[i],start=end;while(sorted[i+1]===end+1)end=sorted[++i];parts.push(start===end?String(start):`${start}-${end}`);}
+    return parts.join(',');
+  }
+  return {parse,resolve,format};
 })();
     /* READER_RUNTIME:END */
     const PDF_RENDER_QUEUE = readerRuntime.createRenderQueue(1);
@@ -2780,7 +2827,7 @@ window.__ModuleLoader__.load({
      * 对使用者太不友好。这里做成一个对话框，并**明确显示 key 从哪来**
      * （配置 / 环境变量 / 凭据文件），保存后还会回读验证。
      *
-     * 安全：key 只会写进 DSH 自己的凭据文件（写前自动备份）；
+     * 安全：key 通过 DSH 凭据服务保存，不直接改写共享凭据文件；
      * 界面上永远只显示前缀（`sk-038…`），不显示完整 key。
      */
     function ConfigDialog({ onClose, onSaved }) {
@@ -2846,7 +2893,7 @@ window.__ModuleLoader__.load({
             ] : null),
 
             h('div', { className: 'll-cfg-form', key: 'f' }, [
-              h('label', { key: 'l' }, '粘贴新的 API key（保存后会写入上面的凭据文件，并自动备份原文件）'),
+              h('label', { key: 'l' }, '粘贴新的 API key（通过 DSH 凭据服务保存，并回读验证）'),
               h('div', { style: { display: 'flex', gap: '6px', marginTop: '4px' } }, [
                 h('input', {
                   key: 'i', className: 'll-input', type: 'password', value: key, spellCheck: false,
@@ -3060,6 +3107,43 @@ window.__ModuleLoader__.load({
         h('div',{key:'body',className:'ll-modal-body',role:'tabpanel'},children),
       ]));
     }
+    function PageTaskControls({slug,page,total,schedule,media,view,setView,onJob}) {
+      const scope='paper:'+slug;
+      const [aiMode,setAiMode]=usePreference('aiPageMode','selected',scope),[aiRange,setAiRange]=usePreference('aiPageRange','',scope);
+      const [localMode,setLocalMode]=usePreference('localPageMode','selected',scope),[localRange,setLocalRange]=usePreference('localPageRange','',scope);
+      const [translateMode,setTranslateMode]=usePreference('translatePageMode','all',scope),[translateRange,setTranslateRange]=usePreference('translatePageRange','',scope);
+      const [busy,setBusy]=React.useState(false),[error,setError]=React.useState('');
+      const state=view?.state,running=['queued','partitioning'].includes(state?.phase),disabled=busy||running||!!view?.dirty||!total;
+      async function run(kind,selectionMode,range) {
+        setError('');let selection;
+        try{selection={mode:selectionMode,...(selectionMode==='selected'?{pages:pageScope.parse(range||String(page),total)}:{})};}catch(e){setError(e.message);return;}
+        const selected=pageScope.resolve(selection,total),label=selectionMode==='all'?`全部 ${total} 页`:`第 ${pageScope.format(selected)} 页`;
+        if(kind==='ai') {try{if(!await confirmPartitionAI('ai'))return;}catch(e){setError(e.message);return;}}
+        if(!window.confirm(kind==='translate'?`确认已检查${label}的分区？仅翻译这些页面中的可用区域，待确认区域继续跳过。指定页译文另存，不覆盖全文；会产生翻译费用。`:`使用${kind==='ai'?'AI':'本地规则'}分区处理${label}？将替换这些页的分区（包括人工框），其他页面保持不变。${kind==='local'?'本地分区不调用模型。':''}`))return;
+        setBusy(true);
+        try{
+          const r=await postJson('/layout',{action:kind==='translate'?'translate':'partition-pages',slug,engine:kind,scope:selection,revision:state?.revision,confirmPages:true,aiConsent:kind==='ai',schedule,media});
+          if(r.state)setView(v=>({...v,state:r.state,editing:false,dirty:false}));
+          if(r.job)onJob?.(r.job);
+          window.dispatchEvent(new Event('ll-layout-changed'));
+        }catch(e){setError(e.message);}finally{setBusy(false);}
+      }
+      const row=(kind,label,selectionMode,setMode,range,setRange)=>h('div',{key:kind,className:'ll-page-task-row'},[
+        h('label',{key:'label',htmlFor:kind+'-page-mode'},label),
+        h('select',{key:'mode',id:kind+'-page-mode','aria-label':label+'页数',value:selectionMode,disabled:busy,onChange:e=>setMode(e.target.value)},[h('option',{key:'all',value:'all'},'全部'),h('option',{key:'selected',value:'selected'},'指定页数')]),
+        selectionMode==='selected'?h('input',{key:'range',className:'ll-page-range','aria-label':label+'页码',value:range,placeholder:String(page),disabled:busy,inputMode:'text',onChange:e=>setRange(e.target.value)}):h('span',{key:'scope',className:'ll-page-task-all'},`${total||'…'} 页`),
+        h('button',{key:'run',className:'ll-btn ll-btn-xs',disabled:disabled||kind==='translate'&&!state,onClick:()=>run(kind,selectionMode,range)},kind==='translate'?'翻译所选':'应用'),
+      ]);
+      const engines=state?.pageEngines||{},byEngine=engine=>Object.keys(engines).filter(n=>engines[n]===engine).map(Number),assigned=Object.keys(engines).length;
+      return h('section',{className:'ll-page-tasks','aria-label':'按页分区与翻译'},[
+        h('div',{key:'head',className:'ll-page-task-head'},[h('strong',{key:'t'},'页面任务'),h('span',{key:'hint'},'PDF 页码 · 1-5,8,12-20'),h('button',{key:'settings',className:'ll-btn ll-btn-xs',onClick:()=>window.dispatchEvent(new Event('ll-open-ai-settings'))},'AI 设置')]),
+        row('ai','AI 分区',aiMode,setAiMode,aiRange,setAiRange),row('local','本地分区',localMode,setLocalMode,localRange,setLocalRange),row('translate','翻译',translateMode,setTranslateMode,translateRange,setTranslateRange),
+        assigned?h('div',{key:'assignment',className:'ll-page-task-assignment',title:['AI：'+pageScope.format(byEngine('ai')),'本地：'+pageScope.format(byEngine('local')),'人工：'+pageScope.format(byEngine('manual')),'待分区：'+pageScope.format(byEngine('pending'))].join('；')},['AI '+(pageScope.format(byEngine('ai'))||'无'),'本地 '+(pageScope.format(byEngine('local'))||'无'),'人工 '+(pageScope.format(byEngine('manual'))||'无'),'待分区 '+(pageScope.format(byEngine('pending'))||'无')].join(' · ')):null,
+        view?.dirty?h('div',{key:'dirty',className:'ll-page-task-note'},'请先保存或放弃未保存的人工修改。'):null,
+        running?h('div',{key:'wait',className:'ll-page-task-note'},'正在分区；可在下方停止后续 AI，完成页保留。'):null,
+        error?h('div',{key:'error',role:'alert',className:'ll-page-task-error'},error):null,
+      ]);
+    }
     function LayoutControls({ slug, page, mode, schedule, media, view, setView, show, setShow, onJob }) {
       const controlsRef=React.useRef(null);
       React.useEffect(()=>readerRuntime.bindMenuDismissal({window,document,element:()=>controlsRef.current,close:()=>controlsRef.current?.querySelectorAll('details[open]').forEach(d=>d.open=false)}),[]);
@@ -3112,7 +3196,6 @@ window.__ModuleLoader__.load({
       const changeRegion=update=>setView(v=>({...v,dirty:true,page:{...v.page,regions:v.page.regions.map(r=>r.id===v.selected?{...r,...update}:r)}}));
       const checkPage=()=>act('check-page',{page:view.page.page});
       const approve=()=>{if(window.confirm('确认已检查《'+s.title+'》的全部 '+s.pageCount+' 页？仅确认，不启动翻译。'))act('approve',{confirmAll:true});};
-      const translate=()=>{if(window.confirm(s?.pendingCount?`先翻译可用内容，${s.pendingCount} 个待确认区保留占位，产生翻译费用。继续？`:'使用已确认分区翻译，将产生 API 费用。继续？'))act('translate');};
       const restart=async()=>{
         const engine=mode==='manual'?'local':partitionEngine();try{if(!await confirmPartitionAI(engine))return;}catch(e){setError(e.message);return;}
         if(mode==='auto'&&!window.confirm('自动模式自检后会调用 API 翻译并产生费用。继续？'))return;
@@ -3123,7 +3206,7 @@ window.__ModuleLoader__.load({
         if(editing&&dirty){setError('请先保存，或在更多中放弃修改。');return;}
         setShow(true);setView(v=>({...v,editing:!v?.editing}));
       };
-      const summary=s?(s.aiProgress?`AI ${s.aiProgress.stage} · 第 ${s.aiProgress.page}/${s.aiProgress.total} 页`:(LAYOUT_PHASES[s.phase]||s.phase))+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页'+(s.pendingCount?` · ${s.pendingCount} 区暂缓翻译`:''):'尚未分区';
+      const summary=s?(s.aiStopped?'AI 已停止，已完成页保留':s.aiProgress?`AI ${s.aiProgress.stage} · 第 ${s.aiProgress.page}/${s.aiProgress.total} 页`:(LAYOUT_PHASES[s.phase]||s.phase))+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页'+(s.pendingCount?` · ${s.pendingCount} 区暂缓翻译`:''):'尚未分区';
       return h('section',{ref:controlsRef,className:'ll-layout-controls','aria-label':'论文分区检查'},[
         h('div',{key:'bar',className:'ll-layout-mainbar'},[
           h('strong',{key:'page'},'分区'+(view?.page?' · 第 '+view.page.page+' 页':'')),
@@ -3131,9 +3214,9 @@ window.__ModuleLoader__.load({
           h('span',{key:'sp',className:'ll-spacer'}),
           s?.ai&&s.phase==='partitioning'?h('button',{key:'cancel-ai',className:'ll-btn ll-btn-xs',disabled:busy,onClick:()=>act('cancel-ai')},'停止后续 AI'):null,
           ready&&view?.page?h('button',{key:'edit',className:'ll-btn ll-btn-xs',disabled:busy,onClick:edit},editing?'结束编辑':'手动纠错'):null,
-          ready&&view?.page&&!needsRefresh?h('button',{key:'primary',className:'ll-btn ll-btn-xs ll-layout-primary',disabled:busy||(editing?!dirty&&s.mode!=='manual':dirty),
-            'aria-label':editing?'保存本页并自检':s.phase==='approved'||s.canTranslate?'按确认分区翻译':'此页已检查',
-            onClick:editing?()=>act('save-page',{page:view.page.page,regions:regions.map(({id,role,bbox})=>({id,role,bbox}))}):s.phase==='approved'||s.canTranslate?translate:checkPage},editing?'保存':s.canTranslate&&s.pendingCount?'翻译可用区域':s.phase==='approved'||s.canTranslate?'翻译':'此页已检查'):null,
+          ready&&view?.page&&!needsRefresh?h('button',{key:'primary',className:'ll-btn ll-btn-xs'+(editing?' ll-layout-primary':''),disabled:busy||(editing?!dirty&&s.mode!=='manual':dirty),
+            'aria-label':editing?'保存本页并自检':'此页已检查',
+            onClick:editing?()=>act('save-page',{page:view.page.page,regions:regions.map(({id,role,bbox})=>({id,role,bbox}))}):checkPage},editing?'保存':'此页已检查'):null,
           !s?h('button',{key:'start',className:'ll-btn ll-btn-xs',disabled:busy,onClick:restart},'开始分区'):null,
           h('details',{key:'more',className:'ll-layout-more',onToggle:toggleDisclosure},[
             h('summary',{key:'toggle','aria-label':'分区更多操作'},'更多'),
@@ -3854,6 +3937,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'll-pdf-viewer' }, [
         toolbar,
+        layoutOpen?h(PageTaskControls,{key:'page-tasks',slug:documentKey,page,total:numPages,schedule,media,view:regionView,setView:setRegionView,onJob}):null,
         h('div', { className: 'll-pdf-body', ref: scrollRef }, content),
         layoutOpen ? h(LayoutControls,{key:'layout-tools',slug:documentKey,page,mode:layoutMode,schedule,media,view:regionView,setView:setRegionView,
           show:showRegions,setShow:setShowRegions,onJob}) : null,
@@ -4289,6 +4373,7 @@ window.__ModuleLoader__.load({
       const [layoutBatchOpen,setLayoutBatchOpen] = React.useState(false);
       const [toolsTab,setToolsTab] = React.useState(null);
       const [aiSettingsOpen,setAISettingsOpen]=React.useState(false);
+      React.useEffect(()=>{const open=()=>setAISettingsOpen(true);window.addEventListener('ll-open-ai-settings',open);return()=>window.removeEventListener('ll-open-ai-settings',open);},[]);
       const [navOpen,setNavOpen] = React.useState(false);
       const [compact,setCompact] = React.useState(()=>window.innerWidth<700);
       const [preferredSurface,setReaderSurface]=usePreference('readerSurface',window.innerWidth<1000?'translation':'split');
@@ -4758,7 +4843,7 @@ window.__ModuleLoader__.load({
           const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,media,schedule:offpeakOnly?'offpeak':'now',engine,aiConsent:engine==='ai'});
           if(r.results?.[0]?.error) throw new Error(r.results[0].error);
           window.dispatchEvent(new Event('ll-layout-changed'));
-          setNotice({kind:'ok',text:'已打开 PDF 分区工具。半自动/手动模式检查确认后，点击「按确认分区翻译」。已有分区不会被覆盖。'});
+          setNotice({kind:'ok',text:'已打开 PDF 分区工具。检查确认后，在页码下「页面任务」选择全部或指定页数翻译。已有分区不会被覆盖。'});
         } catch(err) { setNotice({kind:'err',text:err.message}); }
         finally { setBusy(null); }
       }
@@ -5706,7 +5791,7 @@ window.__ModuleLoader__.load({
             h('h3',{key:'h'},'插件与服务'),
             h('button', {
               key: 'cfg', className: 'll-btn ll-btn-xs',
-              title: '配置 DeepSeek API key（写入 ~/.dsh/.credentials.yaml，自动备份）',
+              title: '配置 DeepSeek API key（通过 DSH 凭据服务保存）',
               onClick: () => {setToolsTab(null);setConfigOpen(true);},
             }, '配置'),
             h('button', {

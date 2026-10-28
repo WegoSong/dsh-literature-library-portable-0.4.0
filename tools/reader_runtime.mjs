@@ -5,6 +5,8 @@ export function createReaderRuntime() {
     const valid=(name,value)=>{
       if(['readerSurface','mdMode','partitionEngine'].includes(name))return ({readerSurface:['split','translation','pdf'],mdMode:['preview','source','edit'],partitionEngine:['local','ai']})[name].includes(value);
       if(name==='scanDir')return typeof value==='string'&&value.length<=2048;
+      if(['aiPageMode','localPageMode','translatePageMode'].includes(name))return ['all','selected'].includes(value);
+      if(['aiPageRange','localPageRange','translatePageRange'].includes(name))return typeof value==='string'&&value.length<=4096;
       return ['focusMode','detailsOpen','showHidden','regionInfo','regionLabels','regionVisible','layoutTools','comparisonEnabled'].includes(name)&&typeof value==='boolean';
     };
     const all=()=>{try{const x=JSON.parse(storage().getItem(key)||'{}');return x&&typeof x==='object'&&!Array.isArray(x)?x:{};}catch{return {};}};
