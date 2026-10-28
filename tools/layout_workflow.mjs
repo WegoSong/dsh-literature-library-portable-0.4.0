@@ -8,10 +8,10 @@ import { MEDIA_POLICY, mediaOptions } from './media_regions.mjs';
 const digest = data => createHash('sha256').update(data).digest('hex');
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
 const MODES = ['auto', 'semi', 'manual'];
-/** Persisted local-only preparation queue. No credentials and no model calls here. */
-export function createLayoutWorkflow({ root, findPaper, extract, translate, isBusy }) {
+/** Persisted preparation queue. Local extraction plus explicitly consented AI adapter. */
+export function createLayoutWorkflow({ root, findPaper, extract, translate, isBusy, partitionAI }) {
   let tail = Promise.resolve();
-  const locks = new Map(), pending = new Set();
+  const locks = new Map(), pending = new Set(),aiControllers=new Map();
   // UI polling must not repeatedly load/hash a whole PDF and parse every page.
   const hashes = new Map(), layouts = new Map();
   const stamp = s => `${s.size}/${s.mtimeMs}/${s.ctimeMs}/${s.ino}`;
@@ -63,7 +63,8 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     media:mediaOptions(s.media), needsRefresh:s.preparationPolicy!==MEDIA_POLICY,
     sourceHash: s.sourceHash, pageCount: s.pageCount || 0, checkedPages: s.checkedPages || [],
     error: s.error || null, updatedAt: s.updatedAt, warnings: s.warnings || [], coverage: s.coverage || null,
-    translationJobId: s.translationJobId || null });
+    translationJobId: s.translationJobId || null, ai:s.ai===true,aiProgress:s.aiProgress||null,pendingCount:s.pendingRegions?.length||0,
+    pendingRegions:s.pendingRegions||[],canTranslate:!!(s.ai&&s.coverage?.ok&&!s.hardWarnings?.length&&s.preparedRevision===s.revision&&s.mdHash&&s.eligibleRegions>0&&['review','approved'].includes(s.phase)) });
   function enqueue(slug, revision, raw = false) {
     pending.add(slug);
     tail = tail.catch(() => {}).then(() => serial(slug, async () => {
@@ -72,20 +73,34 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       try {
         await current(s);
         s.phase = 'partitioning'; await save(s);
-        const result = await extract((await paperFor(slug)).pdfAbs, slug, undefined, {
+        let result = await extract((await paperFor(slug)).pdfAbs, slug, undefined, {
           outputRoot: join(dir(slug), `r${revision}`), overrides: s.overrides, sourceHash: s.sourceHash,
-          rawLayout: raw, allowReview: true, media:mediaOptions(s.media),
+          rawLayout: raw||s.aiRequested, allowReview: true, media:mediaOptions(s.media),
         });
+        if(s.aiRequested){
+          if(!partitionAI)throw Error('AI 分区模块不可用');
+          const native=JSON.parse(await readFile(result.layoutPath,'utf8'));
+          let progressTail=Promise.resolve(),identified;const controller=new AbortController();aiControllers.set(slug,controller);
+          try{identified=await partitionAI.partition({slug,pdf:(await paperFor(slug)).pdfAbs,layout:native,sourceHash:s.sourceHash,consent:s.aiConsent,signal:controller.signal,
+            onProgress:p=>{s.aiProgress=p;progressTail=progressTail.then(()=>save(s));}});}finally{await progressTail;aiControllers.delete(slug);}
+          s.aiPendingEvidence=identified.pending;s.pendingRegions=identified.pending;s.aiErrors=identified.errors;s.aiRequested=false;s.aiProgress=null;
+          // Explicit user edits win over automatic candidates and are never AI input.
+          s.overrides={...identified.overrides,...(s.overrides||{})};
+          result=await extract((await paperFor(slug)).pdfAbs,slug,undefined,{outputRoot:join(dir(slug),`r${revision}`,'ai-final'),overrides:s.overrides,sourceHash:s.sourceHash,allowReview:true,media:mediaOptions(s.media)});
+        }
         await current(s);
         s.layoutPath = result.layoutPath; s.mdPath = result.mdPath;
         s.mdHash = raw ? null : digest(result.md);
         s.preparedRevision = revision;
         s.preparationPolicy = MEDIA_POLICY;
         const l = await layout(s);
+        if(s.ai){const deferred=l.pages.flatMap(p=>p.regions.filter(r=>r.role==='pending').map(r=>({page:p.page,id:r.id,...(s.aiPendingEvidence||[]).find(x=>x.page===p.page&&x.id===r.id)})));s.pendingRegions=deferred;
+          s.eligibleRegions=l.pages.reduce((n,p)=>n+p.regions.filter(r=>['body','abstract','heading','caption','table','formula'].includes(r.role)&&r.itemIds?.length).length,0);}
         s.pageCount = l.pages.length; s.warnings = l.warnings; s.coverage = l.coverage;
         s.hardWarnings = l.blockingWarnings || [];
-        const safe = l.coverage?.ok && !s.hardWarnings.length && l.pages.every(p => p.items.length);
-        s.phase = s.mode === 'auto' && safe ? 'approved' : 'review';
+        s.pagesReady=l.pages.every(p=>p.items.length||s.ai&&p.regions.some(r=>r.role==='pending'));
+        const safe = l.coverage?.ok && !s.hardWarnings.length && s.pagesReady;
+        s.phase = (s.mode === 'auto'||s.aiApprovalRequested) && safe && !s.pendingRegions?.length ? 'approved' : 'review';
         if (s.mode === 'auto' && !safe) s.error = '自动自检未通过，已暂停。请检查分区后确认。';
         await save(s);
       } catch (err) {
@@ -106,7 +121,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     })).then(async () => {
       pending.delete(slug);
       const s = await read(slug);
-      if (s?.revision === revision && s.mode === 'auto' && s.phase === 'approved') {
+      if (s?.revision === revision && s.mode === 'auto' && (s.phase === 'approved'||summary(s).canTranslate)) {
         try {
           const job = await translate({ slug, schedule: s.schedule });
           await serial(slug, async () => { const latest = await read(slug); latest.translationJobId = job.jobId; await save(latest); });
@@ -115,15 +130,17 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       }
     }).catch(() => { pending.delete(slug); });
   }
-  async function startOne(slug, mode, schedule, force, media) {
+  async function startOne(slug, mode, schedule, force, media, ai=false,aiConsent=false) {
     return serial(slug, async () => {
       const p = await paperFor(slug), old = await read(slug);
       if (pending.has(slug) || isBusy(slug)) fail('此文献已有任务，请等待完成');
       const sameSource=old?.sourceHash === await sourceHash(slug), sameMedia=JSON.stringify(mediaOptions(old?.media))===JSON.stringify(mediaOptions(media));
-      if (old && !force && sameSource && sameMedia && old.preparationPolicy===MEDIA_POLICY) return summary(old);
+      if(ai&&(!partitionAI||aiConsent!==true))fail('AI 分区需确认发送与费用',400);
+      if(ai&&mode==='manual')fail('手动模式不调用 AI，请选择自动或半自动',400);
+      if (old && !force && sameSource && sameMedia && old.preparationPolicy===MEDIA_POLICY&&!!old.ai===ai) return summary(old);
       const s = { slug, title: p.title || slug, mode, schedule: schedule === 'offpeak' ? 'offpeak' : 'now',
         phase: 'queued', revision: (old?.revision || 0) + 1, sourceHash: await sourceHash(slug),
-        media:mediaOptions(media),overrides:!force&&sameSource ? old.overrides||{} : {}, checkedPages: [] };
+        media:mediaOptions(media),overrides:!force&&sameSource ? old?.overrides||{} : {}, checkedPages: [],ai,aiRequested:ai,aiConsent:ai&&aiConsent };
       // Keep old revision files recoverable; new preparation never overwrites them.
       await save(s); enqueue(slug, s.revision, mode === 'manual'); return summary(s);
     });
@@ -145,13 +162,14 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     return result;
   }
   async function command(body) {
+    if(body.action==='cancel-ai'){await paperFor(body.slug);const controller=aiControllers.get(body.slug);controller?.abort();return{cancelRequested:!!controller};}
     if (body.action === 'start') {
       if (!MODES.includes(body.mode)) fail('分区模式无效', 400);
       const slugs = [...new Set(body.slugs || [body.slug])];
       if (!slugs.length || slugs.length > 200) fail('每批请选择 1–200 篇', 400);
       const results = [];
       for (const slug of slugs) {
-        try { results.push({ state: await startOne(slug, body.mode, body.schedule, body.force === true, body.media) }); }
+        try { results.push({ state: await startOne(slug, body.mode, body.schedule, body.force === true, body.media,body.engine==='ai',body.aiConsent===true) }); }
         catch (err) { results.push({ slug, error: err.message }); }
       }
       return { results };
@@ -166,6 +184,15 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         await save(s);enqueue(s.slug,s.revision,s.mode==='manual'&&Object.keys(s.overrides||{}).length!==s.pageCount);return {state:summary(s)};
       }
       const l = await layout(s);
+      if(s.ai&&(body.action==='check-page'||body.action==='approve')&&s.pendingRegions?.length){
+        const targets=body.action==='approve'&&body.confirmAll===true?l.pages.map(p=>p.page):[body.page];
+        const pending=(s.pendingRegions||[]).filter(r=>targets.includes(r.page));
+        if(pending.some(r=>!r.originalRole||r.originalRole==='unknown'))fail('仍有未分类或识别失败区域，请先手动纠错并保存，不能仅点击确认',422);
+        if(pending.length){for(const n of targets){const p=l.pages.find(p=>p.page===n);if(!p)continue;const restored=p.regions.map(r=>({...r,role:pending.find(x=>x.page===n&&x.id===r.id)?.originalRole||r.role}));s.overrides[n]=validatePageRegions(p,restored);}
+          s.checkedPages=[...new Set([...s.checkedPages,...targets])];s.revision++;s.phase='queued';s.aiApprovalRequested=body.action==='approve';s.mode='semi';s.translationJobId=null;s.error=null;
+          await save(s);enqueue(s.slug,s.revision);return{state:summary(s)};
+        }
+      }
       if (body.action === 'save-page') {
         const p = l.pages.find(p => p.page === body.page);
         if (!p) fail('页码无效', 400);
@@ -186,14 +213,14 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       if (body.action === 'approve' || body.action === 'translate') {
         if(s.preparationPolicy!==MEDIA_POLICY)fail('图表处理已升级，请应用图表选项重新抽取并检查；保留已有人工框。');
         if (s.preparedRevision !== s.revision || !s.mdHash) fail('当前分区版本尚未通过抽取自检，请先修正失败页面', 422);
-        if (!l.coverage?.ok || s.hardWarnings?.length || !l.pages.every(p => p.items.length)) fail('自检未通过，仍有遗漏文字或复杂页，请先修正。扫描件须先 OCR。', 422);
+        if (!l.coverage?.ok || s.hardWarnings?.length || !l.pages.every(p=>p.items.length||s.ai&&p.regions.some(r=>r.role==='pending'))) fail('自检未通过，仍有遗漏文字或复杂页，请先修正。扫描件须先 OCR。', 422);
         if (body.action === 'approve') {
           if (s.mode === 'manual' && l.pages.some(p => !s.overrides[p.page])) fail('手动模式须保存每页分区');
           if (body.confirmAll === true) s.checkedPages = l.pages.map(p => p.page);
           if (s.checkedPages.length !== s.pageCount) fail('请逐页检查，或明确确认已检查整篇');
           s.phase = 'approved'; s.error = null; await save(s);
         }
-        if (body.action === 'translate' && s.phase !== 'approved') fail('请先确认整篇分区');
+        if (body.action === 'translate' && s.phase !== 'approved'&&!summary(s).canTranslate) fail('请先确认整篇分区');
         if (body.action === 'translate' || body.translate === true) {
           const job = await translate({ slug: s.slug, schedule: body.schedule || s.schedule });
           return { state: summary(s), job };
@@ -208,7 +235,8 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     if (!s) return null; // Legacy callers retain the automatic preflight below.
     await current(s);
     if(s.preparationPolicy!==MEDIA_POLICY)fail('公式/图表处理已升级，请先应用输出选项重新抽取并确认；不会自动重新付费翻译。');
-    if (pending.has(slug) || s.phase !== 'approved') fail('请先完成分区预览与确认，再翻译');
+    if (pending.has(slug) || s.phase !== 'approved'&&!summary(s).canTranslate) fail('请先完成分区预览与确认，再翻译');
+    if(s.ai&&!s.eligibleRegions)fail('所有可译区域仍待确认，请先纠错或确认至少一个区域，未调用翻译 API');
     if (s.preparedRevision !== s.revision) fail('分区与抽取稿版本不一致，请重新检查');
     if (!s.mdHash) fail('分区尚未生成可翻译文本');
     return s;
@@ -218,9 +246,9 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     if (!s) return null;
     const md = await readFile(s.mdPath, 'utf8');
     if (digest(md) !== s.mdHash) fail('抽取稿已变化，请重新分区并确认');
-    return { md, mdPath: s.mdPath, warning: `按已确认分区翻译；公式优先 LaTeX，${mediaOptions(s.media).formulaFallback?'不确定时原图兜底':'不确定时保留待核对候选文本，不使用图片'}。`,
+    return { md, mdPath: s.mdPath, warning: `${s.ai?'按 AI 自检可用分区翻译；'+(s.pendingRegions?.length||0)+' 个待确认区域已跳过，纠错后补译。':'按已确认分区翻译；'}公式优先 LaTeX，${mediaOptions(s.media).formulaFallback?'不确定时原图兜底':'不确定时保留待核对候选文本，不使用图片'}。`,
       layout: { version: (await layout(s)).version, coverage: s.coverage.sourceItems,
-        reviewPages: [...new Set((s.warnings || []).map(w => w.page))], revision: s.revision } };
+        reviewPages: [...new Set((s.warnings || []).map(w => w.page))], revision: s.revision,ai:s.ai===true,pendingRegions:s.pendingRegions||[] } };
   }
   return { command, get, guard, prepared, summary, read, idle: () => tail };
 }

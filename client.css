@@ -954,3 +954,15 @@
  .ll-layout-mainbar > .ll-spacer { display:none; }
 }
 
+.ll-root .ll-ai-options { margin:8px 12px; padding:12px; background:var(--ll-nav-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; font:13px/1.5 system-ui,sans-serif; }
+.ll-root .ll-ai-options summary { cursor:pointer; font-size:13px; }
+.ll-root .ll-ai-options form { display:grid; gap:12px; padding-top:12px; }
+.ll-root .ll-ai-options label { display:flex; flex-direction:column; gap:6px; font-size:13px; min-width:0; }
+.ll-root .ll-ai-options :is(input,select) { box-sizing:border-box; font:inherit; width:100%; min-width:0; max-width:100%; min-height:32px; padding:5px 8px; background:var(--ll-control-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:4px; }
+.ll-root .ll-ai-options fieldset { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; border:1px solid var(--ll-soft-border); border-radius:6px; padding:12px; min-width:0; }
+.ll-root .ll-ai-options legend { padding:0 6px; font-size:13px; }
+.ll-root .ll-ai-options p,.ll-root .ll-job-billing p { font:12px/1.5 system-ui,sans-serif!important; overflow-wrap:anywhere; margin:6px 0!important; }
+.ll-root .ll-job-billing { display:block; max-height:240px; overflow:auto; font-size:12px; font-variant-numeric:tabular-nums; }
+.ll-root .ll-job-billing summary { cursor:pointer; white-space:normal; }
+.ll-root .ll-modal .ll-layout-row { flex-wrap:wrap; overflow:visible; }
+.ll-root .ll-region-box[data-role="pending"] { border-color:#ad843e; border-style:dashed; }

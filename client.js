@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.7.2';
+    const PDFJS_REV = '0.8.0';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -1134,6 +1134,18 @@ window.__ModuleLoader__.load({
  .ll-layout-mainbar > .ll-spacer { display:none; }
 }
 
+.ll-root .ll-ai-options { margin:8px 12px; padding:12px; background:var(--ll-nav-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:6px; font:13px/1.5 system-ui,sans-serif; }
+.ll-root .ll-ai-options summary { cursor:pointer; font-size:13px; }
+.ll-root .ll-ai-options form { display:grid; gap:12px; padding-top:12px; }
+.ll-root .ll-ai-options label { display:flex; flex-direction:column; gap:6px; font-size:13px; min-width:0; }
+.ll-root .ll-ai-options :is(input,select) { box-sizing:border-box; font:inherit; width:100%; min-width:0; max-width:100%; min-height:32px; padding:5px 8px; background:var(--ll-control-bg); color:var(--ll-text); border:1px solid var(--ll-soft-border); border-radius:4px; }
+.ll-root .ll-ai-options fieldset { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; border:1px solid var(--ll-soft-border); border-radius:6px; padding:12px; min-width:0; }
+.ll-root .ll-ai-options legend { padding:0 6px; font-size:13px; }
+.ll-root .ll-ai-options p,.ll-root .ll-job-billing p { font:12px/1.5 system-ui,sans-serif!important; overflow-wrap:anywhere; margin:6px 0!important; }
+.ll-root .ll-job-billing { display:block; max-height:240px; overflow:auto; font-size:12px; font-variant-numeric:tabular-nums; }
+.ll-root .ll-job-billing summary { cursor:pointer; white-space:normal; }
+.ll-root .ll-modal .ll-layout-row { flex-wrap:wrap; overflow:visible; }
+.ll-root .ll-region-box[data-role="pending"] { border-color:#ad843e; border-style:dashed; }
 `;
 
     function injectCss() {
@@ -2362,11 +2374,12 @@ window.__ModuleLoader__.load({
           queued: job.stage || '排队中',
           running: job.stage || `翻译中 ${job.percent ?? 0}%`,
           done: '翻译完成',
+          partial:`部分完成：${job.pendingRegions?.length||0} 区待确认补译`,
           failed: job.failure?.label || (/placeholder|structure-reordered|heading-lost|empty-paragraph|mostly-untranslated/iu.test(job.error ?? '')
             ? '翻译未完成：部分内容校验失败，可重试续传'
             : `翻译失败：${String(job.error ?? '未知原因').slice(0, 90)}`),
         }[phase] ?? phase;
-        const cls = `ll-progress ll-progress-${phase === 'done' ? 'done' : phase === 'failed' ? 'failed' : 'running'}`;
+        const cls = `ll-progress ll-progress-${phase === 'done' ? 'done' : phase === 'partial'||phase === 'failed' ? 'failed' : 'running'}`;
         const metricTitle = [
           `输入 token：${metrics.input.toLocaleString()}`,
           `缓存命中：${metrics.cacheHit === null ? '后端未返回' : metrics.cacheHit.toLocaleString()}`,
@@ -2376,7 +2389,7 @@ window.__ModuleLoader__.load({
           metrics.thinkingChars !== null && metrics.reasoning === null
             ? `thinking 字符：${metrics.thinkingChars.toLocaleString()}` : null,
           `重试：${metrics.retries} 次`,
-          metrics.costCny !== null
+          !('costReport' in job)&&metrics.costCny !== null
             ? `${metrics.costEstimated ? '预估' : '计费'}：¥${formatCny(metrics.costCny)}${metrics.pricingPeriod ? `（${metrics.pricingPeriod === 'peak' ? '峰时' : '闲时'}）` : ''}`
             : null,
           // 本地预处理省下的输入：参考文献、元数据、重复页眉不再发给模型
@@ -2412,7 +2425,7 @@ window.__ModuleLoader__.load({
         ].filter(Boolean).join('\n');
         const hasUsage = metrics.input > 0 || metrics.output > 0 || metrics.retries > 0 || metrics.costCny !== null;
         const usageLabel = [
-          metrics.costCny !== null ? `${metrics.costEstimated ? '约' : ''}¥${formatCny(metrics.costCny)}` : '¥—',
+          'costReport' in job?(job.costReport?'费用已按用量汇总':'费用待任务结束汇总'):metrics.costCny !== null ? `${metrics.costEstimated ? '约' : ''}¥${formatCny(metrics.costCny)}` : '¥—',
           `入 ${compactNumber(metrics.input)}`,
           `缓 ${compactNumber(metrics.cacheHit)}/未 ${compactNumber(metrics.cacheMiss)}`,
           `${metrics.visibleKnown ? '译' : '出'} ${compactNumber(metrics.visible)}/思 ${compactNumber(metrics.reasoning)}`,
@@ -2425,7 +2438,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'll-progress-bar', key: 'bar' }, h('span', {
               className: 'll-progress-fill',
               style: {
-                width: phase === 'done' ? '100%'
+                width: phase === 'done'||phase==='partial' ? '100%'
                   : phase === 'failed' ? '100%'
                     : `${Math.max(4, job.percent ?? 0)}%`,
               },
@@ -2446,13 +2459,18 @@ window.__ModuleLoader__.load({
                 title: '取消该任务的闲时限制，按当前时段价格翻译；有任务执行时等待空位',
                 onClick: (e) => { e.stopPropagation(); onStartNow(job); },
               }, startingNow ? '切换中…' : '立即翻译') : null,
-            job.phase === 'done' && onOpen ? h('button', {
+            ['done','partial'].includes(job.phase) && onOpen ? h('button', {
               key: 'open', className: 'll-btn ll-btn-xs', style: { marginLeft: '4px' },
               title: '选中这篇以查看译文',
               onClick: (e) => { e.stopPropagation(); onOpen(); },
             }, '查看') : null,
           ]),
           hasUsage ? h('span', { className: 'll-usage', key: 'usage' }, usageLabel) : null,
+          job.costReport?h('details',{key:'billing',className:'ll-job-billing',onClick:e=>e.stopPropagation()},[
+            h('summary',{key:'s'},`累计：划分 ${costTotals(job.costReport.partition.totals)} · 翻译 ${costTotals(job.costReport.translation.totals)}`),
+            h('p',{key:'total'},'合计：'+costTotals(job.costReport.totals)),h('p',{key:'pending'},job.costReport.partial?`${job.costReport.pendingCount} 个待确认区域尚未翻译，补译后继续累计。`:'本次可译内容已完成。'),
+            ...job.costReport.partition.pages.map(p=>h('p',{key:p.page},`第 ${p.page} 页划分：${costTotals(p.totals)}`)),h('p',{key:'note'},job.costReport.note),
+          ]):job.billingError?h('span',{key:'billing-error',className:'ll-usage'},job.billingError):null,
         ]);
       }
 
@@ -2885,11 +2903,14 @@ window.__ModuleLoader__.load({
      * 但保留占位高度，所以滚动条不会跳动。父组件用 React.memo 包住它，
      * 页码变化时不会把 200 多页全部重渲染一遍。
      */
-    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式', table: '表格', figure:'图片',
+    const REGION_LABELS = { body: '正文', abstract: '摘要', heading: '章节标题', caption: '图表题注', formula: '公式', table: '表格', figure:'图片',pending:'待确认（暂不翻译）',references:'参考文献（保留原文）',
       title: '论文标题', 'front-matter': '作者信息', 'article-info': '文章信息', affiliation: '作者单位', publication: '出版信息',
       'running-matter': '页眉页脚', watermark: '忽略/水印' };
     const LAYOUT_PHASES = { queued: '等待分区', partitioning: '本地分区中', review: '待人工检查', approved: '分区已确认', failed: '分区失败' };
-    const isArticleRegion=r=>['body','abstract','heading','caption','formula','table','figure'].includes(r.role);
+    const isArticleRegion=r=>['body','abstract','heading','caption','formula','table','figure','pending','references'].includes(r.role);
+    const partitionEngine=()=>{try{return localStorage.getItem('dsh-literature-library/partition-engine')==='ai'?'ai':'local';}catch{return'local';}};
+    function costTotals(totals){if(!totals?.length)return'0（无 API 调用）';return totals.map(c=>{if(c.low==null||c.high==null)return`${c.currency} 金额未知`;const f=n=>n>0&&n<.00001?'<0.00001':Number(n).toFixed(5);return`${c.currency} ${c.low===c.high?f(c.low):f(c.low)+'—'+f(c.high)}`;}).join(' / ');}
+    async function confirmPartitionAI(engine,count=1){if(engine!=='ai')return true;const r=await fetch(`${ROUTE_PREFIX}/partition-ai-config`),c=await r.json();if(!r.ok||!c.ready)throw Error(c.message||'请先在分区/批量翻译中保存 AI 分区配置，并在原 API 配置中设置统一密钥');return window.confirm(`AI 三阶段分区：${count} 篇，每页最多 3 次请求。\n服务 ${c.endpoint}\n模型 ${c.model}\n使用统一翻译 API 密钥；发送论文页面图像及相邻页原文，不发送人工稿。\n分区和翻译分别计费，结束后汇总；待确认区域先跳过。继续？`);}
     function regionDisplayLabel(region,regions){
       const prefix=isArticleRegion(region)?String(regions.filter(isArticleRegion).findIndex(r=>r.id===region.id)+1):'信息';
       return prefix+' · '+(REGION_LABELS[region.role]||region.role);
@@ -3056,26 +3077,28 @@ window.__ModuleLoader__.load({
       const changeRegion=update=>setView(v=>({...v,dirty:true,page:{...v.page,regions:v.page.regions.map(r=>r.id===v.selected?{...r,...update}:r)}}));
       const checkPage=()=>act('check-page',{page:view.page.page});
       const approve=()=>{if(window.confirm('确认已检查《'+s.title+'》的全部 '+s.pageCount+' 页？仅确认，不启动翻译。'))act('approve',{confirmAll:true});};
-      const translate=()=>{if(window.confirm('使用已确认分区翻译，将产生 API 费用。继续？'))act('translate');};
-      const restart=()=>{
+      const translate=()=>{if(window.confirm(s?.pendingCount?`先翻译可用内容，${s.pendingCount} 个待确认区保留占位，产生翻译费用。继续？`:'使用已确认分区翻译，将产生 API 费用。继续？'))act('translate');};
+      const restart=async()=>{
+        const engine=mode==='manual'?'local':partitionEngine();try{if(!await confirmPartitionAI(engine))return;}catch(e){setError(e.message);return;}
         if(mode==='auto'&&!window.confirm('自动模式自检后会调用 API 翻译并产生费用。继续？'))return;
         if(s&&!window.confirm('重新分区会清除当前人工修改和确认；旧版本文件仍保留。继续？'))return;
-        setShow(true);act('start',{force:!!s});
+        setShow(true);act('start',{force:!!s,engine,aiConsent:engine==='ai'});
       };
       const edit=()=>{
         if(editing&&dirty){setError('请先保存，或在更多中放弃修改。');return;}
         setShow(true);setView(v=>({...v,editing:!v?.editing}));
       };
-      const summary=s?(LAYOUT_PHASES[s.phase]||s.phase)+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页':'尚未分区';
+      const summary=s?(s.aiProgress?`AI ${s.aiProgress.stage} · 第 ${s.aiProgress.page}/${s.aiProgress.total} 页`:(LAYOUT_PHASES[s.phase]||s.phase))+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页'+(s.pendingCount?` · ${s.pendingCount} 区暂缓翻译`:''):'尚未分区';
       return h('section',{ref:controlsRef,className:'ll-layout-controls','aria-label':'论文分区检查'},[
         h('div',{key:'bar',className:'ll-layout-mainbar'},[
           h('strong',{key:'page'},'分区'+(view?.page?' · 第 '+view.page.page+' 页':'')),
           h('span',{key:'state',className:'ll-layout-state',title:summary},summary),
           h('span',{key:'sp',className:'ll-spacer'}),
+          s?.ai&&s.phase==='partitioning'?h('button',{key:'cancel-ai',className:'ll-btn ll-btn-xs',disabled:busy,onClick:()=>act('cancel-ai')},'停止后续 AI'):null,
           ready&&view?.page?h('button',{key:'edit',className:'ll-btn ll-btn-xs',disabled:busy,onClick:edit},editing?'结束编辑':'手动纠错'):null,
           ready&&view?.page&&!needsRefresh?h('button',{key:'primary',className:'ll-btn ll-btn-xs ll-layout-primary',disabled:busy||(editing?!dirty&&s.mode!=='manual':dirty),
-            'aria-label':editing?'保存本页并自检':s.phase==='approved'?'按确认分区翻译':'此页已检查',
-            onClick:editing?()=>act('save-page',{page:view.page.page,regions:regions.map(({id,role,bbox})=>({id,role,bbox}))}):s.phase==='approved'?translate:checkPage},editing?'保存':s.phase==='approved'?'翻译':'此页已检查'):null,
+            'aria-label':editing?'保存本页并自检':s.phase==='approved'||s.canTranslate?'按确认分区翻译':'此页已检查',
+            onClick:editing?()=>act('save-page',{page:view.page.page,regions:regions.map(({id,role,bbox})=>({id,role,bbox}))}):s.phase==='approved'||s.canTranslate?translate:checkPage},editing?'保存':s.canTranslate&&s.pendingCount?'翻译可用区域':s.phase==='approved'||s.canTranslate?'翻译':'此页已检查'):null,
           !s?h('button',{key:'start',className:'ll-btn ll-btn-xs',disabled:busy,onClick:restart},'开始分区'):null,
           h('details',{key:'more',className:'ll-layout-more',onToggle:toggleDisclosure},[
             h('summary',{key:'toggle','aria-label':'分区更多操作'},'更多'),
@@ -3084,6 +3107,7 @@ window.__ModuleLoader__.load({
               h('button',{key:'show',className:'ll-btn ll-btn-xs',disabled:!view?.page,onClick:()=>setShow(!show)},show?'隐藏分区':'显示分区'),
               h('label',{key:'info'},[h('input',{type:'checkbox',checked:!!view?.showInfo,onChange:e=>setView(v=>({...v,showInfo:e.target.checked}))}),'显示页眉、作者等信息区']),
               h('label',{key:'labels'},[h('input',{type:'checkbox',checked:!!view?.showLabels,onChange:e=>setView(v=>({...v,showLabels:e.target.checked}))}),'显示全部框标签']),
+              ready&&s.ai?h('button',{key:'check-ai',className:'ll-btn ll-btn-xs',disabled:busy||dirty,onClick:checkPage},'确认本页待确认区'):null,
               ready?h('p',{key:'options'},'此稿：图片'+(s.media?.figures?'开':'关')+' · 表格'+(s.media?.tables?'开':'关')+' · 公式原图兜底'+(s.media?.formulaFallback!==false?'开':'关')):null,
               ready&&(needsRefresh||!!s.media?.figures!==!!media?.figures||!!s.media?.tables!==!!media?.tables||(s.media?.formulaFallback!==false)!==(media?.formulaFallback!==false))?
                 h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||dirty,onClick:()=>act('set-media')},'更新识别（保留人工框）'):null,
@@ -3096,7 +3120,7 @@ window.__ModuleLoader__.load({
               ]),
               h('details',{key:'help',className:'ll-layout-help'},[
                 h('summary',{key:'s'},'操作说明与费用'),
-                h('p',{key:'p'},'分区与检查均在本地完成。框号与下方选择项一致；点框选择，拖动移动，右下角调整大小。公式、图注、表格和图片独立分类。确认后翻译才调用 API。'),
+                h('p',{key:'p'},'本地规则分区不调用 API；AI 模式分区与翻译分别计费、共用密钥。待确认区不发送给翻译模型，先译其他内容。框号与选择项一致，点框选择并纠错，确认后补译。'),
               ]),
             ]),
           ]),
@@ -3128,8 +3152,21 @@ window.__ModuleLoader__.load({
       ]);
     }
 
+    function PartitionAIOptions(){
+      const [c,setC]=React.useState(null),[message,setMessage]=React.useState(''),[saving,setSaving]=React.useState(false);
+      React.useEffect(()=>{let dead=false;fetch(`${ROUTE_PREFIX}/partition-ai-config`).then(r=>r.json()).then(x=>{if(!dead)setC(x);}).catch(e=>setMessage(e.message));return()=>{dead=true;};},[]);
+      const field=(name,label,type='text')=>h('label',{key:name},[label,h('input',{value:c[name]??'',type,min:type==='number'?1024:undefined,max:type==='number'?16000:undefined,onChange:e=>setC(x=>({...x,[name]:type==='number'?Number(e.target.value):e.target.value}))})]);
+      const prices=(name,title)=>h('fieldset',{key:name},[h('legend',{key:'l'},title),h('label',{key:'currency'},['币种',h('select',{value:c[name]?.currency||'CNY',onChange:e=>setC(x=>({...x,[name]:{...x[name],currency:e.target.value}}))},['CNY','USD','EUR'].map(v=>h('option',{key:v},v)))]),...['inputPerMillion','cacheHitPerMillion','outputPerMillion'].map((f,i)=>h('label',{key:f},[['输入未命中','输入命中','生成（含思考）'][i],h('input',{type:'number',min:0,step:'any',value:c[name]?.[f]??'',onChange:e=>setC(x=>({...x,[name]:{...x[name],[f]:e.target.value===''?null:Number(e.target.value)}}))})]))]);
+      return h('details',{className:'ll-ai-options'},[h('summary',{key:'s'},'AI 分区与费用设置（共用翻译密钥）'),c?h('form',{key:'f',onSubmit:async e=>{e.preventDefault();setSaving(true);try{const result=await postJson('/partition-ai-config',{endpoint:c.endpoint,model:c.model,maxTokens:c.maxTokens,semanticThinking:c.semanticThinking,pricing:c.pricing,translationPricing:c.translationPricing,qualityPricing:c.qualityPricing});setC(result);setMessage('已保存，不含密钥；尚未调用 AI。');}catch(e){setMessage(e.message);}finally{setSaving(false);}}},[
+        h('p',{key:'h'},'密钥使用原“配置 API”中的同一份，不另存、不显示。分区模型须支持视觉；共享密钥只发送到与翻译服务同源的接口。'),field('endpoint','视觉接口完整地址','url'),field('model','支持视觉的分区模型'),field('maxTokens','每阶段最大生成 token（含思考）','number'),
+        h('label',{key:'think'},['语义与跨页思考（官方 DeepSeek）',h('select',{value:c.semanticThinking||'low',onChange:e=>setC(x=>({...x,semanticThinking:e.target.value}))},[['low','低强度'],['high','高强度'],['disabled','关闭思考模式']].map(([v,l])=>h('option',{key:v,value:v},l)))]),
+        h('p',{key:'unit'},`以下为每百万 token 单价，未知留空。翻译模型：${c.translationModel||'默认'}；更换模型须核对单价。失败调用也累计，结束后分别汇总，不把未知金额计为零。`),prices('pricing','页面划分单价'),prices('translationPricing','翻译单价'),h('details',{key:'quality'},[h('summary',{key:'s'},'升级模型单价（可选）'),prices('qualityPricing','质量升级模型；未知留空')]),
+        h('button',{key:'save',type:'submit',className:'ll-btn',disabled:saving},saving?'保存中…':'保存 AI 与费用设置'),
+      ]):h('p',{key:'load'},'读取配置中…'),message?h('p',{key:'m',role:'status'},message):null]);
+    }
     function LayoutBatchDialog({ papers, mode, setMode, schedule, media, setMedia, onClose, onSelect, onJob }) {
       const [chosen,setChosen] = React.useState(new Set()), [states,setStates] = React.useState([]), [notice,setNotice] = React.useState(''), [busy,setBusy] = React.useState(false);
+      const [engine,setEngine]=React.useState(partitionEngine);
       React.useEffect(() => {
         let dead = false;
         const poll = async () => { try { const r = await fetch(`${ROUTE_PREFIX}/layout`); if (!r.ok) throw new Error('无法读取分区队列'); const d = await r.json(); if (!dead) setStates(d.states || []); } catch (err) { if (!dead) setNotice(err.message); } };
@@ -3138,17 +3175,18 @@ window.__ModuleLoader__.load({
       const candidates = papers.filter(p => p.source && !p.hidden), bySlug = new Map(states.map(s => [s.slug,s]));
       async function run(action) {
         if (!chosen.size) return;
+        if(action==='start'){try{if(!await confirmPartitionAI(mode==='manual'?'local':engine,chosen.size))return;}catch(e){setNotice(e.message);return;}}
         if (action === 'start' && mode === 'auto' && !window.confirm(`自动模式将分区并翻译选中的 ${chosen.size} 篇，产生 API 费用。继续？`)) return;
         if (action === 'approve' && !window.confirm('确认已人工检查所有选中文献的全部页面？此操作不会启动翻译。')) return;
         if (action === 'translate' && !window.confirm('翻译所有选中且已确认的文献，将产生 API 费用。继续？')) return;
         setBusy(true); const errors = []; let count = 0;
         try {
           if (action === 'start') {
-            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule,media});
+            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule,media,engine:mode==='manual'?'local':engine,aiConsent:mode!=='manual'&&engine==='ai'});
             count = r.results.filter(x => !x.error).length; errors.push(...r.results.filter(x => x.error).map(x => x.error));
           } else for (const slug of chosen) {
             const s = bySlug.get(slug);
-            if (!s || action === 'translate' && s.phase !== 'approved') { errors.push(`${slug} 尚未确认`); continue; }
+            if (!s || action === 'translate' && s.phase !== 'approved'&&!s.canTranslate) { errors.push(`${slug} 尚未确认或没有可译区域`); continue; }
             try { const r = await postJson('/layout',{action,slug,revision:s.revision,confirmAll:action==='approve',schedule}); if(r.job) onJob(r.job); count++; }
             catch(err) { errors.push(err.message); }
           }
@@ -3159,23 +3197,24 @@ window.__ModuleLoader__.load({
         h('div',{key:'h',className:'ll-modal-head'},['分区与翻译队列',h('span',{className:'ll-spacer',key:'sp'}),h('button',{key:'close',className:'ll-btn ll-btn-xs',onClick:onClose},'关闭')]),
         h('div',{key:'tools',className:'ll-layout-controls'},[
           h('div',{key:'row',className:'ll-layout-row'},[
+            h('select',{key:'engine','aria-label':'分区引擎',disabled:mode==='manual',value:mode==='manual'?'local':engine,onChange:e=>{setEngine(e.target.value);try{localStorage.setItem('dsh-literature-library/partition-engine',e.target.value);}catch{}}},[h('option',{key:'local',value:'local'},'本地规则（不收费）'),h('option',{key:'ai',value:'ai'},'AI 三阶段分区')]),
             h('select',{key:'mode',value:mode,'aria-label':'分区模式',onChange:e=>setMode(e.target.value)},[
               h('option',{key:'auto',value:'auto'},'自动：分区自检后翻译'),h('option',{key:'semi',value:'semi'},'半自动：检查后翻译'),h('option',{key:'manual',value:'manual'},'手动：人工分区后翻译')]),
             h('button',{key:'all',className:'ll-btn ll-btn-xs',onClick:()=>setChosen(chosen.size===candidates.length?new Set():new Set(candidates.map(p=>p.slug)))},'全选/取消'),
-            ...[['start','分区选中'],['approve','确认已检查选中'],['translate','翻译已确认选中']].map(([action,label])=>h('button',{key:action,className:'ll-btn ll-btn-xs',disabled:busy || !chosen.size,onClick:()=>run(action)},label)),
+            ...[['start','分区选中'],['approve','确认已检查选中'],['translate','翻译可用区域']].map(([action,label])=>h('button',{key:action,className:'ll-btn ll-btn-xs',disabled:busy || !chosen.size,onClick:()=>run(action)},label)),
           ]),
           h(MediaOptions,{key:'media',value:media,onChange:setMedia}),
-          h('p',{key:'hint',className:'ll-layout-hint'},'图片和表格默认只译题注。公式优先 LaTeX，不确定时原图兜底默认开启，可关闭改用待核对候选文本。图片不调用视觉 API，表格翻译增加文本 token。变更选项保留人工框、重新抽取并要求确认。'),
+          h('p',{key:'hint',className:'ll-layout-hint'},'图片和表格默认只译题注；公式优先 LaTeX，可选不确定公式原图兜底。插图本身仅本地截图，AI 分区另行调用视觉接口。待确认区先跳过，其他区域可先译；纠错后补译。变更选项保留人工框并重新检查。'),
           notice ? h('p',{key:'notice',role:'status'},notice):null,
         ]),
-        h('div',{key:'list',className:'ll-modal-body'},candidates.map(p=>{
+        h('div',{key:'list',className:'ll-modal-body'},[h(PartitionAIOptions,{key:'ai-options'}),...candidates.map(p=>{
           const s=bySlug.get(p.slug);
           return h('div',{key:p.slug,className:'ll-layout-queue-row'},[
             h('input',{key:'c',type:'checkbox','aria-label':`选择 ${chinesePaperTitle(p)}`,checked:chosen.has(p.slug),onChange:()=>setChosen(old=>{const n=new Set(old);n.has(p.slug)?n.delete(p.slug):n.add(p.slug);return n;})}),
-            h('div',{key:'title',className:'ll-layout-queue-title'},[h('strong',{key:'name'},chinesePaperTitle(p)),h('span',{key:'phase'},s?`${LAYOUT_PHASES[s.phase]} · ${s.checkedPages.length}/${s.pageCount} 页${s.error ? ` · ${s.error}` : ''}`:'未分区')]),
+            h('div',{key:'title',className:'ll-layout-queue-title'},[h('strong',{key:'name'},chinesePaperTitle(p)),h('span',{key:'phase'},s?`${LAYOUT_PHASES[s.phase]} · ${s.checkedPages.length}/${s.pageCount} 页${s.pendingCount?' · '+s.pendingCount+' 区待确认':''}${s.error ? ` · ${s.error}` : ''}`:'未分区')]),
             h('button',{key:'open',className:'ll-btn ll-btn-xs',onClick:()=>{onSelect(p.slug);onClose();}},'打开检查'),
           ]);
-        })),
+        })]),
       ]));
     }
 
@@ -4290,7 +4329,7 @@ window.__ModuleLoader__.load({
        * host 重启后内存任务表会清空，但用户仍应能在条目下看到上一次性价记录。
        */
       function rememberFinishedJobs(incoming) {
-        const finished = (incoming ?? []).filter((j) => j.phase === 'done' || j.phase === 'failed');
+        const finished = (incoming ?? []).filter((j) => ['done','partial','failed'].includes(j.phase));
         if (finished.length === 0) return;
         setJobHistory((previous) => {
           const next = { ...previous };
@@ -4315,7 +4354,7 @@ window.__ModuleLoader__.load({
             String(b.startedAt ?? b.updatedAt ?? '').localeCompare(String(a.startedAt ?? a.updatedAt ?? ''))
           ));
         });
-        if (incoming.phase === 'done' || incoming.phase === 'failed') {
+        if (['done','partial','failed'].includes(incoming.phase)) {
           rememberFinishedJobs([incoming]);
         }
       }
@@ -4663,7 +4702,8 @@ window.__ModuleLoader__.load({
         if (layoutMode === 'auto' && !window.confirm('自动模式：本地分区、自检通过后会付费翻译。继续？')) return;
         setBusy(p.slug);
         try {
-          const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,media,schedule:offpeakOnly?'offpeak':'now'});
+          const engine=layoutMode==='manual'?'local':partitionEngine();if(!await confirmPartitionAI(engine))return;
+          const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,media,schedule:offpeakOnly?'offpeak':'now',engine,aiConsent:engine==='ai'});
           if(r.results?.[0]?.error) throw new Error(r.results[0].error);
           window.dispatchEvent(new Event('ll-layout-changed'));
           setNotice({kind:'ok',text:'已打开 PDF 分区工具。半自动/手动模式检查确认后，点击「按确认分区翻译」。已有分区不会被覆盖。'});
@@ -4693,7 +4733,7 @@ window.__ModuleLoader__.load({
           setJobs(incoming);
           rememberFinishedJobs(incoming);
           // 有任务刚从 running 变成 done → 重新拉索引，让「已翻译」标签与译文出现
-          const doneJob = incoming.find((j) => j.phase === 'done');
+          const doneJob = incoming.find((j) => ['done','partial'].includes(j.phase));
           if (doneJob && doneJob.finishedAt && !notifiedDone.current.has(doneJob.jobId)) {
             notifiedDone.current.add(doneJob.jobId);
             setTick((t) => t + 1);
@@ -4823,7 +4863,10 @@ window.__ModuleLoader__.load({
       /** 某篇文献当前的直连翻译任务（取最近一条，失败后回退到本地保存的历史） */
       const jobOf = React.useCallback((p) => {
         const mine = jobs.filter((j) => j.slug === p.slug);
-        return mine.length ? mine[0] : (jobHistory[p.slug] ?? null);
+        if(mine.length)return mine[0];
+        if(jobHistory[p.slug])return jobHistory[p.slug];
+        const saved=p.translationStats;
+        return saved?.costReport?{...saved,slug:p.slug,jobId:'persisted-'+p.slug,phase:saved.partial?'partial':'done',percent:100,costReport:saved.costReport,model:p.translateModel,outputPath:p.translation,usage:saved}:null;
       }, [jobs, jobHistory]);
 
       const progressOf = React.useCallback(
@@ -4923,7 +4966,7 @@ window.__ModuleLoader__.load({
             const job = await res.json();
             upsertJob(job);
             transientFailures = 0;
-            if (job.phase === 'done' || job.phase === 'failed') return job;
+            if (['done','partial','failed'].includes(job.phase)) return job;
           } catch (err) {
             transientFailures += 1;
             // 短暂网络波动不应中断整条队列；连续失败才上报。

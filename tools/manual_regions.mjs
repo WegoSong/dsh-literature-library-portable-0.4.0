@@ -1,5 +1,5 @@
 /** Manual page replacements. Native text ownership is checked before extraction. */
-export const ARTICLE_ROLES = ['body', 'abstract', 'heading', 'caption', 'formula', 'table', 'figure'];
+export const ARTICLE_ROLES = ['body', 'abstract', 'heading', 'caption', 'formula', 'table', 'figure', 'pending', 'references'];
 export const REGION_ROLES = [...ARTICLE_ROLES, 'title', 'front-matter', 'article-info', 'affiliation', 'publication', 'running-matter', 'watermark'];
 export function validatePageRegions(page, drafts) {
   const fail = message => { throw Object.assign(new Error(message), { status: 422 }); };

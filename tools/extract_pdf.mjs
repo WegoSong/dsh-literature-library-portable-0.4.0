@@ -1004,6 +1004,8 @@ function extractPageParagraphs(pc, furniture, ctx, opts, out) {
       const lines = pc.lines.filter(l => l.manualRegion === r.id).sort((a,b) => b.y-a.y || a.x0-b.x0);
       const sourceIds = r.itemIds, sourcePages = [pc.p], flowId = r.role === 'body' ? 'body' : `manual-${pc.p}-${r.id}`;
       const text = lines.map(l => l.text).join(' ');
+      if (r.role === 'pending') return [{type:'pending',text:'',regionId:r.id,sourceIds,sourcePages,flowId:`pending-${pc.p}-${r.id}`}];
+      if (r.role === 'references') return [{type:'references',text,sourceIds,sourcePages,flowId:`references-${pc.p}-${r.id}`}];
       if (r.role === 'table' || r.role === 'figure') return [mediaParagraph(pc,r,opts)];
       if (r.role === 'formula') return [{ type: 'formula-source', text, sourceIds, sourcePages, flowId,
         crop: { page: pc.p, left: r.bbox[0], bottom: r.bbox[1], right: r.bbox[2], top: r.bbox[3] } }];
@@ -1640,6 +1642,8 @@ function renderMarkdown(result) {
     L.push('');
     for (const p of page.paragraphs) {
       const text = p.text.trim();
+      if(p.type==='pending') {L.push('<!--DSH_PENDING_REGION-->',`> **分区待确认，暂未翻译（第 ${page.page} 页，区域 ${String(p.regionId).replace(/[^A-Za-z0-9_-]/gu,'')}）**：请在 PDF 分区工具中纠错或确认后补译。`,'<!--/DSH_PENDING_REGION-->','');continue;}
+      if(p.type==='references') {L.push('<!--DSH_LOCAL_REFERENCE-->',text,'<!--/DSH_LOCAL_REFERENCE-->','');continue;}
       if (!text&&p.type!=='formula-source') continue;
       if (p.section) L.push(`===SEC:${p.section}===`);
       if(p.type==='table') {

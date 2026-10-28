@@ -31,6 +31,8 @@ import { gunzipSync, zstdDecompressSync } from 'node:zlib';
 import { createLayoutWorkflow } from './tools/layout_workflow.mjs';
 import {BLOCK_PROTOCOL,blockPayload,decodeBlockResponse} from './tools/block_transport.mjs';
 import {classifyTaskFailure} from './tools/task_diagnostics.mjs';
+import {createPartitionIntegration} from './tools/partition_integration.mjs';
+import {canonicalSegment} from './tools/translation_segment_cache.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -502,7 +504,7 @@ const MAX_JOB_HISTORY = 50;
 function pruneJobs() {
   if (translateJobs.size <= MAX_JOB_HISTORY) return;
   const finished = [...translateJobs.entries()]
-    .filter(([, j]) => j.phase === 'done' || j.phase === 'failed')
+    .filter(([, j]) => ['done','partial','failed'].includes(j.phase))
     .sort((a, b) => String(a[1].startedAt).localeCompare(String(b[1].startedAt)));
   for (const [id] of finished) {
     if (translateJobs.size <= MAX_JOB_HISTORY) break;
@@ -725,6 +727,10 @@ export function apply(ctx, config = {}) {
     pdfjsRoot = resolve(join(workspaceRoot, 'node_modules', 'pdfjs-dist'));
   }
   const prefix = config.routePrefix || '/literature-library';
+  const partitionAI=createPartitionIntegration({root:join(libraryRoot,'layouts'),credentials:async()=>{
+    const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href),resolved=await tools.resolveApiKey(config);
+    return{key:resolved.key,baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,model:config.model||tools.DEFAULT_MODEL};
+  }});
   const layoutWorkflow = createLayoutWorkflow({
     root: join(libraryRoot, 'layouts'),
     findPaper: async slug => {
@@ -735,6 +741,7 @@ export function apply(ctx, config = {}) {
     },
     extract: extractPdfText,
     translate: handleTranslateJob,
+    partitionAI,
     isBusy: slug => [...translateJobs.values()].some(j => j.slug === slug && ['queued','running'].includes(j.phase)),
   });
   /** 是否允许浏览文件系统（默认允许：要收的文件夹常分散在各磁盘） */
@@ -2104,6 +2111,8 @@ export function apply(ctx, config = {}) {
       charsIn: 0,
       charsOut: 0,
       usages: [],
+      billingSettings:{...await partitionAI.settings(),qualityModel:typeof body.qualityModel==='string'?body.qualityModel:config.qualityModel||'deepseek-v4-pro'},
+      pendingRegions:approvedLayout?.pendingRegions||[],costReport:null,
       usage: {
         inputTokens: 0, outputTokens: 0, cacheHitTokens: 0,
         cacheMissTokens: 0, reasoningTokens: 0,
@@ -2129,13 +2138,14 @@ export function apply(ctx, config = {}) {
       jobId,
       notBefore: requestedStart.getTime(),
       execute: () => runTranslateJob(job, paper, tools, pipeline, key, body),
-      onError: (err) => {
+      onError: async (err) => {
         job.phase = 'failed';
         job.error = String(err?.message ?? err);
         job.failure=classifyTaskFailure(err);
         job.stage = '失败（已保存完成的分块，下次可续传）';
         job.finishedAt = new Date().toISOString();
         job.updatedAt = job.finishedAt;
+        try{job.costReport=await partitionAI.finishTranslation(job.slug,job);}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
         ctx.logger?.warn?.(`literature-library: 翻译任务 ${jobId} 失败 — ${job.error}`);
       },
     });
@@ -2178,6 +2188,7 @@ export function apply(ctx, config = {}) {
       estimatedCostCny: job.estimatedCostCny ?? 0,
       costCny: job.estimatedCostCny ?? 0,
       costEstimated: true,
+      costReport:job.costReport||null,billingError:job.billingError||null,partial:!!job.pendingRegions?.length,pendingRegions:job.pendingRegions||[],
       pricingUpdatedAt: '2026-10-21',
       cacheHitTokens: job.usage?.cacheHitTokens ?? 0,
       cacheMissTokens: job.usage?.cacheMissTokens ?? 0,
@@ -2261,10 +2272,11 @@ export function apply(ctx, config = {}) {
       || await extractPdfText(pdfAbs, job.slug, undefined);
     job.warning = warning;
     job.layout = layout;
+    job.pendingRegions=layout?.pendingRegions||[];
     job.charsIn = md.length;
     note(`抽取完成，${md.length} 字符`);
     if (layout) note(`本地区域识别完成，${layout.coverage} 个原文文字项覆盖校验通过；报告：${layout.reportPath}`);
-    if (layout?.reviewPages.length) note(`第 ${layout.reviewPages.join('、')} 页存在版面推断，请核对区域报告；未调用视觉 API`);
+    if (layout?.reviewPages.length) note(`第 ${layout.reviewPages.join('、')} 页存在版面推断，请核对区域报告；${layout.ai?'AI 分区费用单独记录':'未调用视觉 API'}`);
 
     // 在翻译前直接从抽取稿（包括 META 块）补齐库内元数据。不能只依赖译文：
     // 否则模型漏译页眉里的作者/期刊/日期后，原始证据就永远丢了。
@@ -2362,6 +2374,13 @@ export function apply(ctx, config = {}) {
       } catch { note('本地诊断文件未能保存；任务仍按完整性校验结果处理'); }
     };
 
+    const segmentScope=JSON.stringify([job.slug,job.model,job.qualityModel,job.reasoningEffort,system,config.glossaryVersion||'',paper.titleEn||paper.title]);
+    const priorSegmentFiles=new Set((await readdir(cacheDir)).filter(name=>name.startsWith('segment-')));
+    const segmentFile=source=>{const codec=canonicalSegment(source,prepared.placeholders,segmentScope);return{codec,file:join(cacheDir,`segment-${codec.key}.json`)};};
+    const persistSegments=async(source,text)=>{const inputs=pipeline.translationBlocks(source),outputs=pipeline.translationBlocks(text);if(inputs.length!==outputs.length)return;
+      for(let n=0;n<inputs.length;n++){if(!pipeline.validateTranslation(inputs[n].source,outputs[n].source,prepared.placeholders).ok)continue;const {codec,file}=segmentFile(inputs[n].source);await writeCachedChunk(file,{version:'accepted-segment-v1',key:codec.key,text:codec.encode(outputs[n].source)});}
+    };
+    const recordJobUsage=(usage,requestedAt,requestedModel,effort=job.reasoningEffort)=>{if(!usage)return;const period=pipeline.isPeakShanghai(new Date(requestedAt))?'peak':'offpeak';job.pricingPeriod=!job.usages.length?period:job.pricingPeriod===period?period:'mixed';job.usages.push({...usage,requestedAt,model:requestedModel,reasoningEffort:effort});refreshUsage();};
     for (let i = 0; i < chunks.length; i += 1) {
       if (body?.cancel === true) throw new Error('已取消');
       await waitForOffpeak();
@@ -2387,10 +2406,33 @@ export function apply(ctx, config = {}) {
       const cached = await readCachedChunk(cacheFile, cacheKey, chunks[i])
         ?? await readCachedChunk(join(cacheDir,`${legacyKey}.json`),legacyKey,chunks[i]);
       if (cached !== null) {
+        await persistSegments(chunks[i],cached);
         parts.push(cached);
         job.localCacheHits += 1;
         note(`第 ${i + 1}/${chunks.length} 块命中本地缓存（本次 0 token）`);
         continue;
+      }
+      // Reconstruct accepted paragraphs with current token IDs. Changed/deferred
+      // regions must not force unchanged neighboring paragraphs to be paid again.
+      const segmentSources=pipeline.translationBlocks(chunks[i]),segmentTexts=[];
+      for(const b of segmentSources){let hit=null;if(layout?.ai&&body.force!==true){try{const {codec,file}=segmentFile(b.source);if(priorSegmentFiles.has(basename(file))){const entry=JSON.parse(await readFile(file,'utf8'));if(entry.version==='accepted-segment-v1'&&entry.key===codec.key){const text=codec.decode(entry.text);if(pipeline.validateTranslation(b.source,text,prepared.placeholders).ok)hit=text;}}}catch{/* Cache absence/mismatch is not permission to use stale content. */}}segmentTexts.push(hit);}
+      if(segmentTexts.some(Boolean)){
+        const reused=segmentTexts.filter(Boolean).length,missing=segmentSources.filter((b,n)=>!segmentTexts[n]&&blockPayload(b.source).blocks.length);
+        // Batch missing paragraphs, rather than turning a corrected page into
+        // many small requests with repeated prompt overhead.
+        if(missing.length>1){const source=missing.map(b=>b.source).join('\n\n'),at=new Date().toISOString();job.apiChunks++;
+          try{const result=await tools.callDeepSeek({baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,apiKey,model:job.model,system,reasoningEffort:job.reasoningEffort,
+            user:tools.buildUserPrompt({chunk:JSON.stringify(blockPayload(source)),index:i,total:chunks.length,title:paper.titleEn||paper.title,source:paper.source})+'\n返回 JSON blocks，保持 id；只翻译这些未完成段落。',maxTokens:{min:Math.min(2048,job.maxTokens),max:job.maxTokens,inputRatio:3.3,base:768},timeoutMs:config.requestTimeoutMs||600000});recordJobUsage(result.usage,at,job.model);
+            const decoded=decodeBlockResponse(source,result.text),values=pipeline.translationBlocks(decoded.text);
+            if(!result.truncated&&!decoded.errors.length&&values.length===missing.length)for(let n=0;n<missing.length;n++){const b=missing[n],candidate=values[n].source;if(pipeline.validateTranslation(b.source,candidate,prepared.placeholders).ok){segmentTexts[segmentSources.indexOf(b)]=candidate;await persistSegments(b.source,candidate);}}
+          }catch(e){if(e.usage)recordJobUsage(e.usage,at,job.model);throw e;}
+        }
+        const recovered=await pipeline.recoverStructuredTranslation({source:chunks[i],translation:segmentSources.map((b,n)=>segmentTexts[n]||b.marker+'\n').join('\n\n'),placeholders:prepared.placeholders,
+          translateBlock:async block=>{await waitForOffpeak();const at=new Date().toISOString(),model=block.attempt&&config.enableQualityEscalation!==false?job.qualityModel:job.model;job.apiChunks++;
+            try{const result=await tools.callDeepSeek({baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,apiKey,model,system,reasoningEffort:job.reasoningEffort,
+              user:tools.buildUserPrompt({chunk:block.body,index:block.index,total:block.total,title:paper.titleEn||paper.title,source:paper.source})+'\n只翻译本段，保留全部技术标记；不生成段落边界。',maxTokens:{min:Math.min(2048,job.maxTokens),max:job.maxTokens,inputRatio:3.3,base:768},timeoutMs:config.requestTimeoutMs||600000});recordJobUsage(result.usage,at,model);return result;}catch(e){if(e.usage)recordJobUsage(e.usage,at,model);throw e;}
+          },onAccepted:b=>persistSegments(b.source,b.text)});
+        if(!recovered.validation.ok)throw Error('补译内容未通过结构校验');job.localCacheHits+=reused;parts.push(recovered.text);await persistSegments(chunks[i],recovered.text);await writeCachedChunk(cacheFile,{version:pipeline.PIPELINE_VERSION,key:cacheKey,text:recovered.text});note(`第 ${i+1} 块复用 ${reused} 段，仅补译未完成内容`);continue;
       }
 
       /*
@@ -2616,6 +2658,7 @@ export function apply(ctx, config = {}) {
         );
       }
       parts.push(accepted);
+      await persistSegments(chunks[i],accepted);
       await writeCachedChunk(cacheFile, {
         version: pipeline.PIPELINE_VERSION,
         key: cacheKey,
@@ -2664,6 +2707,8 @@ export function apply(ctx, config = {}) {
     }
     const outputBody = [translatedBody, references].filter(Boolean).join('\n\n---\n\n');
 
+    // Keep any previous complete Markdown intact while a new revision is partial.
+    job.outputPath=job.pendingRegions?.length?job.outputPath.replace(/(?:\.partial)?\.md$/iu,'.partial.md'):job.outputPath.replace(/\.partial\.md$/iu,'.md');
     const outRel = job.outputPath;
     const outAbs = resolveInside(outRel) ?? resolve(join(libraryRoot, 'translations', job.slug, `${job.slug}.md`));
     if (!outAbs.startsWith(resolve(join(libraryRoot, 'translations')) + sep)) {
@@ -2673,6 +2718,8 @@ export function apply(ctx, config = {}) {
     const output = header + outputBody;
     await writeFile(outAbs, output, 'utf8');
     note(`已写入 ${outRel}`);
+    job.phase=job.pendingRegions?.length?'partial':'done';
+    try{job.costReport=await partitionAI.finishTranslation(job.slug,job);}catch{job.billingError='费用记录写入失败，请保留任务诊断；不能视为免费';}
 
     // 登记为已翻译并刷新索引
     const { db, path: dbPath } = await loadDb();
@@ -2681,13 +2728,14 @@ export function apply(ctx, config = {}) {
       // 抽取产物也记上，便于面板显示与追溯
       p.extracted = relative(workspaceRoot, join(libraryRoot, 'extracted', job.slug, `${job.slug}.md`)).replace(/\\/g, '/');
       p.translation = outRel;
-      p.status = 'translated';
+      p.status = job.pendingRegions?.length?'extracted':'translated';
       p.translatedAt = new Date().toISOString();
       p.translateMethod = 'deepseek-api';
       p.translateModel = job.model;
       p.translationStats = {
         ...job.usage,
         estimatedCostCny: job.estimatedCostCny,
+        costReport:job.costReport,partial:!!job.pendingRegions?.length,pendingRegions:job.pendingRegions||[],
         localCacheHits: job.localCacheHits,
         apiChunks: job.apiChunks,
         retryCount: job.retryCount,
@@ -2721,8 +2769,8 @@ export function apply(ctx, config = {}) {
       await refreshIndex();
     }
 
-    job.phase = 'done';
-    touch('完成');
+    job.phase = job.pendingRegions?.length?'partial':'done';
+    touch(job.pendingRegions?.length?`部分完成，${job.pendingRegions.length} 个分区待确认补译`:'完成');
     job.finishedAt = new Date().toISOString();
     job.notBefore = null;
     ctx.logger?.info?.(
@@ -3306,6 +3354,16 @@ export function apply(ctx, config = {}) {
           return;
         }
 
+        if(sub==='partition-ai-config'){
+          if(!['GET','POST'].includes(req.method)){sendJson(res,405,{error:'method-not-allowed'});return;}
+          try{sendJson(res,200,req.method==='POST'?await partitionAI.configure(await readBody(req)):await partitionAI.settings());}
+          catch(err){sendJson(res,err.status||400,{error:'partition-ai-config',message:String(err.message||err)});}return;
+        }
+        if(sub==='cost-report'){
+          if(req.method!=='GET'){sendJson(res,405,{error:'method-not-allowed'});return;}
+          try{const slug=url.searchParams.get('slug'),{db}=await loadDb();if(!(db.papers||[]).some(p=>p.slug===slug))throw Error('文献不存在');sendJson(res,200,await partitionAI.report(slug));}
+          catch(err){sendJson(res,err.status||400,{error:'cost-report',message:String(err.message||err)});}return;
+        }
         if (sub === 'layout') {
           try {
             if (req.method === 'POST') sendJson(res, 200, await layoutWorkflow.command(await readBody(req)));

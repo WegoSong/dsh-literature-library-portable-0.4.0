@@ -220,6 +220,8 @@ function replaceFormulas(value, regex, placeholders) {
 export function protectTechnicalTokens(text) {
   let value = String(text ?? '');
   const placeholders = [];
+  // Pending content never enters a translation request. Only its local notice is restored.
+  value=replaceMatches(value,/<!--DSH_(PENDING_REGION|LOCAL_REFERENCE)-->[\s\S]*?<!--\/DSH_\1-->/gu,'FORMULA',placeholders);
   // Keep the uncertainty notice attached to its candidate. A translator must
   // never remove the warning while retaining a plausible-looking formula.
   value=replaceMatches(value,/<!--DSH_UNCERTAIN_FORMULA-->[\s\S]*?<!--\/DSH_UNCERTAIN_FORMULA-->/gu,'FORMULA',placeholders);
@@ -274,10 +276,15 @@ function layoutHints(text) {
 
 export function prepareDocument(text) {
   const original = String(text ?? '').replace(/\r\n?/gu, '\n');
+  const localNotices=[];
+  const isolated=original.replace(/<!--DSH_(PENDING_REGION|LOCAL_REFERENCE)-->[\s\S]*?<!--\/DSH_\1-->/gu,value=>{
+    let sequence=900000+localNotices.length,id=`@@DSH_FORMULA_${sequence}@@`;while(original.includes(id)||localNotices.some(p=>p.placeholder===id))id=`@@DSH_FORMULA_${++sequence}@@`;
+    localNotices.push({placeholder:id,type:'formula',value});return '\n\n'+id+'\n\n';
+  });
   // Remove tables BEFORE reference detection: a table's "References" column is
   // not a bibliography. Translate cells as separate blocks, reconstruct locally.
   let objects=[];
-  const objectSource=original.replace(/===((?:TABLE|CAPTION)):BEGIN===\n([\s\S]*?)\n===\1:END===/gu,(_,kind,content)=>{
+  const objectSource=isolated.replace(/===((?:TABLE|CAPTION)):BEGIN===\n([\s\S]*?)\n===\1:END===/gu,(_,kind,content)=>{
     const id=`@@DSH_OBJECT_${String(objects.length+1).padStart(6,'0')}@@`;
     const rows=kind==='TABLE'?content.trim().split('\n').filter((_,i)=>i!==1).map(l=>l.trim().replace(/^\||\|$/gu,'').split('|').map(s=>s.trim())):[[content.trim()]];
     if(!rows.length||!rows[0].length||rows.some(r=>r.length!==rows[0].length))throw new Error('表格行列结构不完整，停止翻译');
@@ -313,6 +320,7 @@ export function prepareDocument(text) {
     : withoutGeneratorComments;
   const hinted = layoutHints(cleanFront).replace(/\n{3,}/gu, '\n\n').trim();
   const protectedResult = protectTechnicalTokens(hinted);
+  protectedResult.placeholders.push(...localNotices);
   for(const section of refs.sections)protectedResult.placeholders.push({placeholder:section.placeholder,type:'reference',value:''});
   for(const o of objects)protectedResult.placeholders.push({placeholder:o.id,type:'object',value:''});
   const units = protectedResult.text.split(/\n{2,}/u).filter((unit) => unit.trim());

@@ -71,6 +71,6 @@ export function buildDocumentModel(pages,sourceHash,coverage) {
  return {version:DOCUMENT_VERSION,sourceHash,coverage,blocks:pages.flatMap(page=>page.paragraphs.map((p,i)=>({
   id:`p${page.page}-b${i+1}`,page:page.page,sourcePages:p.sourcePages||[page.page],sourceIds:p.sourceIds||[],
   role:p.type,text:p.text,flow:p.flowId||null,formula:p.formula||null,
-  disposition:p.omitted?'original-caption-only':p.formula&&!p.formula.reliable?'review':'translate',
+  disposition:p.type==='pending'?'deferred-review':p.type==='references'?'original-reference':p.omitted?'original-caption-only':p.formula&&!p.formula.reliable?'review':'translate',
  }))) };
 }
