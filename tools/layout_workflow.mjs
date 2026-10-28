@@ -94,8 +94,8 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         s.preparedRevision = revision;
         s.preparationPolicy = MEDIA_POLICY;
         const l = await layout(s);
-        if(s.ai){const deferred=l.pages.flatMap(p=>p.regions.filter(r=>r.role==='pending').map(r=>({page:p.page,id:r.id,...(s.aiPendingEvidence||[]).find(x=>x.page===p.page&&x.id===r.id)})));s.pendingRegions=deferred;
-          s.eligibleRegions=l.pages.reduce((n,p)=>n+p.regions.filter(r=>['body','abstract','heading','caption','table','formula'].includes(r.role)&&r.itemIds?.length).length,0);}
+        const deferred=l.pages.flatMap(p=>p.regions.filter(r=>r.role==='pending').map(r=>({page:p.page,id:r.id,...(s.aiPendingEvidence||[]).find(x=>x.page===p.page&&x.id===r.id)})));s.pendingRegions=deferred;
+        s.eligibleRegions=l.pages.reduce((n,p)=>n+p.regions.filter(r=>['body','abstract','heading','caption','table','formula'].includes(r.role)&&r.itemIds?.length).length,0);
         s.pageCount = l.pages.length; s.warnings = l.warnings; s.coverage = l.coverage;
         s.hardWarnings = l.blockingWarnings || [];
         s.pagesReady=l.pages.every(p=>p.items.length||s.ai&&p.regions.some(r=>r.role==='pending'));
@@ -236,7 +236,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     await current(s);
     if(s.preparationPolicy!==MEDIA_POLICY)fail('公式/图表处理已升级，请先应用输出选项重新抽取并确认；不会自动重新付费翻译。');
     if (pending.has(slug) || s.phase !== 'approved'&&!summary(s).canTranslate) fail('请先完成分区预览与确认，再翻译');
-    if(s.ai&&!s.eligibleRegions)fail('所有可译区域仍待确认，请先纠错或确认至少一个区域，未调用翻译 API');
+    if((s.ai||s.pendingRegions?.length)&&!s.eligibleRegions)fail('所有可译区域仍待确认，请先纠错或确认至少一个区域，未调用翻译 API');
     if (s.preparedRevision !== s.revision) fail('分区与抽取稿版本不一致，请重新检查');
     if (!s.mdHash) fail('分区尚未生成可翻译文本');
     return s;
