@@ -37,6 +37,8 @@ import {canonicalSegment} from './tools/translation_segment_cache.mjs';
 import {createDshAccountTransport,ACCOUNT_ENDPOINT} from './tools/dsh_account_transport.mjs';
 import {writeJsonAtomic} from './tools/atomic_json.mjs';
 import {resolveHostApiKey,storeHostApiKey} from './tools/dsh_credentials.mjs';
+import {createArticleWorkflow,normalizeArticleAccountUsage} from './tools/article_workflow.mjs';
+import {validatePricing} from './tools/partition_ai_cost.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
 export const name = 'literature-library';
@@ -701,6 +703,33 @@ export function apply(ctx, config = {}) {
     const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href),resolved=await resolveHostApiKey(ctx, config, tools.resolveApiKey);return{key:resolved.key,source:resolved.source,baseUrl:config.baseUrl||tools.DEFAULT_BASE_URL,model:config.model||tools.DEFAULT_MODEL,transport:'api'};}
   const partitionAI=createPartitionIntegration({root:join(libraryRoot,'layouts'),credentials:modelCredential,
     fetchImpl:(url,options)=>url===ACCOUNT_ENDPOINT?accountTransport.fetchChat(url,options):fetch(url,options)});
+  const articleSettingsFile=join(libraryRoot,'article-settings.json');
+  async function articleSettings(){const c=await modelCredential(),s=await partitionAI.settings();let saved={};try{saved=JSON.parse(await readFile(articleSettingsFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}const selected=saved[c.transport]||{};return{ready:!!c.key,mode:c.transport,model:c.model,translationModel:c.model,pricing:validatePricing(selected.pricing||s.pricing),translationPricing:validatePricing(selected.translationPricing||s.translationPricing),maxTokens:16384,translationMaxTokens:32768,reasoningEffort:'low',maxPages:32,maxCharacters:240000};}
+  const articleWorkflow=createArticleWorkflow({root:join(libraryRoot,'articles'),
+    findPaper:async slug=>{const{db}=await loadDb(),p=(db.papers||[]).find(p=>p.slug===slug);return p?.source?{...p,pdfAbs:resolveInside(p.source)}:null;},
+    settings:articleSettings,
+    assetUrl:file=>`${prefix}/file?path=${encodeURIComponent(relative(workspaceRoot,file).replace(/\\/gu,'/'))}`,
+    generate:async request=>{
+      const credential=await modelCredential();if(request.providerMode&&request.providerMode!==credential.transport)throw Object.assign(Error('调用方式在准备期间已变化，未发送论文，请重新确认'),{status:409});if(!credential.key)throw Object.assign(Error('模型未就绪，请在设置中配置统一 API Key 或 DSH 登录账号'),{status:422});
+      let r;
+      if(credential.transport==='account'){
+        try{r=await accountTransport.generate(request);}catch(e){e.usage=normalizeArticleAccountUsage(e.usage);throw e;}
+        return{...r,usage:normalizeArticleAccountUsage(r.usage)};
+      }
+      const tools=await import(pathToFileURL(join(toolsRoot,'deepseek_translate.mjs')).href);
+      const content=request.content.map(c=>c.type==='text'?c:{type:'image',source:{type:'base64',media_type:'image/png',data:c.image_url.url.split(',')[1]}});
+      return tools.callDeepSeek({...request,baseUrl:credential.baseUrl,apiKey:credential.key,user:content});
+    },
+    publish:async(s,entry)=>{
+      const {db,path:dbPath}=await loadDb(),paper=(db.papers||[]).find(p=>p.slug===s.slug);if(!paper)throw Error('文献在翻译期间已移除，译稿保留但未重新登记');
+      const output=relative(workspaceRoot,entry.path).replace(/\\/gu,'/');if(!resolveInside(output))throw Error('拒绝工作区外译稿');
+      paper.translationHistory??=[];if(paper.translation&&paper.translation!==output&&!paper.translationHistory.includes(paper.translation))paper.translationHistory.push(paper.translation);
+      paper.translation=output;paper.translationWorkflow='article-structure-v4';paper.articleStructureRevision=s.revision;paper.translationStats={...(paper.translationStats||{}),partial:entry.partial,translationPages:s.selection.mode==='selected'?s.selection.pages:null,pendingRegions:entry.pending,workflow:'article-structure-v4'};
+      if(!entry.partial)paper.completeTranslation=output;
+      await saveDb(db,dbPath);await refreshIndex();
+    },
+  });
+  ctx.effect(() => () => articleWorkflow.close());
   const layoutWorkflow = createLayoutWorkflow({
     root: join(libraryRoot, 'layouts'),
     findPaper: async slug => {
@@ -2011,6 +2040,7 @@ export function apply(ctx, config = {}) {
    * @param body - `{ slug, model?, maxTokens?, force? }`
    */
   async function handleTranslateJob(body) {
+    if(config.allowLegacyWorkflow!==true)throw Object.assign(Error('翻译已迁移到「文章结构与翻译」，请从新入口明确准备范围、检查清单后提交；旧接口不会调用 AI'),{status:410});
     if (body.action === 'start-now') return startTranslationNow(body.jobId);
     const slug = typeof body.slug === 'string' ? body.slug.trim() : '';
     if (slug === '') throw Object.assign(new Error('缺少 slug'), { status: 400 });
@@ -2769,6 +2799,7 @@ export function apply(ctx, config = {}) {
   // ── 动作：创建翻译会话并投递提示词（备用路径） ──
 
   async function handleTranslate(body, origin) {
+    if(config.allowLegacyWorkflow!==true)throw Object.assign(Error('旧会话翻译入口已停用；请使用文章结构与翻译'),{status:410});
     const slug = typeof body.slug === 'string' ? body.slug : '';
     if (slug === '') throw Object.assign(new Error('缺少 slug'), { status: 400 });
 
@@ -3360,9 +3391,33 @@ export function apply(ctx, config = {}) {
           try{const slug=url.searchParams.get('slug'),{db}=await loadDb();if(!(db.papers||[]).some(p=>p.slug===slug))throw Error('文献不存在');sendJson(res,200,await partitionAI.report(slug));}
           catch(err){sendJson(res,err.status||400,{error:'cost-report',message:String(err.message||err)});}return;
         }
+        if(sub==='article-settings'){
+          if(!['GET','POST'].includes(req.method)){sendJson(res,405,{error:'use-get-or-post'});return;}
+          try{if(req.method==='POST'){const body=await readBody(req);if(body.apiKey!==undefined)throw Error('此处不保存密钥，请使用官方统一凭据设置');const credential=await modelCredential();if(body.mode&&body.mode!==credential.transport)throw Object.assign(Error('调用方式已变化，请重新读取单价后保存'),{status:409});let old={};try{old=JSON.parse(await readFile(articleSettingsFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}await writeJsonAtomic(articleSettingsFile,{...old,[credential.transport]:{pricing:validatePricing(body.pricing),translationPricing:validatePricing(body.translationPricing)}});}sendJson(res,200,await articleSettings());}catch(e){sendJson(res,e.status||400,{error:'article-settings',message:String(e.message)});}return;
+        }
+        if(sub==='article-list'){
+          if(req.method!=='GET'){sendJson(res,405,{error:'use-get'});return;}
+          try{const{db}=await loadDb(),states=[];for(const p of db.papers||[])if(p.source){try{const {state}=await articleWorkflow.get(p.slug);if(state){const{slug,title,phase,stage,selection,reviewed,revision,error}=state;states.push({slug,title,phase,stage,selection,reviewed,revision,error});}}catch{/* Missing source is shown on individual open. */}}sendJson(res,200,{states});}catch(e){sendJson(res,500,{error:'article-list',message:String(e.message)});}return;
+        }
+        if(sub==='article-batch'){
+          if(req.method!=='POST'){sendJson(res,405,{error:'use-post'});return;}
+          try{const body=await readBody(req);if(!Array.isArray(body.slugs)||!body.slugs.length||body.slugs.length>50||new Set(body.slugs).size!==body.slugs.length)throw Error('请选择 1-50 篇不重复文献');if(!['prepare','analyze','translate','stop'].includes(body.action))throw Error('不支持的批量操作');if(['analyze','translate'].includes(body.action)&&body.consent!==true)throw Error('付费批量任务需要明确确认');
+            const results=[];for(const slug of body.slugs){try{let{state}=await articleWorkflow.get(slug);if(body.action==='prepare'&&state){results.push({slug,skipped:true,message:'已有工作稿，未覆盖'});continue;}if(!state&&['prepare','analyze'].includes(body.action)){({state}=await articleWorkflow.command({action:'prepare',slug,scope:body.scope,media:body.media}));if(body.action==='prepare'){results.push({slug,state});continue;}}if(!state)throw Error('尚未准备或确认工作稿');if(body.action==='analyze'&&state.structure){results.push({slug,skipped:true,message:'已有结构，保留人工检查结果'});continue;}if(body.action==='translate'&&!state.reviewed){results.push({slug,skipped:true,message:'未确认，暂不翻译'});continue;}results.push({slug,...await articleWorkflow.command({action:body.action,slug,revision:state.revision,consent:body.consent})});}catch(e){results.push({slug,error:String(e.message)});}}
+            sendJson(res,200,{results});
+          }catch(e){sendJson(res,400,{error:'article-batch',message:String(e.message)});}return;
+        }
+        if(sub==='article'){
+          try{if(req.method==='POST')sendJson(res,200,await articleWorkflow.command(await readBody(req,4*1024*1024)));
+          else if(req.method==='GET'){const slug=url.searchParams.get('slug');sendJson(res,200,await articleWorkflow.detail(slug));}
+          else sendJson(res,405,{error:'use-get-or-post'});}catch(e){sendJson(res,e.status||500,{error:'article-workflow',message:String(e.message)});}return;
+        }
+        if(sub==='article-costs'){
+          if(req.method!=='GET'){sendJson(res,405,{error:'use-get'});return;}
+          try{const slug=url.searchParams.get('slug');await articleWorkflow.get(slug);sendJson(res,200,await articleWorkflow.costs(slug));}catch(e){sendJson(res,e.status||500,{error:'article-costs',message:String(e.message)});}return;
+        }
         if (sub === 'layout') {
           try {
-            if (req.method === 'POST') sendJson(res, 200, await layoutWorkflow.command(await readBody(req)));
+            if (req.method === 'POST') {if(config.allowLegacyWorkflow!==true){sendJson(res,410,{error:'legacy-layout-retired',message:'旧分区仅保留读取；请使用文章结构工作流，不会启动旧三阶段 AI'});return;}sendJson(res,200,await layoutWorkflow.command(await readBody(req)));}
             else if (req.method === 'GET') {
               const slug = url.searchParams.get('slug');
               if (slug) sendJson(res, 200, await layoutWorkflow.get(slug, url.searchParams.get('page')));
