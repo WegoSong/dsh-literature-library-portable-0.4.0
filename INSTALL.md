@@ -2,7 +2,7 @@
 
 本文从 **DSH 已经安装好、能打开 Web 界面** 开始，带你安装「DSH 文献库」插件（`dsh-literature-library`），并完成第一次导入和翻译配置。
 
-- 插件版本：**0.11.0**（文章结构、段落编号、段内公式顺序与连贯翻译）
+- 插件版本：**0.11.1**（新增「调用上限」窗口，分别保存结构识别和翻译输出预算）
 - 仓库：<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0>
 - 适用：DSH Web `0.2.1-rc.2` 到 `0.3.0` 之前（市场索引声明 `>=0.2.1-rc.2 <0.3.0`）
 - 平台：Windows 10/11、macOS、Linux

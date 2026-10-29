@@ -9,6 +9,7 @@ import {ARTICLE_STRUCTURE_PROMPT,ARTICLE_AUDIT_RULES} from './article_structure_
 import {TRANSLATION_PROMPT,translationTargets,validateArticleTranslation,renderArticleMarkdown,articleMedia,textForObject} from './article_translation.mjs';
 import {priceUsage,sumCosts} from './partition_ai_cost.mjs';
 import {isPeakShanghai,nextOffpeakTime} from './translation_pipeline.mjs';
+import {validateArticleLimits,DEFAULT_ARTICLE_LIMITS} from './article_limits.mjs';
 const hash=s=>createHash('sha256').update(s).digest('hex');
 const read=async p=>JSON.parse(await readFile(p,'utf8'));
 const fail=(message,status=422)=>Object.assign(Error(message),{status});
@@ -40,10 +41,10 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
  async function paperFor(slug){folder(slug);const p=await findPaper(slug);if(!p?.pdfAbs)throw fail('文献不存在或没有原始 PDF',404);return p;}
  async function assertSource(s){const p=await paperFor(s.slug);if(hash(await readFile(p.pdfAbs))!==s.sourceHash)throw fail('原始 PDF 已变化，请重新准备；未继续使用旧地址');return p;}
  async function inputFor(s){return read(join(folder(s.slug),s.revision,'input.json'));}
- async function record(s,stage,callback){
+ async function record(s,stage,callback,maxTokens){
   const config=await settings(),pricing=stage==='structure'?config.pricing:config.translationPricing;
-  const attempt={id:randomUUID(),stage,provider:config.mode,model:stage==='structure'?config.model:config.translationModel||config.model,at:new Date().toISOString(),status:'started',usage:null,cost:priceUsage(null,pricing)};s.costs.push(attempt);await save(s);
-  try{const response=await callback(config);await writeFile(join(folder(s.slug),s.revision,attempt.id+'-response.txt'),response.text||'',{flag:'wx'});attempt.usage=response.usage||null;attempt.cost=priceUsage(attempt.usage,pricing);attempt.status=response.truncated?'truncated':'done';attempt.finishedAt=new Date().toISOString();await save(s);if(response.truncated)throw fail('输出达到上限；原响应和用量已保存，未自动重试或提高预算');return response;}
+  const attempt={id:randomUUID(),stage,maxTokens,provider:config.mode,model:stage==='structure'?config.model:config.translationModel||config.model,at:new Date().toISOString(),status:'started',usage:null,cost:priceUsage(null,pricing)};s.costs.push(attempt);await save(s);
+  try{const response=await callback(config);await writeFile(join(folder(s.slug),s.revision,attempt.id+'-response.txt'),response.text||'',{flag:'wx'});attempt.usage=response.usage||null;attempt.cost=priceUsage(attempt.usage,pricing);attempt.status=response.truncated?'truncated':'done';attempt.finishedAt=new Date().toISOString();await save(s);if(response.truncated)throw fail(`输出达到上限（本次请求 ${maxTokens} token，含思考）；请在「调用上限」调整后手动重试，或缩小页码范围。原响应和用量已保存，未自动重试或提高预算`);return response;}
   catch(e){attempt.usage=e.usage||attempt.usage;attempt.cost=priceUsage(attempt.usage,pricing);attempt.status=attempt.status==='truncated'?'truncated':'failed';attempt.error=cleanError(e);await save(s);throw e;}
  }
  async function contentFor(s,input,signal){
@@ -54,7 +55,8 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
  async function analyze(s,body,signal){
   const input=await inputFor(s);checkArticleBudget(input);await assertSource(s);s.structureAttempted=true;s.phase='running';s.stage='AI 阅读文章并建立结构清单';await save(s);
   const content=[{type:'text',text:JSON.stringify(input)},...await contentFor(s,input,signal)];
-  const response=await record(s,'structure',config=>generate({stage:'structure',providerMode:config.mode,model:config.model,system:ARTICLE_STRUCTURE_PROMPT+'\n'+ARTICLE_AUDIT_RULES,content,reasoningEffort:'low',maxTokens:16384,signal}));
+  const cap=body.limits.structureMaxTokens;
+  const response=await record(s,'structure',config=>generate({stage:'structure',providerMode:config.mode,model:config.model,system:ARTICLE_STRUCTURE_PROMPT+'\n'+ARTICLE_AUDIT_RULES,content,reasoningEffort:'low',maxTokens:cap,signal}),cap);
   await writeFile(join(folder(s.slug),s.revision,'structure-response.txt'),response.text,{flag:'wx'});
   try{s.structure=parseJSON(response.text);}catch{throw fail('AI 返回不是完整 JSON；原响应保留，未修复或重试');}
   s.checks=reviewArticle(s.structure,input);s.pendingIds=s.checks.ok?[...new Set(s.checks.warnings.filter(w=>['appendix-category','appendix-child-category','unclassified-object','ai-classification'].includes(w.code)&&w.id).map(w=>w.id))]:[];s.reviewed=false;s.phase='review';s.stage=s.checks.ok?'结构清单待检查':'结构校验未通过，请纠错';await save(s);
@@ -68,7 +70,8 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
   if(!targets.length)throw fail('没有可翻译对象；未调用模型');
   const payload={scope:input.scope,structure:s.structure,targets};checkArticleBudget(input);if(JSON.stringify(payload).length>500000)throw fail('翻译输入超过本地预算，请明确缩小范围；未截断或自动拆分');
   s.phase='running';s.stage='阅读全文并连续翻译';await save(s);
-  const response=await record(s,'translation',async config=>generate({stage:'translation',providerMode:config.mode,model:config.translationModel||config.model,system:TRANSLATION_PROMPT,content:[{type:'text',text:JSON.stringify(payload)},...await contentFor(s,input,signal)],reasoningEffort:'low',maxTokens:32768,signal}));
+  const cap=body.limits.translationMaxTokens;
+  const response=await record(s,'translation',async config=>generate({stage:'translation',providerMode:config.mode,model:config.translationModel||config.model,system:TRANSLATION_PROMPT,content:[{type:'text',text:JSON.stringify(payload)},...await contentFor(s,input,signal)],reasoningEffort:'low',maxTokens:cap,signal}),cap);
   const runId=randomUUID(),runDir=join(folder(s.slug),s.revision,'translations',runId);await mkdir(runDir,{recursive:true});await writeFile(join(runDir,'response.txt'),response.text,{flag:'wx'});
   let translated;try{translated=parseJSON(response.text);}catch{throw fail('翻译返回不是完整 JSON；原响应保留，未自动重试');}
   const check=await validateArticleTranslation(translated,targets);await writeJsonAtomic(join(runDir,'validation.json'),check);
@@ -118,6 +121,10 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
   }
   if(body.action==='analyze'||body.action==='translate'){
    if(body.consent!==true)throw fail('必须明确确认发送所选范围图文与模型费用');
+   const config=await settings(),limits=validateArticleLimits(config.limits);
+   const agreed=body.limits===undefined?DEFAULT_ARTICLE_LIMITS:validateArticleLimits(body.limits);
+   if(Object.keys(limits).some(k=>limits[k]!==agreed[k]))throw fail('调用上限已变化，请刷新并重新确认预算；未发送请求',409);
+   body={...body,limits};s.requestLimits=limits;
    if(body.action==='analyze'&&s.structure&&!body.replace)throw fail('已有结构清单；重新识别需明确确认保留旧稿并替换当前稿');
    if(body.action==='analyze'&&(body.replace||s.structureAttempted)){await save(s);const next='r-'+randomUUID(),dir=join(folder(slug),next),input=await inputFor(s);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'input.json'),input);s.revision=next;s.structure=null;s.structureAttempted=false;s.reviewed=false;}
    s.error=null;await launch(s,body,body.action==='analyze'?analyze:translate);return{state:s};

@@ -38,6 +38,7 @@ import {createDshAccountTransport,ACCOUNT_ENDPOINT} from './tools/dsh_account_tr
 import {writeJsonAtomic} from './tools/atomic_json.mjs';
 import {resolveHostApiKey,storeHostApiKey} from './tools/dsh_credentials.mjs';
 import {createArticleWorkflow,normalizeArticleAccountUsage} from './tools/article_workflow.mjs';
+import {validateArticleLimits,ARTICLE_OUTPUT_RANGE} from './tools/article_limits.mjs';
 import {validatePricing} from './tools/partition_ai_cost.mjs';
 
 /** 插件的展示名（cordis 用于日志与诊断）。 */
@@ -704,7 +705,7 @@ export function apply(ctx, config = {}) {
   const partitionAI=createPartitionIntegration({root:join(libraryRoot,'layouts'),credentials:modelCredential,
     fetchImpl:(url,options)=>url===ACCOUNT_ENDPOINT?accountTransport.fetchChat(url,options):fetch(url,options)});
   const articleSettingsFile=join(libraryRoot,'article-settings.json');
-  async function articleSettings(){const c=await modelCredential(),s=await partitionAI.settings();let saved={};try{saved=JSON.parse(await readFile(articleSettingsFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}const selected=saved[c.transport]||{};return{ready:!!c.key,mode:c.transport,model:c.model,translationModel:c.model,pricing:validatePricing(selected.pricing||s.pricing),translationPricing:validatePricing(selected.translationPricing||s.translationPricing),maxTokens:16384,translationMaxTokens:32768,reasoningEffort:'low',maxPages:32,maxCharacters:240000};}
+  async function articleSettings(){const c=await modelCredential(),s=await partitionAI.settings();let saved={};try{saved=JSON.parse(await readFile(articleSettingsFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}const selected=saved[c.transport]||{},limits=validateArticleLimits(selected.limits);return{ready:!!c.key,mode:c.transport,model:c.model,translationModel:c.model,pricing:validatePricing(selected.pricing||s.pricing),translationPricing:validatePricing(selected.translationPricing||s.translationPricing),limits,outputRange:ARTICLE_OUTPUT_RANGE,maxTokens:limits.structureMaxTokens,translationMaxTokens:limits.translationMaxTokens,reasoningEffort:'low',maxPages:32,maxCharacters:240000};}
   const articleWorkflow=createArticleWorkflow({root:join(libraryRoot,'articles'),
     findPaper:async slug=>{const{db}=await loadDb(),p=(db.papers||[]).find(p=>p.slug===slug);return p?.source?{...p,pdfAbs:resolveInside(p.source)}:null;},
     settings:articleSettings,
@@ -3393,7 +3394,7 @@ export function apply(ctx, config = {}) {
         }
         if(sub==='article-settings'){
           if(!['GET','POST'].includes(req.method)){sendJson(res,405,{error:'use-get-or-post'});return;}
-          try{if(req.method==='POST'){const body=await readBody(req);if(body.apiKey!==undefined)throw Error('此处不保存密钥，请使用官方统一凭据设置');const credential=await modelCredential();if(body.mode&&body.mode!==credential.transport)throw Object.assign(Error('调用方式已变化，请重新读取单价后保存'),{status:409});let old={};try{old=JSON.parse(await readFile(articleSettingsFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}await writeJsonAtomic(articleSettingsFile,{...old,[credential.transport]:{pricing:validatePricing(body.pricing),translationPricing:validatePricing(body.translationPricing)}});}sendJson(res,200,await articleSettings());}catch(e){sendJson(res,e.status||400,{error:'article-settings',message:String(e.message)});}return;
+          try{if(req.method==='POST'){const body=await readBody(req);if(body.apiKey!==undefined)throw Error('此处不保存密钥，请使用官方统一凭据设置');const credential=await modelCredential();if(body.mode&&body.mode!==credential.transport)throw Object.assign(Error('调用方式已变化，请重新读取设置后保存'),{status:409});let old={};try{old=JSON.parse(await readFile(articleSettingsFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}const current=old[credential.transport]||{},next={...current};if(body.pricing!==undefined)next.pricing=validatePricing(body.pricing);if(body.translationPricing!==undefined)next.translationPricing=validatePricing(body.translationPricing);if(body.limits!==undefined)next.limits=validateArticleLimits(body.limits,validateArticleLimits(current.limits));await writeJsonAtomic(articleSettingsFile,{...old,[credential.transport]:next});}sendJson(res,200,await articleSettings());}catch(e){sendJson(res,e.status||400,{error:'article-settings',message:String(e.message)});}return;
         }
         if(sub==='article-list'){
           if(req.method!=='GET'){sendJson(res,405,{error:'use-get'});return;}
@@ -3402,7 +3403,7 @@ export function apply(ctx, config = {}) {
         if(sub==='article-batch'){
           if(req.method!=='POST'){sendJson(res,405,{error:'use-post'});return;}
           try{const body=await readBody(req);if(!Array.isArray(body.slugs)||!body.slugs.length||body.slugs.length>50||new Set(body.slugs).size!==body.slugs.length)throw Error('请选择 1-50 篇不重复文献');if(!['prepare','analyze','translate','stop'].includes(body.action))throw Error('不支持的批量操作');if(['analyze','translate'].includes(body.action)&&body.consent!==true)throw Error('付费批量任务需要明确确认');
-            const results=[];for(const slug of body.slugs){try{let{state}=await articleWorkflow.get(slug);if(body.action==='prepare'&&state){results.push({slug,skipped:true,message:'已有工作稿，未覆盖'});continue;}if(!state&&['prepare','analyze'].includes(body.action)){({state}=await articleWorkflow.command({action:'prepare',slug,scope:body.scope,media:body.media}));if(body.action==='prepare'){results.push({slug,state});continue;}}if(!state)throw Error('尚未准备或确认工作稿');if(body.action==='analyze'&&state.structure){results.push({slug,skipped:true,message:'已有结构，保留人工检查结果'});continue;}if(body.action==='translate'&&!state.reviewed){results.push({slug,skipped:true,message:'未确认，暂不翻译'});continue;}results.push({slug,...await articleWorkflow.command({action:body.action,slug,revision:state.revision,consent:body.consent})});}catch(e){results.push({slug,error:String(e.message)});}}
+            const results=[];for(const slug of body.slugs){try{let{state}=await articleWorkflow.get(slug);if(body.action==='prepare'&&state){results.push({slug,skipped:true,message:'已有工作稿，未覆盖'});continue;}if(!state&&['prepare','analyze'].includes(body.action)){({state}=await articleWorkflow.command({action:'prepare',slug,scope:body.scope,media:body.media}));if(body.action==='prepare'){results.push({slug,state});continue;}}if(!state)throw Error('尚未准备或确认工作稿');if(body.action==='analyze'&&state.structure){results.push({slug,skipped:true,message:'已有结构，保留人工检查结果'});continue;}if(body.action==='translate'&&!state.reviewed){results.push({slug,skipped:true,message:'未确认，暂不翻译'});continue;}results.push({slug,...await articleWorkflow.command({action:body.action,slug,revision:state.revision,consent:body.consent,limits:body.limits})});}catch(e){results.push({slug,error:String(e.message)});}}
             sendJson(res,200,{results});
           }catch(e){sendJson(res,400,{error:'article-batch',message:String(e.message)});}return;
         }

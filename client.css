@@ -993,6 +993,15 @@
 .ll-article-workbench{flex:0 1 auto;min-height:0;max-height:44%;overflow:auto;padding:8px 10px;background:var(--dsw-alias-bg-l2,#f5f5f5);color:var(--dsw-alias-text-l1,#161616);border-top:1px solid var(--dsw-alias-border-l3,#ddd);font:13px/1.45 system-ui,sans-serif;box-sizing:border-box;}
 .ll-article-workbench *{box-sizing:border-box;}
 .ll-article-workbench,.ll-article-price-form{font-variant-numeric:tabular-nums;}
+.ll-root .ll-article-limits-bg{z-index:85;backdrop-filter:none;}
+.ll-root .ll-article-limits-dialog{width:min(600px,calc(100vw - 32px));height:auto;max-width:100%;max-height:calc(100dvh - 32px);box-shadow:none;font:14px/1.5 system-ui,sans-serif;letter-spacing:normal;}
+.ll-root .ll-article-limits-form{flex:0 1 auto;padding:16px 20px;font-size:14px;}
+.ll-root .ll-article-limits-form p{font-size:14px;line-height:1.5;margin:0 0 16px;overflow-wrap:anywhere;}
+.ll-root .ll-article-limit-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0;}
+.ll-root .ll-article-limit-fields label{display:flex;flex-direction:column;align-items:stretch;gap:8px;min-width:0;font-size:14px;}
+.ll-root .ll-article-limits-dialog input[type=number]{width:100%;max-width:none;min-width:0;height:40px;font:14px/1.5 system-ui,sans-serif;font-variant-numeric:tabular-nums;box-sizing:border-box;padding:7px 10px;background:var(--dsw-alias-bg-l1,#fff);color:var(--dsw-alias-text-l1,#111);border:1px solid var(--dsw-alias-border-l3,#ccc);border-radius:6px;}
+.ll-root .ll-article-limits-dialog .ll-btn{min-height:36px;font:14px/1.4 system-ui,sans-serif;}
+@media(max-width:640px){.ll-root .ll-article-limit-fields{grid-template-columns:1fr;}.ll-root .ll-article-limits-form{padding:16px;}.ll-root .ll-article-limits-dialog .ll-btn{min-height:44px;}}
 .ll-article-workbench h3,.ll-article-workbench p,.ll-article-workbench label,.ll-article-workbench summary,.ll-article-workbench select,.ll-article-workbench input,.ll-article-workbench button{font-size:13px;line-height:1.45;letter-spacing:normal;}
 .ll-article-workbench h3{font-size:14px;margin:0;font-weight:600;white-space:nowrap;}
 .ll-article-head,.ll-article-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;}

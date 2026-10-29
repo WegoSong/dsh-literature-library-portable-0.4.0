@@ -23,7 +23,29 @@ window.__ModuleLoader__.load({
 
     const ROUTE_PREFIX = '/literature-library';
     /* ARTICLE_UI:BEGIN */
-    const ArticleWorkbench = (function createArticleWorkbench(React,{h,route,postJson}){
+    const ArticleLimitsDialog = (function createArticleLimitsDialog(React,{h,route,postJson}){
+ return function ArticleLimitsDialog({onClose}){
+  const [config,setConfig]=React.useState(null),[values,setValues]=React.useState(null),[busy,setBusy]=React.useState(false),[message,setMessage]=React.useState(''),[error,setError]=React.useState(''),ref=React.useRef(null);
+  React.useEffect(()=>{let live=true;const prior=document.activeElement;fetch(route+'/article-settings').then(async r=>{const d=await r.json();if(!r.ok)throw Error(d.message||'读取调用上限失败');if(live){setConfig(d);setValues(d.limits);}}).catch(e=>live&&setError(e.message));return()=>{live=false;prior?.focus?.();};},[]);
+  React.useEffect(()=>{if(values)ref.current?.querySelector('input')?.focus();},[!!values]);
+  const close=()=>{if(!busy)onClose();};
+  const keydown=e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close();}if(e.key==='Tab'){const nodes=[...ref.current.querySelectorAll('input,button,select')].filter(n=>!n.disabled&&n.getBoundingClientRect().height),first=nodes[0],last=nodes.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}};
+  const field=(key,label)=>h('label',{key},[h('span',{key:'label'},label),h('input',{key:'input',type:'number',inputMode:'numeric',min:config.outputRange.min,max:config.outputRange.max,step:1,required:true,list:'ll-limit-'+key,'aria-label':label,'aria-describedby':'ll-output-limit-help',disabled:busy,value:values[key],onChange:e=>{setValues(v=>({...v,[key]:e.target.value===''?'':Number(e.target.value)}));setMessage('');}}),h('datalist',{key:'presets',id:'ll-limit-'+key},[16384,32768,65536,131072,262144].map(n=>h('option',{key:n,value:n},n.toLocaleString()+' token')))]);
+  return h('div',{className:'ll-modal-bg ll-article-limits-bg',onClick:e=>{if(e.target===e.currentTarget)close();}},h('section',{ref,className:'ll-modal ll-article-limits-dialog',role:'dialog','aria-modal':true,'aria-labelledby':'ll-output-limit-title',onKeyDown:keydown},[
+   h('div',{key:'head',className:'ll-modal-head'},[h('h2',{key:'title',id:'ll-output-limit-title'},'调用上限'),h('span',{key:'space',className:'ll-spacer'}),h('button',{key:'close',type:'button',className:'ll-btn',onClick:close,disabled:busy,'aria-label':'关闭调用上限'},'关闭')]),
+   h('form',{key:'form',className:'ll-modal-body ll-article-limits-form',onSubmit:async e=>{e.preventDefault();setBusy(true);setError('');try{const d=await postJson('/article-settings',{mode:config.mode,limits:values});setConfig(d);setValues(d.limits);setMessage('已保存；下次手动提交时生效，没有启动或重试任务。');window.dispatchEvent(new Event('ll-article-limits-changed'));}catch(e){setError(e.message);}finally{setBusy(false);}}},[
+    config?h('p',{key:'provider'},`当前调用：${config.mode==='account'?'DSH 登录账号':'API Key'} / ${config.model}`):h('p',{key:'load'},error?'无法读取设置，请关闭后重试。':'读取已保存上限…'),
+    config&&values?h('div',{key:'fields',className:'ll-article-limit-fields'},[field('structureMaxTokens','结构识别输出上限（token）'),field('translationMaxTokens','翻译输出上限（token）')]):null,
+    h('p',{key:'help',id:'ll-output-limit-help'},'上限包含思考与正文，不是保证输出长度。实际支持长度以上游模型为准；超出支持范围可能被拒绝，不会自动下调重发。'),
+    config?h('p',{key:'range'},`本插件允许 ${config.outputRange.min.toLocaleString()}–${config.outputRange.max.toLocaleString()} token；默认结构 16,384、翻译 32,768。提高上限可能增加耗时、内存和费用。`):null,
+    h('p',{key:'scope'},'这里不改变 32 页/240,000 字符的输入范围限制，不修改已排队或已发出的请求。截断后可手动重试或缩小页码范围；旧响应和费用记录保留。'),
+    error?h('p',{key:'error',className:'ll-article-error',role:'alert'},error):null,message?h('p',{key:'message',role:'status'},message):null,
+    config?h('div',{key:'actions',className:'ll-article-row'},[h('button',{key:'reset',className:'ll-btn',type:'button',disabled:busy,onClick:()=>{setValues({structureMaxTokens:16384,translationMaxTokens:32768});setMessage('已填入默认值，点击保存后生效。');}},'填入默认值'),h('span',{key:'space',className:'ll-spacer'}),h('button',{key:'save',className:'ll-btn ll-primary',type:'submit',disabled:busy},busy?'保存中…':'保存上限')]):null,
+   ]),
+  ]));
+ };
+})(React,{h,route:ROUTE_PREFIX,postJson});
+    const ArticleWorkbench = (function createArticleWorkbench(React,{h,route,postJson,LimitsDialog}){
  const names={heading:'章节标题',paragraph:'正文段落',abstract:'摘要',keywords:'关键词',title:'文章题名',author:'作者',affiliation:'单位',journal:'期刊',date:'日期',doi:'DOI',reference_list:'参考文献目录',reference_item:'参考文献条目',figure:'图片',figure_caption:'图片题注',table:'表格',table_caption:'表格题注',formula:'公式',page_number:'页码',running_journal:'页眉刊名',download_notice:'下载声明',unknown:'未分类'};
  const parts={body:'正文',front:'前置信息',back:'后置信息',document_info:'文档信息',running_matter:'页眉页脚'};
  const busyPhases=['queued','running','stopping'];
@@ -33,6 +55,7 @@ window.__ModuleLoader__.load({
   const [data,setData]=React.useState(null),[draft,setDraft]=React.useState(null),[dirty,setDirty]=React.useState(false),[working,setWorking]=React.useState(false),[message,setMessage]=React.useState(''),[error,setError]=React.useState('');
   const [scope,setScopeState]=React.useState(()=>recall('scope/'+slug,{mode:'all',pages:''})),[mode,setModeState]=React.useState(()=>recall('mode','semi')),[media,setMediaState]=React.useState(()=>recall('media',{figures:false,tables:false,formulaFallback:false}));
   const [schedule,setScheduleState]=React.useState(()=>recall('schedule','now'));
+  const [limitsOpen,setLimitsOpen]=React.useState(false);
   const [selected,setSelected]=React.useState(''),[filter,setFilter]=React.useState('all'),[json,setJson]=React.useState(''),[editor,setEditor]=React.useState(false),[rootEditor,setRootEditor]=React.useState(false),[pending,setPending]=React.useState([]),[approved,setApproved]=React.useState([]),[show,setShowState]=React.useState(()=>recall('overlay',true)),[count,setCount]=React.useState(60),[costs,setCosts]=React.useState(null);
   const [adding,setAdding]=React.useState(false),[newType,setNewType]=React.useState('paragraph'),[newPart,setNewPart]=React.useState('body'),[from,setFrom]=React.useState(''),[to,setTo]=React.useState('');
   const alive=React.useRef(true),notified=React.useRef(''),state=data?.state,busy=working||busyPhases.includes(state?.phase),input=data?.input;
@@ -50,13 +73,15 @@ window.__ModuleLoader__.load({
    onOverlay?.({semantic:true,dirty,editing:false,showInfo:false,showLabels:false,selected:selected?selected+':'+(selectedSource>=0?selectedSource:0):null,page:{page,width:native.width,height:native.height,regions}});
   },[input,draft,page,selected,show,dirty]);
   async function act(action,extra={}){setWorking(true);setError('');setMessage('');try{const r=await postJson('/article',{action,slug,revision:state?.revision,schedule,...extra});if(alive.current){setData(r);if(r.state?.structure)setDraft(displayDraft(r.state.structure));setDirty(false);await fetchData();}return r;}catch(e){if(alive.current)setError(e.message);throw e;}finally{if(alive.current)setWorking(false);}}
-  const quietly=fn=>Promise.resolve().then(fn).catch(()=>{});
+  const quietly=fn=>Promise.resolve().then(fn).catch(e=>{if(alive.current)setError(e.message);});
+  async function currentLimits(){const r=await fetch(route+'/article-settings'),d=await r.json();if(!r.ok)throw Error(d.message||'读取调用上限失败');return d.limits;}
   async function analyze(){if(dirty&&!window.confirm('尚有未保存的清单修改。放弃草稿并重新识别？'))return;
-   if(!window.confirm(`发送 PDF 第 ${state?.selection?.pages?.join(', ')} 页的完整图像和编号文本，${mode==='auto'?'最多一次结构请求和一次翻译请求':'最多一次结构请求'}。\n结构输出上限 16384 token，低思考；翻译上限 32768 token。费用以实际用量及已配置单价核算，未知不是免费。\n失败不自动重试或提额。${state?.structure?'旧工作稿保留为历史版本，当前稿将换成新识别结果。':''}继续？`))return;
-   await act('analyze',{consent:true,auto:mode==='auto',replace:!!state?.structure});
+   const limits=await currentLimits();
+   if(!window.confirm(`发送 PDF 第 ${state?.selection?.pages?.join(', ')} 页的完整图像和编号文本，${mode==='auto'?'最多一次结构请求和一次翻译请求':'最多一次结构请求'}。\n结构输出上限 ${limits.structureMaxTokens} token，低思考；翻译上限 ${limits.translationMaxTokens} token（含思考）。费用以实际用量及已配置单价核算，未知不是免费。\n失败不自动重试或提额。${state?.structure?'旧工作稿保留为历史版本，当前稿将换成新识别结果。':''}继续？`))return;
+   await act('analyze',{consent:true,limits,auto:mode==='auto',replace:!!state?.structure});
   }
   async function save(confirm=false){return act('save-structure',{structure:draft,pendingIds:pending,approvedMediaIds:approved,media,confirm});}
-  async function translate(){if(!draft)return;if(!window.confirm(`将所选范围作为完整上下文，按段落连续翻译，并按段内顺序还原 Markdown。\n暂缓 ${pending.length} 个对象；图表主体${media.figures||media.tables?'按选项处理':'默认跳过，只翻译题注'}。\n使用当前统一账号/API Key，最多一次请求，不自动重试。继续？`))return;await save(true);await act('translate',{consent:true});}
+  async function translate(){if(!draft)return;const limits=await currentLimits();if(!window.confirm(`将所选范围作为完整上下文，按段落连续翻译，并按段内顺序还原 Markdown。\n暂缓 ${pending.length} 个对象；图表主体${media.figures||media.tables?'按选项处理':'默认跳过，只翻译题注'}。\n翻译输出上限 ${limits.translationMaxTokens} token（含思考）。使用当前统一账号/API Key，最多一次请求，不自动重试。继续？`))return;await save(true);await act('translate',{consent:true,limits});}
   function select(o){setSelected(o.id);setJson(JSON.stringify(o,null,2));setEditor(false);setRootEditor(false);onNavigate?.(o.source?.[0]?.page);}
   function safeDraft(d){if(!d||!Array.isArray(d.objects)||!Array.isArray(d.body_order)||!Array.isArray(d.issues)||d.objects.some(o=>!o||typeof o.id!=='string'||typeof o.type!=='string'||!Array.isArray(o.source)||o.source.some(s=>!s||!Number.isInteger(s.page))))throw Error('清单至少需要 objects/body_order/issues 数组及有效对象；详细所有权检查在保存时执行');return d;}
   function updateObject(o){safeDraft({objects:[o],body_order:[],issues:[]});setDraft(d=>({...d,objects:d.objects.map(old=>old.id===o.id?o:old)}));setDirty(true);setApproved(v=>v.filter(id=>id!==o.id));}
@@ -69,7 +94,7 @@ window.__ModuleLoader__.load({
   const stageCost=rows=>!rows.length?'尚未调用':rows.every(a=>a.cost?.known&&a.cost.currency===rows[0].cost.currency)?`${rows[0].cost.currency} ${rows.reduce((n,a)=>n+a.cost.amount,0).toFixed(6)}`:'金额未知';
   const status=state?.stage||'选择范围，准备原文后再决定是否调用 AI';
   return h('section',{className:'ll-article-workbench','aria-label':'文章结构与翻译'},[
-   h('div',{key:'header',className:'ll-article-head'},[h('h3',{key:'h'},'文章结构与翻译'),h('span',{key:'stage',className:'ll-article-status',role:'status'},status),h('button',{key:'settings',className:'ll-btn',onClick:onSettings},'模型设置')]),
+   h('div',{key:'header',className:'ll-article-head'},[h('h3',{key:'h'},'文章结构与翻译'),h('span',{key:'stage',className:'ll-article-status',role:'status'},status),h('button',{key:'limits',className:'ll-btn',onClick:()=>setLimitsOpen(true)},'调用上限'),h('button',{key:'settings',className:'ll-btn',onClick:onSettings},'模型设置')]),
    h('div',{key:'scope',className:'ll-article-row'},[
     h('label',{key:'range'},['文章范围',h('select',{'aria-label':'文章范围',value:scope.mode,disabled:busy,onChange:e=>setScope({...scope,mode:e.target.value})},[h('option',{key:'all',value:'all'},'整篇'),h('option',{key:'selected',value:'selected'},'指定页码')])]),
     scope.mode==='selected'?h('label',{key:'pages'},['PDF 页码',h('input',{'aria-label':'文章页码',value:scope.pages,placeholder:'1-5,8,12',disabled:busy,onChange:e=>setScope({...scope,pages:e.target.value})})]):null,
@@ -120,9 +145,10 @@ window.__ModuleLoader__.load({
     button('apply-json','应用到草稿（不调用 AI）',()=>{try{const parsed=JSON.parse(json);if(rootEditor)setDraft(safeDraft(parsed));else{if(parsed.id!==selected)throw Error('不能修改对象编号；请在完整清单中显式维护引用');updateObject(parsed);}setDirty(true);setEditor(false);setError('');}catch(e){setError(e.message);}}),button('cancel-json','取消编辑',()=>setEditor(false)),
    ]):null,
    state?.latestExport?h('p',{key:'done',className:'ll-article-result'},state.latestExport.partial?'部分/范围译稿已保存；旧译文保留在历史记录中。':'译稿已保存；旧译文保留在历史记录中。'):null,
+   limitsOpen?h(LimitsDialog,{key:'limits-dialog',onClose:()=>setLimitsOpen(false)}):null,
   ]);
  };
-})(React,{h,route:ROUTE_PREFIX,postJson});
+})(React,{h,route:ROUTE_PREFIX,postJson,LimitsDialog:ArticleLimitsDialog});
     const ArticlePricing = (function createArticlePricing(React,{h,route,postJson}){
  return function ArticlePricing(){
   const [settings,setSettings]=React.useState(null),[message,setMessage]=React.useState(''),[busy,setBusy]=React.useState(false);
@@ -136,27 +162,29 @@ window.__ModuleLoader__.load({
   ]);
  };
 })(React,{h,route:ROUTE_PREFIX,postJson});
-    const ArticleBatchDialog = (function createArticleBatchDialog(React,{h,route,postJson}){
+    const ArticleBatchDialog = (function createArticleBatchDialog(React,{h,route,postJson,LimitsDialog}){
  return function ArticleBatchDialog({papers,onClose,onSelect}){
   const candidates=papers.filter(p=>p.source),[chosen,setChosen]=React.useState(()=>new Set(candidates.filter(p=>!p.translation).map(p=>p.slug))),[states,setStates]=React.useState([]),[busy,setBusy]=React.useState(false),[message,setMessage]=React.useState(''),[scope,setScope]=React.useState(()=>{try{return JSON.parse(localStorage.getItem('dsh-literature-library/article/batch-scope'))||{mode:'all',pages:''};}catch{return{mode:'all',pages:''};}});
   React.useEffect(()=>{try{localStorage.setItem('dsh-literature-library/article/batch-scope',JSON.stringify(scope));}catch{}},[scope]);
+  const [limitsOpen,setLimitsOpen]=React.useState(false);
   async function refresh(){const r=await fetch(route+'/article-list'),d=await r.json();if(r.ok)setStates(d.states||[]);}
   React.useEffect(()=>{refresh().catch(()=>{});const t=setInterval(()=>refresh().catch(()=>{}),2000);return()=>clearInterval(t);},[]);
   const bySlug=new Map(states.map(s=>[s.slug,s]));
   async function run(action){if(!chosen.size)return;
-   if(['analyze','translate'].includes(action)&&!window.confirm(`所选 ${chosen.size} 篇，${action==='analyze'?'每篇至多一次结构请求，完成后等待人工检查':'只翻译已经明确确认的工作稿，每篇至多一次请求'}。\n已有工作稿使用下面列出的已准备页码；新文献使用当前范围。没有确认的稿件不自动翻译。\n任务串行，失败不重试；连续失败会保护停止后续任务。费用未知不代表免费。继续？`))return;
-   setBusy(true);try{const result=await postJson('/article-batch',{action,slugs:[...chosen],scope,consent:['analyze','translate'].includes(action),media:{figures:false,tables:false,formulaFallback:false}});setMessage(result.results.map(r=>r.error||r.message||`${r.slug}：已提交`).join('；'));await refresh();}catch(e){setMessage(e.message);}finally{setBusy(false);}
+   setBusy(true);try{let limits;if(['analyze','translate'].includes(action)){const r=await fetch(route+'/article-settings'),d=await r.json();if(!r.ok)throw Error(d.message||'读取调用上限失败');limits=d.limits;if(!window.confirm(`所选 ${chosen.size} 篇，${action==='analyze'?'每篇至多一次结构请求，完成后等待人工检查':'只翻译已经明确确认的工作稿，每篇至多一次请求'}。\n结构上限 ${limits.structureMaxTokens}、翻译上限 ${limits.translationMaxTokens} token（含思考）。\n已有工作稿使用已准备页码；新文献使用当前范围。未确认稿不自动翻译。\n任务串行，失败不重试；连续失败保护停止。费用未知不代表免费。继续？`))return;}const result=await postJson('/article-batch',{action,slugs:[...chosen],scope,limits,consent:['analyze','translate'].includes(action),media:{figures:false,tables:false,formulaFallback:false}});setMessage(result.results.map(r=>r.error||r.message||`${r.slug}：已提交`).join('；'));await refresh();}catch(e){setMessage(e.message);}finally{setBusy(false);}
   }
   return h('div',{className:'ll-modal-bg',onClick:e=>{if(e.target===e.currentTarget)onClose();}},h('div',{className:'ll-modal',role:'dialog','aria-label':'批量文章结构与翻译'},[
    h('div',{key:'h',className:'ll-modal-head'},['批量文章结构与翻译',h('span',{key:'sp',className:'ll-spacer'}),h('button',{key:'x',className:'ll-btn',onClick:onClose},'关闭')]),
    h('div',{key:'body',className:'ll-modal-body'},[
     h('p',{key:'hint'},'可以批量识别后逐篇检查、逐篇翻译，也可以全部检查后一次提交翻译。旧稿不自动覆盖。'),
     h('div',{key:'actions',className:'ll-article-row'},[
+     h('button',{key:'limits',className:'ll-btn',onClick:()=>setLimitsOpen(true)},'调用上限'),
      h('label',{key:'scope'},['新稿范围',h('select',{value:scope.mode,'aria-label':'批量新稿范围',onChange:e=>setScope(s=>({...s,mode:e.target.value}))},[h('option',{key:'all',value:'all'},'整篇'),h('option',{key:'selected',value:'selected'},'指定页码')])]),
      scope.mode==='selected'?h('input',{key:'pages',value:scope.pages,'aria-label':'批量文章页码',placeholder:'1-5,8',onChange:e=>setScope(s=>({...s,pages:e.target.value}))}):null,
      ...[['prepare','本地准备'],['analyze','识别所选'],['translate','翻译已确认稿'],['stop','停止所选任务']].map(([action,label])=>h('button',{key:action,className:'ll-btn',disabled:busy||!chosen.size,onClick:()=>run(action)},label)),
     ]),
     message?h('p',{key:'message',role:'status'},message):null,
+    limitsOpen?h(LimitsDialog,{key:'limits-dialog',onClose:()=>setLimitsOpen(false)}):null,
     ...candidates.map(p=>{const s=bySlug.get(p.slug);return h('div',{key:p.slug,className:'ll-layout-queue-row'},[
      h('input',{key:'choose',type:'checkbox','aria-label':'选择 '+p.title,checked:chosen.has(p.slug),onChange:e=>setChosen(v=>{const next=new Set(v);e.target.checked?next.add(p.slug):next.delete(p.slug);return next;})}),
      h('div',{key:'title',className:'ll-layout-queue-title'},[h('strong',{key:'name'},p.title||p.slug),h('span',{key:'state'},s?`${s.stage} · PDF ${s.selection.pages.join(', ')}${s.reviewed?' · 已确认':''}`:'尚未准备')]),
@@ -165,11 +193,11 @@ window.__ModuleLoader__.load({
    ]),
   ]));
  };
-})(React,{h,route:ROUTE_PREFIX,postJson});
+})(React,{h,route:ROUTE_PREFIX,postJson,LimitsDialog:ArticleLimitsDialog});
     /* ARTICLE_UI:END */
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.11.0';
+    const PDFJS_REV = '0.11.1';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -1318,6 +1346,15 @@ window.__ModuleLoader__.load({
 .ll-article-workbench{flex:0 1 auto;min-height:0;max-height:44%;overflow:auto;padding:8px 10px;background:var(--dsw-alias-bg-l2,#f5f5f5);color:var(--dsw-alias-text-l1,#161616);border-top:1px solid var(--dsw-alias-border-l3,#ddd);font:13px/1.45 system-ui,sans-serif;box-sizing:border-box;}
 .ll-article-workbench *{box-sizing:border-box;}
 .ll-article-workbench,.ll-article-price-form{font-variant-numeric:tabular-nums;}
+.ll-root .ll-article-limits-bg{z-index:85;backdrop-filter:none;}
+.ll-root .ll-article-limits-dialog{width:min(600px,calc(100vw - 32px));height:auto;max-width:100%;max-height:calc(100dvh - 32px);box-shadow:none;font:14px/1.5 system-ui,sans-serif;letter-spacing:normal;}
+.ll-root .ll-article-limits-form{flex:0 1 auto;padding:16px 20px;font-size:14px;}
+.ll-root .ll-article-limits-form p{font-size:14px;line-height:1.5;margin:0 0 16px;overflow-wrap:anywhere;}
+.ll-root .ll-article-limit-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0;}
+.ll-root .ll-article-limit-fields label{display:flex;flex-direction:column;align-items:stretch;gap:8px;min-width:0;font-size:14px;}
+.ll-root .ll-article-limits-dialog input[type=number]{width:100%;max-width:none;min-width:0;height:40px;font:14px/1.5 system-ui,sans-serif;font-variant-numeric:tabular-nums;box-sizing:border-box;padding:7px 10px;background:var(--dsw-alias-bg-l1,#fff);color:var(--dsw-alias-text-l1,#111);border:1px solid var(--dsw-alias-border-l3,#ccc);border-radius:6px;}
+.ll-root .ll-article-limits-dialog .ll-btn{min-height:36px;font:14px/1.4 system-ui,sans-serif;}
+@media(max-width:640px){.ll-root .ll-article-limit-fields{grid-template-columns:1fr;}.ll-root .ll-article-limits-form{padding:16px;}.ll-root .ll-article-limits-dialog .ll-btn{min-height:44px;}}
 .ll-article-workbench h3,.ll-article-workbench p,.ll-article-workbench label,.ll-article-workbench summary,.ll-article-workbench select,.ll-article-workbench input,.ll-article-workbench button{font-size:13px;line-height:1.45;letter-spacing:normal;}
 .ll-article-workbench h3{font-size:14px;margin:0;font-weight:600;white-space:nowrap;}
 .ll-article-head,.ll-article-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;}
@@ -5818,7 +5855,7 @@ window.__ModuleLoader__.load({
 
         aiSettingsOpen?h('div',{key:'ai-settings',className:'ll-modal-bg',onClick:e=>{if(e.target===e.currentTarget)setAISettingsOpen(false);}},h('div',{className:'ll-modal',role:'dialog','aria-label':'文章模型设置'},[
           h('div',{key:'h',className:'ll-modal-head'},['统一模型与费用',h('span',{key:'sp',className:'ll-spacer'}),h('button',{key:'x',className:'ll-btn',onClick:()=>setAISettingsOpen(false)},'关闭')]),
-          h('div',{key:'b',className:'ll-modal-body'},[h(ModelProviderOptions,{key:'provider'}),h('p',{key:'policy'},'结构识别与翻译复用当前调用方式和密钥。结构使用低思考、输出上限 16384；不自动重试。未知单价不会算作免费。'),h('button',{key:'key',className:'ll-btn',onClick:()=>{setAISettingsOpen(false);setConfigOpen(true);}},'配置 API Key'),h(ArticlePricing,{key:'pricing'})]),
+          h('div',{key:'b',className:'ll-modal-body'},[h(ModelProviderOptions,{key:'provider'}),h('p',{key:'policy'},'结构识别与翻译复用当前调用方式和密钥。输出预算在工作台「调用上限」设置；使用低思考，不自动重试。未知单价不会算作免费。'),h('button',{key:'key',className:'ll-btn',onClick:()=>{setAISettingsOpen(false);setConfigOpen(true);}},'配置 API Key'),h(ArticlePricing,{key:'pricing'})]),
         ])):null,
         layoutBatchOpen ? h(ArticleBatchDialog,{key:'layout-batch',papers:filteredPapers,mode:layoutMode,setMode:setLayoutMode,
           media,setMedia,
