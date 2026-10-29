@@ -64,7 +64,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
     media:mediaOptions(s.media), needsRefresh:s.preparationPolicy!==MEDIA_POLICY,
     sourceHash: s.sourceHash, pageCount: s.pageCount || 0, checkedPages: s.checkedPages || [],
     error: s.error || null, updatedAt: s.updatedAt, warnings: s.warnings || [], coverage: s.coverage || null,
-    translationJobId: s.translationJobId || null, ai:s.ai===true,aiProgress:s.aiProgress||null,aiStopped:s.aiStopped===true,pageEngines:s.pageEngines||{},translationSelection:s.translationSelection||{mode:'all'},pendingCount:s.pendingRegions?.length||0,
+    translationJobId: s.translationJobId || null, ai:s.ai===true,aiProgress:s.aiProgress||null,aiStopped:s.aiStopped===true,pageEngines:s.pageEngines||{},lastPageTask:s.lastPageTask||null,aiWarnings:s.aiWarnings||[],protectedStop:s.protectedStop===true,translationSelection:s.translationSelection||{mode:'all'},pendingCount:s.pendingRegions?.length||0,
     pendingRegions:s.pendingRegions||[],canTranslate:!!(s.ai&&s.coverage?.ok&&!s.hardWarnings?.length&&s.preparedRevision===s.revision&&s.mdHash&&s.eligibleRegions>0&&['review','approved'].includes(s.phase)) });
   function enqueue(slug, revision, raw = false) {
     pending.add(slug);
@@ -83,6 +83,9 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         if(s.pageRequest){
           const native=JSON.parse(await readFile(result.layoutPath,'utf8'));
           const target=pageScope.resolve(s.pageRequest.scope,native.pages.length),targetSet=new Set(target);
+          const exclusions=s.pageRequest.localExclusions?.length?pageScope.parse(s.pageRequest.localExclusions,native.pages.length):[];
+          if(s.pageRequest.engine==='ai'&&exclusions.some(n=>targetSet.has(n)))fail('AI 页码与本地保护页重叠，拒绝调用模型',422);
+          s.lastPageTask={engine:s.pageRequest.engine,pages:target,localExclusions:exclusions,requestedAt:new Date().toISOString()};await save(s);
           const previous=s.previousLayoutPath?JSON.parse(await readFile(s.previousLayoutPath,'utf8')):null;
           const overrides={},engines={...(s.pageEngines||{})};
           for(const p of native.pages){
@@ -96,7 +99,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
             const controller=aiController;let progressTail=Promise.resolve();
             try{identified=await partitionAI.partition({slug,pdf:(await paperFor(slug)).pdfAbs,layout:native,sourceHash:s.sourceHash,selectedPages:target,consent:s.aiConsent,signal:controller.signal,onProgress:p=>{s.aiProgress=p;progressTail=progressTail.then(()=>save(s));}});}
             finally{await progressTail;aiControllers.delete(slug);}
-            Object.assign(overrides,identified.overrides);s.aiStopped=identified.stopped===true;
+            Object.assign(overrides,identified.overrides);s.aiStopped=identified.stopped===true;s.aiWarnings=identified.warnings||[];s.protectedStop=identified.protectedStop===true;
             for(const n of target)engines[n]=identified.overrides[n]?.every(r=>r.role==='pending')?'pending':'ai';
           }else{
             let local;
@@ -120,7 +123,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
           let progressTail=Promise.resolve(),identified;const controller=aiController;
           try{identified=await partitionAI.partition({slug,pdf:(await paperFor(slug)).pdfAbs,layout:native,sourceHash:s.sourceHash,consent:s.aiConsent,signal:controller.signal,
             onProgress:p=>{s.aiProgress=p;progressTail=progressTail.then(()=>save(s));}});}finally{await progressTail;aiControllers.delete(slug);}
-          s.aiPendingEvidence=identified.pending;s.pendingRegions=identified.pending;s.aiErrors=identified.errors;s.aiRequested=false;s.aiProgress=null;s.aiStopped=identified.stopped===true;
+          s.aiPendingEvidence=identified.pending;s.pendingRegions=identified.pending;s.aiErrors=identified.errors;s.aiRequested=false;s.aiProgress=null;s.aiStopped=identified.stopped===true;s.aiWarnings=identified.warnings||[];s.protectedStop=identified.protectedStop===true;
           // Explicit user edits win over automatic candidates and are never AI input.
           s.overrides={...identified.overrides,...(s.overrides||{})};
           result=await extract((await paperFor(slug)).pdfAbs,slug,undefined,{outputRoot:join(dir(slug),`r${revision}`,'ai-final'),overrides:s.overrides,sourceHash:s.sourceHash,allowReview:true,media:mediaOptions(s.media)});
@@ -160,7 +163,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       pending.delete(slug);
       if(aiControllers.get(slug)===aiController)aiControllers.delete(slug);
       const s = await read(slug);
-      if (s?.revision === revision && s.mode === 'auto' && !s.aiStopped && (s.phase === 'approved'||summary(s).canTranslate)) {
+      if (s?.revision === revision && s.mode === 'auto' && !s.aiStopped && !s.protectedStop && (s.phase === 'approved'||summary(s).canTranslate)) {
         try {
           const job = await translate({ slug, schedule: s.schedule });
           await serial(slug, async () => { const latest = await read(slug); latest.translationJobId = job.jobId; await save(latest); });
@@ -177,7 +180,7 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       if(pageRequest&&sameSource&&old?.pageCount)pageScope.resolve(pageRequest.scope,old.pageCount);
       if(ai&&(!partitionAI||aiConsent!==true))fail('AI 分区需确认发送与费用',400);
       if(ai&&mode==='manual')fail('手动模式不调用 AI，请选择自动或半自动',400);
-      if (old && !pageRequest && !force && sameSource && sameMedia && old.preparationPolicy===MEDIA_POLICY&&!!old.ai===ai) return summary(old);
+      if (old && !pageRequest && !force && sameSource && sameMedia && old.preparationPolicy===MEDIA_POLICY) return summary(old);
       const s = { slug, title: p.title || slug, mode, schedule: schedule === 'offpeak' ? 'offpeak' : 'now',
         phase: 'queued', revision: (old?.revision || 0) + 1, sourceHash: await sourceHash(slug),
         media:mediaOptions(media),overrides:!force&&sameSource ? old?.overrides||{} : {}, checkedPages: pageRequest&&sameSource?old?.checkedPages||[]:[],ai:ai||!!(pageRequest&&sameSource&&old?.ai),aiRequested:ai&&!pageRequest,aiConsent:ai&&aiConsent,
@@ -208,15 +211,18 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
       if(!['local','ai'].includes(body.engine))fail('分区引擎无效',400);
       if(!body.scope||!['all','selected'].includes(body.scope.mode))fail('请选择全部或指定页数',400);
       if(body.scope.mode==='selected')pageScope.parse(body.scope.pages,100000);
-      return{state:await startOne(body.slug,'semi',body.schedule,false,body.media,body.engine==='ai',body.aiConsent===true,{engine:body.engine,scope:body.scope})};
+      const localExclusions=body.localExclusions?.length?pageScope.parse(body.localExclusions,100000):[];
+      if(body.engine==='ai'&&localExclusions.length){const excluded=new Set(localExclusions);if(body.scope.mode==='all'||pageScope.parse(body.scope.pages,100000).some(n=>excluded.has(n)))fail('AI 页码与本地保护页重叠，拒绝调用模型；请调整到不重叠范围',422);}
+      return{state:await startOne(body.slug,'semi',body.schedule,false,body.media,body.engine==='ai',body.aiConsent===true,{engine:body.engine,scope:body.scope,localExclusions})};
     }
     if (body.action === 'start') {
       if (!MODES.includes(body.mode)) fail('分区模式无效', 400);
+      if(body.engine==='ai'&&(!body.scope||!['all','selected'].includes(body.scope.mode)))fail('AI 分区必须明确选择全部或指定页数；旧整篇入口已禁用，请从 PDF 页码下的页面任务启动',422);
       const slugs = [...new Set(body.slugs || [body.slug])];
       if (!slugs.length || slugs.length > 200) fail('每批请选择 1–200 篇', 400);
       const results = [];
       for (const slug of slugs) {
-        try { results.push({ state: await startOne(slug, body.mode, body.schedule, body.force === true, body.media,body.engine==='ai',body.aiConsent===true) }); }
+        try { results.push({ state: await startOne(slug, body.mode, body.schedule, body.force === true, body.media,body.engine==='ai',body.aiConsent===true,body.engine==='ai'?{engine:'ai',scope:body.scope}:null) }); }
         catch (err) { results.push({ slug, error: err.message }); }
       }
       return { results };
@@ -231,6 +237,21 @@ export function createLayoutWorkflow({ root, findPaper, extract, translate, isBu
         await save(s);enqueue(s.slug,s.revision,s.mode==='manual'&&Object.keys(s.overrides||{}).length!==s.pageCount);return {state:summary(s)};
       }
       const l = await layout(s);
+      if(body.action==='recheck-ai-cache'){
+        if(!partitionAI?.replay)fail('当前服务尚未加载离线自检，请更新后重启 DSH',422);
+        const replay=await partitionAI.replay({slug:s.slug,layout:l,sourceHash:s.sourceHash}),applied=[];
+        s.overrides||={};
+        for(const n of replay.replayed){
+          const engine=s.pageEngines?.[n],manual=s.overrides[n]?.some(r=>r.evidence==='manual-page-replacement');
+          if(['manual','local'].includes(engine)||s.checkedPages.includes(n)||manual)continue;
+          s.overrides[n]=replay.overrides[n];s.pageEngines={...s.pageEngines,[n]:replay.overrides[n].every(r=>r.role==='pending')?'pending':'ai'};applied.push(n);
+        }
+        if(!applied.length)fail('没有可自动更新的 AI 缓存页；人工、本地或已确认页保持不变，未调用 AI',422);
+        const appliedSet=new Set(applied);s.aiPendingEvidence=[...(s.aiPendingEvidence||[]).filter(r=>!appliedSet.has(r.page)),...replay.pending.filter(r=>appliedSet.has(r.page))];
+        s.aiWarnings=replay.warnings;s.aiRequested=false;s.aiProgress=null;s.revision++;s.phase='queued';s.mode='semi';s.translationJobId=null;s.error=null;
+        s.lastPageTask={engine:'cache-recheck',pages:applied,networkRequests:0,requestedAt:new Date().toISOString()};
+        await save(s);enqueue(s.slug,s.revision);return{state:summary(s),replayedPages:applied,networkRequests:0};
+      }
       if(body.action==='translate'&&body.scope){
         const pages=pageScope.resolve(body.scope,s.pageCount);
         if(body.scope.mode==='selected'){

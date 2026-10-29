@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     const ROUTE_PREFIX = '/literature-library';
     const PDFJS_BASE = `${ROUTE_PREFIX}/pdfjs`;
     // 带版本串，避免升级 pdfjs-dist 时浏览器仍用一年缓存的旧 worker
-    const PDFJS_REV = '0.10.0';
+    const PDFJS_REV = '0.10.1';
     const LS_KEY = 'dsh-literature-library/layout';
     const FONT_PERCENT_KEY = 'dsh-literature-library/font-percent';
     // 旧版存的是倍率（1 / 1.1 / …），读取时迁移成百分比
@@ -2992,7 +2992,7 @@ window.__ModuleLoader__.load({
       ]);
     }
     function costTotals(totals){if(!totals?.length)return'0（无 API 调用）';return totals.map(c=>{if(c.low==null||c.high==null)return`${c.currency} 金额未知`;const f=n=>n>0&&n<.00001?'<0.00001':Number(n).toFixed(5);return`${c.currency} ${c.low===c.high?f(c.low):f(c.low)+'—'+f(c.high)}`;}).join(' / ');}
-    async function confirmPartitionAI(engine,count=1){if(engine!=='ai')return true;const r=await fetch(`${ROUTE_PREFIX}/partition-ai-config`),c=await r.json();if(!r.ok||!c.ready)throw Error(c.message||c.account?.message||'请先完成 AI 分区的调用方式、授权和视觉模型配置');return window.confirm(`AI 三阶段分区：${count} 篇，每页最多 3 次请求。\n服务 ${c.nativeAccount?'DSH 内置 deepseek-account':c.endpoint}\n模型 ${c.model}\n${c.nativeAccount?'使用 DSH 登录账号，按账号服务规则收费，不自动切换到 API Key':'使用统一翻译 API 密钥'}；发送论文页面图像及相邻页原文，不发送人工稿。\n分区和翻译分别计费，结束后汇总；待确认区域先跳过。继续？`);}
+    async function confirmPartitionAI(engine,count=1,rangeLabel){if(engine!=='ai')return true;if(!rangeLabel)throw Error('请先在 PDF 页码下选择明确的 AI 页数范围');const r=await fetch(`${ROUTE_PREFIX}/partition-ai-config`),c=await r.json();if(!r.ok||!c.ready)throw Error(c.message||c.account?.message||'请先完成 AI 分区的调用方式、授权和视觉模型配置');return window.confirm(`AI 三阶段分区：${count} 篇，每页最多 3 个阶段请求。\n范围：${rangeLabel}\n服务 ${c.nativeAccount?'DSH 内置 deepseek-account':c.endpoint}\n模型 ${c.model}\n${c.nativeAccount?'使用 DSH 登录账号，按账号服务规则收费，不自动切换到 API Key':'使用统一翻译 API 密钥'}；发送所选页图像及相邻页原文，不发送人工稿。\n连续失败触发停止保护；分区和翻译分别计费。继续？`);}
     function regionDisplayLabel(region,regions){
       const prefix=isArticleRegion(region)?String(regions.filter(isArticleRegion).findIndex(r=>r.id===region.id)+1):'信息';
       return prefix+' · '+(REGION_LABELS[region.role]||region.role);
@@ -3114,15 +3114,27 @@ window.__ModuleLoader__.load({
       const [translateMode,setTranslateMode]=usePreference('translatePageMode','all',scope),[translateRange,setTranslateRange]=usePreference('translatePageRange','',scope);
       const [busy,setBusy]=React.useState(false),[error,setError]=React.useState('');
       const state=view?.state,running=['queued','partitioning'].includes(state?.phase),disabled=busy||running||!!view?.dirty||!total;
+      async function recheckCache(){
+        if(disabled||!state)return;
+        if(!window.confirm('只用已有完整 AI 缓存重新自检，不调用模型、不产生分区费用；本地、人工及已确认页保持不变。继续？'))return;
+        setBusy(true);setError('');try{const r=await postJson('/layout',{action:'recheck-ai-cache',slug,revision:state.revision});if(r.state)setView(v=>({...v,state:r.state,dirty:false,editing:false}));window.dispatchEvent(new Event('ll-layout-changed'));}catch(e){setError(e.message);}finally{setBusy(false);}
+      }
       async function run(kind,selectionMode,range) {
-        setError('');let selection;
+        setError('');let selection,localExclusions=[];
         try{selection={mode:selectionMode,...(selectionMode==='selected'?{pages:pageScope.parse(range||String(page),total)}:{})};}catch(e){setError(e.message);return;}
+        if(kind==='ai'){
+          try{localExclusions=localMode==='all'?pageScope.resolve({mode:'all'},total):localRange.trim()?pageScope.parse(localRange,total):[];
+            const excluded=new Set(localExclusions),effective=pageScope.resolve(selection,total).filter(n=>!excluded.has(n));
+            if(!effective.length)throw Error('AI 页数已全部被本地保护范围排除；请调整范围，不会调用模型。');
+            selection={mode:'selected',pages:effective};selectionMode='selected';
+          }catch(e){setError(e.message);return;}
+        }
         const selected=pageScope.resolve(selection,total),label=selectionMode==='all'?`全部 ${total} 页`:`第 ${pageScope.format(selected)} 页`;
-        if(kind==='ai') {try{if(!await confirmPartitionAI('ai'))return;}catch(e){setError(e.message);return;}}
+        if(kind==='ai') {try{if(!await confirmPartitionAI('ai',1,label))return;}catch(e){setError(e.message);return;}}
         if(!window.confirm(kind==='translate'?`确认已检查${label}的分区？仅翻译这些页面中的可用区域，待确认区域继续跳过。指定页译文另存，不覆盖全文；会产生翻译费用。`:`使用${kind==='ai'?'AI':'本地规则'}分区处理${label}？将替换这些页的分区（包括人工框），其他页面保持不变。${kind==='local'?'本地分区不调用模型。':''}`))return;
         setBusy(true);
         try{
-          const r=await postJson('/layout',{action:kind==='translate'?'translate':'partition-pages',slug,engine:kind,scope:selection,revision:state?.revision,confirmPages:true,aiConsent:kind==='ai',schedule,media});
+          const r=await postJson('/layout',{action:kind==='translate'?'translate':'partition-pages',slug,engine:kind,scope:selection,localExclusions,revision:state?.revision,confirmPages:true,aiConsent:kind==='ai',schedule,media});
           if(r.state)setView(v=>({...v,state:r.state,editing:false,dirty:false}));
           if(r.job)onJob?.(r.job);
           window.dispatchEvent(new Event('ll-layout-changed'));
@@ -3139,6 +3151,9 @@ window.__ModuleLoader__.load({
         h('div',{key:'head',className:'ll-page-task-head'},[h('strong',{key:'t'},'页面任务'),h('span',{key:'hint'},'PDF 页码 · 1-5,8,12-20'),h('button',{key:'settings',className:'ll-btn ll-btn-xs',onClick:()=>window.dispatchEvent(new Event('ll-open-ai-settings'))},'AI 设置')]),
         row('ai','AI 分区',aiMode,setAiMode,aiRange,setAiRange),row('local','本地分区',localMode,setLocalMode,localRange,setLocalRange),row('translate','翻译',translateMode,setTranslateMode,translateRange,setTranslateRange),
         assigned?h('div',{key:'assignment',className:'ll-page-task-assignment',title:['AI：'+pageScope.format(byEngine('ai')),'本地：'+pageScope.format(byEngine('local')),'人工：'+pageScope.format(byEngine('manual')),'待分区：'+pageScope.format(byEngine('pending'))].join('；')},['AI '+(pageScope.format(byEngine('ai'))||'无'),'本地 '+(pageScope.format(byEngine('local'))||'无'),'人工 '+(pageScope.format(byEngine('manual'))||'无'),'待分区 '+(pageScope.format(byEngine('pending'))||'无')].join(' · ')):null,
+        h('div',{key:'scope-note',className:'ll-page-task-note'},'页码是草稿，各行应用后生效；AI 不处理已填写的本地范围。'),
+        state?.lastPageTask?h('div',{key:'actual-scope',className:'ll-page-task-assignment',title:JSON.stringify(state.lastPageTask)},`最近任务：${state.lastPageTask.engine==='ai'?'AI':state.lastPageTask.engine==='local'?'本地':'缓存自检'} 第 ${pageScope.format(state.lastPageTask.pages)} 页`):null,
+        state?.ai&&state.pendingCount>0?h('div',{key:'cache-recovery',className:'ll-page-task-head'},[h('span',{key:'hint'},'旧 AI 结果有待确认区，可先免费重新自检。'),h('button',{key:'recheck',className:'ll-btn ll-btn-xs',disabled,onClick:recheckCache},'缓存自检（不调用 AI）')]):null,
         view?.dirty?h('div',{key:'dirty',className:'ll-page-task-note'},'请先保存或放弃未保存的人工修改。'):null,
         running?h('div',{key:'wait',className:'ll-page-task-note'},'正在分区；可在下方停止后续 AI，完成页保留。'):null,
         error?h('div',{key:'error',role:'alert',className:'ll-page-task-error'},error):null,
@@ -3197,7 +3212,7 @@ window.__ModuleLoader__.load({
       const checkPage=()=>act('check-page',{page:view.page.page});
       const approve=()=>{if(window.confirm('确认已检查《'+s.title+'》的全部 '+s.pageCount+' 页？仅确认，不启动翻译。'))act('approve',{confirmAll:true});};
       const restart=async()=>{
-        const engine=mode==='manual'?'local':partitionEngine();try{if(!await confirmPartitionAI(engine))return;}catch(e){setError(e.message);return;}
+        const engine='local';
         if(mode==='auto'&&!window.confirm('自动模式自检后会调用 API 翻译并产生费用。继续？'))return;
         if(s&&!window.confirm('重新分区会清除当前人工修改和确认；旧版本文件仍保留。继续？'))return;
         setShow(true);act('start',{force:!!s,engine,aiConsent:engine==='ai'});
@@ -3206,7 +3221,7 @@ window.__ModuleLoader__.load({
         if(editing&&dirty){setError('请先保存，或在更多中放弃修改。');return;}
         setShow(true);setView(v=>({...v,editing:!v?.editing}));
       };
-      const summary=s?(s.aiStopped?'AI 已停止，已完成页保留':s.aiProgress?`AI ${s.aiProgress.stage} · 第 ${s.aiProgress.page}/${s.aiProgress.total} 页`:(LAYOUT_PHASES[s.phase]||s.phase))+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页'+(s.pendingCount?` · ${s.pendingCount} 区暂缓翻译`:''):'尚未分区';
+      const summary=s?(s.protectedStop?'调用保护已停止后续 AI':s.aiStopped?'AI 已停止，已完成页保留':s.aiProgress?`AI ${s.aiProgress.stage} · 第 ${s.aiProgress.page}/${s.aiProgress.total} 页`:(LAYOUT_PHASES[s.phase]||s.phase))+' · 已检查 '+s.checkedPages.length+'/'+s.pageCount+' 页'+(s.pendingCount?` · ${s.pendingCount} 区暂缓翻译`:''):'尚未分区';
       return h('section',{ref:controlsRef,className:'ll-layout-controls','aria-label':'论文分区检查'},[
         h('div',{key:'bar',className:'ll-layout-mainbar'},[
           h('strong',{key:'page'},'分区'+(view?.page?' · 第 '+view.page.page+' 页':'')),
@@ -3226,13 +3241,14 @@ window.__ModuleLoader__.load({
               h('label',{key:'info'},[h('input',{type:'checkbox',checked:!!view?.showInfo,onChange:e=>setView(v=>({...v,showInfo:e.target.checked}))}),'显示页眉、作者等信息区']),
               h('label',{key:'labels'},[h('input',{type:'checkbox',checked:!!view?.showLabels,onChange:e=>setView(v=>({...v,showLabels:e.target.checked}))}),'显示全部框标签']),
               ready&&s.ai?h('button',{key:'check-ai',className:'ll-btn ll-btn-xs',disabled:busy||dirty,onClick:checkPage},'确认本页待确认区'):null,
+              s?.aiWarnings?.length?h('p',{key:'ai-notes'},`${s.aiWarnings.length} 条 AI 核对提示（不自动屏蔽正文）；真正阻断区域单独标为待确认。`):null,
               ready?h('p',{key:'options'},'此稿：图片'+(s.media?.figures?'开':'关')+' · 表格'+(s.media?.tables?'开':'关')+' · 公式原图兜底'+(s.media?.formulaFallback!==false?'开':'关')):null,
               ready&&(needsRefresh||!!s.media?.figures!==!!media?.figures||!!s.media?.tables!==!!media?.tables||(s.media?.formulaFallback!==false)!==(media?.formulaFallback!==false))?
                 h('button',{key:'apply',className:'ll-btn ll-btn-xs',disabled:busy||dirty,onClick:()=>act('set-media')},'更新识别（保留人工框）'):null,
               ready&&!editing&&s.phase!=='approved'?h('button',{key:'approve',className:'ll-btn ll-btn-xs',disabled:busy||dirty||needsRefresh,onClick:approve},'确认整篇'):null,
               h('details',{key:'advanced',className:'ll-layout-advanced'},[
                 h('summary',{key:'s'},'重新识别与修改恢复'),
-                h('button',{key:'restart',className:'ll-btn ll-btn-xs',disabled:busy||dirty||!ready,onClick:restart},s?'重新分区':'开始分区'),
+                h('button',{key:'restart',className:'ll-btn ll-btn-xs',disabled:busy||dirty||!ready,onClick:restart},s?'本地重新分区':'开始本地分区'),
                 editing?h('button',{key:'discard',className:'ll-btn ll-btn-xs',disabled:busy||!dirty,onClick:()=>{setError('');setView(v=>({...v,dirty:false,page:data.page}));setEpoch(n=>n+1);}},'放弃未保存修改'):null,
                 editing?h('button',{key:'clear',className:'ll-btn ll-btn-xs',disabled:busy,onClick:()=>{if(window.confirm('清空本页分区重新画框？未覆盖文字会阻止保存。'))setView(v=>({...v,dirty:true,selected:null,page:{...v.page,regions:[]}}));}},'清空本页重画'):null,
               ]),
@@ -3306,14 +3322,14 @@ window.__ModuleLoader__.load({
       const candidates = papers.filter(p => p.source && !p.hidden), bySlug = new Map(states.map(s => [s.slug,s]));
       async function run(action) {
         if (!chosen.size) return;
-        if(action==='start'){try{if(!await confirmPartitionAI(mode==='manual'?'local':engine,chosen.size))return;}catch(e){setNotice(e.message);return;}}
+        if(action==='start'){try{if(!await confirmPartitionAI(mode==='manual'?'local':engine,chosen.size,'选中文献的全部 PDF 页；将覆盖目标文献分区，不采用各篇输入框中尚未应用的页码草稿'))return;}catch(e){setNotice(e.message);return;}}
         if (action === 'start' && mode === 'auto' && !window.confirm(`自动模式将分区并翻译选中的 ${chosen.size} 篇，产生 API 费用。继续？`)) return;
         if (action === 'approve' && !window.confirm('确认已人工检查所有选中文献的全部页面？此操作不会启动翻译。')) return;
         if (action === 'translate' && !window.confirm('翻译所有选中且已确认的文献，将产生 API 费用。继续？')) return;
         setBusy(true); const errors = []; let count = 0;
         try {
           if (action === 'start') {
-            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule,media,engine:mode==='manual'?'local':engine,aiConsent:mode!=='manual'&&engine==='ai'});
+            const r = await postJson('/layout',{action,slugs:[...chosen],mode,schedule,media,engine:mode==='manual'?'local':engine,scope:mode!=='manual'&&engine==='ai'?{mode:'all'}:undefined,aiConsent:mode!=='manual'&&engine==='ai'});
             count = r.results.filter(x => !x.error).length; errors.push(...r.results.filter(x => x.error).map(x => x.error));
           } else for (const slug of chosen) {
             const s = bySlug.get(slug);
@@ -4836,12 +4852,11 @@ window.__ModuleLoader__.load({
       async function doTranslate(p) {
         if(selectPaper(p.slug) === false) return;
         setLayoutOpenSlug(p.slug);
-        if (layoutMode === 'auto' && !window.confirm('自动模式：本地分区、自检通过后会付费翻译。继续？')) return;
         setBusy(p.slug);
         try {
-          const engine=layoutMode==='manual'?'local':partitionEngine();if(!await confirmPartitionAI(engine))return;
-          const r = await postJson('/layout',{action:'start',slug:p.slug,mode:layoutMode,media,schedule:offpeakOnly?'offpeak':'now',engine,aiConsent:engine==='ai'});
-          if(r.results?.[0]?.error) throw new Error(r.results[0].error);
+          const response=await fetch(`${ROUTE_PREFIX}/layout?slug=${encodeURIComponent(p.slug)}`),existing=await response.json();
+          if(!response.ok)throw Error(existing.message||'读取分区失败');
+          if(!existing.state){const r=await postJson('/layout',{action:'start',slug:p.slug,mode:'semi',media,schedule:offpeakOnly?'offpeak':'now',engine:'local'});if(r.results?.[0]?.error)throw Error(r.results[0].error);}
           window.dispatchEvent(new Event('ll-layout-changed'));
           setNotice({kind:'ok',text:'已打开 PDF 分区工具。检查确认后，在页码下「页面任务」选择全部或指定页数翻译。已有分区不会被覆盖。'});
         } catch(err) { setNotice({kind:'err',text:err.message}); }
@@ -5557,7 +5572,7 @@ window.__ModuleLoader__.load({
                 }, busy === 'save' ? '保存中…' : '保存') : null,
                 !selected.translation ? h('button', {
                   key: 'tr', className: 'll-btn', disabled: busy !== null, onClick: () => doTranslate(selected),
-                }, busy === selected.slug ? '投递中…' : '翻译这篇') : null,
+                }, busy === selected.slug ? '打开中…' : '分区与翻译') : null,
               ]),
               h('div', { className: 'll-pane-body', key: 'b', ref: markdownPaneRef, tabIndex:0, 'aria-label':'译文阅读区' },
                 contentSwitching || docStale
@@ -5569,7 +5584,7 @@ window.__ModuleLoader__.load({
                       : doc.phase === 'idle'
                         ? h('div', { className: 'll-empty' }, [
                           h('strong', { key: 't' }, '还没有中文译文'),
-                          h('span', { key: 'd' }, '点右上角「翻译这篇」用 DeepSeek 生成，完成后可在这里预览、编辑并保存。'),
+                          h('span', { key: 'd' }, '点右上角「分区与翻译」，检查页面任务中的分区与翻译页码，再明确启动翻译。完成后可在这里预览、编辑并保存。'),
                         ])
                         : mode === 'preview'
                           ? h('div', { key: 'pv', className: 'll-md', dangerouslySetInnerHTML: { __html: previewHtml } })

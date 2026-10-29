@@ -8,6 +8,7 @@ import {validatePageRegions} from './manual_regions.mjs';
 import {ACCOUNT_ENDPOINT} from './dsh_account_transport.mjs';
 import {writeJsonAtomic} from './atomic_json.mjs';
 import {pageScope} from './page_scope.mjs';
+import {reviewCandidate,REVIEW_POLICY} from './partition_review.mjs';
 const json=async file=>JSON.parse(await readFile(file,'utf8'));
 const optional=async file=>{try{return await json(file);}catch(e){if(e.code==='ENOENT')return null;throw e;}};
 const hash=s=>createHash('sha256').update(s).digest('hex');
@@ -46,7 +47,7 @@ export function createPartitionIntegration({root,credentials,fetchImpl,render=re
   if(consent!==true)throw Error('AI 分区需要确认上传页面图像、相邻页原文及费用');const options=await settings(),c=await credentials();
   if(!options.endpoint||!c.key)throw Error('请先配置统一翻译 API 密钥与视觉模型');if(new URL(options.endpoint).origin!==new URL(c.baseUrl).origin)throw Error('分区与翻译服务来源不一致，拒绝共享密钥');
   const session=await service(slug,{pdf,layout,sourceHash}),{ai,documentHash,baseId}=session;ai.configure({...options,apiKey:c.key});
-  const overrides={},pending=[],pages=[],errors=[],crossHolds=[];let activeBaseId=baseId,providerStopped=false;
+  const overrides={},pending=[],pages=[],errors=[],warnings=[];let activeBaseId=baseId,providerStopped=false,failures=0,consecutiveFailures=0;
   const targets=new Set(selectedPages?pageScope.parse(selectedPages,Math.max(...layout.pages.map(p=>p.page))):layout.pages.map(p=>p.page));
   let stopped=false;
   await atomic(join(session.dir,'latest.json'),{sourceHash,documentHash,baseId,pages:[],pending:[],phase:'running'});
@@ -54,26 +55,31 @@ export function createPartitionIntegration({root,credentials,fetchImpl,render=re
    if(!targets.has(p.page))continue;
    if(signal?.aborted){stopped=true;overrides[p.page]=validatePageRegions(p,[{id:'ai-pending-page-'+p.page,role:'pending',bbox:[0,0,p.width,p.height]}]);pending.push({page:p.page,id:'ai-pending-page-'+p.page,originalRole:'unknown',reason:'用户停止，AI 分区尚未完成'});continue;}
    onProgress({page:p.page,total:layout.pages.length,stage:'visual'});
-   try{if(providerStopped)throw Error('服务鉴权、余额或配置失败，已停止后续页面请求；请修正配置后重试');const input={baseRunId:activeBaseId,pages:[p.page],workflow:'semantic-v1',consent:true,force},quote=await ai.estimate(documentHash,input),run=await ai.run(documentHash,{...input,quoteHash:quote.quoteHash},{signal,progress:progress=>onProgress({...progress,total:layout.pages.length})});activeBaseId=run.id;
-    const corrected=run.pages.find(x=>x.page===p.page),issues=corrected.ai.pipeline,byId=new Map(),flag=(id,reason)=>{if(id)byId.set(id,[...(byId.get(id)||[]),reason]);};
-    for(const r of corrected.regions)if(r.role==='unknown'||r.note||r.role==='formula'&&!r.formula?.reliable)flag(r.id,r.note||'公式或区域需人工核对');
-    for(const issue of issues.review.issues){if(issue.page!==p.page){crossHolds.push(issue);continue;}if(issue.region)flag(issue.region,issue.message);else corrected.regions.forEach(r=>article.has(r.role)&&flag(r.id,issue.message));}
-    if(issues.scopedIssues?.length){for(const issue of issues.scopedIssues){if(!issue.regions?.length)corrected.regions.filter(r=>article.has(r.role)).forEach(r=>flag(r.id,issue.message));else for(const id of issue.regions)flag(id,issue.message);}}
-    else if(issues.issues?.length)corrected.regions.filter(r=>article.has(r.role)).forEach(r=>flag(r.id,issues.issues.join('；')));
-    for(const link of issues.review.links)for(const end of [link.from,link.to]){if(end.page===p.page)flag(end.id,'跨页关联待确认：'+link.reason);else crossHolds.push({page:end.page,region:end.id,message:'跨页关联待确认：'+link.reason});}
-    const drafts=corrected.regions.map(r=>({id:r.id,role:byId.has(r.id)||r.role==='unknown'?'pending':r.role,bbox:r.bbox}));
-    // Strict native ownership validation: a geometrically invalid page is held, not silently dropped.
-    overrides[p.page]=validatePageRegions(p,drafts).map(r=>({...r,confidence:r.role==='pending'?'review-required':'ai-candidate',evidence:'three-stage-ai'}));
-    for(const r of corrected.regions)if(byId.has(r.id)||r.role==='unknown')pending.push({page:p.page,id:r.id,originalRole:r.role,reason:(byId.get(r.id)||['未分类区域']).join('；')});
+   try{if(providerStopped)throw Error('已触发分区调用保护，后续页面未请求；请核对失败原因后明确选择页面再试');const input={baseRunId:activeBaseId,pages:[p.page],workflow:'semantic-v1',consent:true,force},quote=await ai.estimate(documentHash,input),run=await ai.run(documentHash,{...input,quoteHash:quote.quoteHash},{signal,progress:progress=>onProgress({...progress,total:layout.pages.length})});activeBaseId=run.id;
+    const corrected=run.pages.find(x=>x.page===p.page),issues=corrected.ai.pipeline,reviewed=reviewCandidate(p,corrected,issues);
+    overrides[p.page]=reviewed.overrides;pending.push(...reviewed.pending);warnings.push(...reviewed.warnings);consecutiveFailures=0;
     pages.push({page:p.page,runId:run.id,pipeline:issues});
    }catch(e){
     if(signal?.aborted)stopped=true;
-    if([400,401,402,403,404].includes(e.diagnostic?.httpStatus)||e.diagnostic?.kind==='account-provider')providerStopped=true;
+    if(!providerStopped&&!signal?.aborted){failures++;consecutiveFailures++;}
+    if([400,401,402,403,404].includes(e.diagnostic?.httpStatus)||e.diagnostic?.kind==='account-provider'||failures>=3||consecutiveFailures>=2)providerStopped=true;
     overrides[p.page]=validatePageRegions(p,[{id:'ai-pending-page-'+p.page,role:'pending',bbox:[0,0,p.width,p.height]}]);pending.push({page:p.page,id:'ai-pending-page-'+p.page,originalRole:'unknown',reason:stopped?'用户停止，AI 分区尚未完成':'AI 阶段失败或覆盖冲突，请人工分区'});errors.push({page:p.page,message:stopped?'用户停止后续 AI；缓存和用量已保留':String(e.message).slice(0,2000)});
    }
   }
-  for(const issue of crossHolds){const affected=overrides[issue.page]||[],exact=affected.some(r=>r.id===issue.region);for(const r of affected){if(r.role==='pending')continue;if(!article.has(r.role)||exact&&r.id!==issue.region)continue;pending.push({page:issue.page,id:r.id,originalRole:r.role,reason:issue.message});r.role='pending';r.confidence='review-required';}}
-  const result={version:'plugin-ai-partition-v1',sourceHash,baseId,documentHash,pages,pending,errors,stopped,selectedPages:[...targets],completedAt:new Date().toISOString()};await atomic(join(session.dir,'latest.json'),result);return{...result,overrides};
+  const result={version:'plugin-ai-partition-v1',reviewPolicy:REVIEW_POLICY,sourceHash,baseId,documentHash,pages,pending,warnings,errors,stopped,protectedStop:providerStopped,selectedPages:[...targets],completedAt:new Date().toISOString()};await atomic(join(session.dir,'latest.json'),result);return{...result,overrides};
+ }
+ /** Offline only: no configure, estimate, render, run, credential or fetch call. */
+ async function replay({slug,layout,sourceHash}){
+  const dir=directory(slug),last=await optional(join(dir,'latest.json'));
+  if(!last||last.sourceHash!==sourceHash)throw Error('没有匹配当前 PDF 的完整阶段缓存；未调用 AI');
+  const overrides={},pending=[],warnings=[],replayed=[];
+  for(const row of last.pages||[]){
+   if(!/^run-[a-f0-9-]{36}$/u.test(row.runId||''))continue;
+   const run=await json(join(dir,'runs',row.runId+'.json')),native=layout.pages.find(p=>p.page===row.page),candidate=run.pages.find(p=>p.page===row.page);
+   if(!native||!candidate)continue;
+   try{const checked=reviewCandidate(native,candidate,candidate.ai?.pipeline||row.pipeline);overrides[row.page]=checked.overrides;pending.push(...checked.pending);warnings.push(...checked.warnings);replayed.push(row.page);}catch(e){warnings.push({page:row.page,message:'离线自检未通过，原待确认状态保留：'+e.message});}
+  }
+  return{overrides,pending,warnings,replayed,reviewPolicy:REVIEW_POLICY,networkRequests:0};
  }
  async function partitionCosts(slug){const last=await optional(join(directory(slug),'latest.json'));if(!last)return{pages:[],totals:[],note:'未调用 AI 分区，本地规则分区无 API 费用'};
   const {ai}=await service(slug,{sourceHash:last.sourceHash});const data=await ai.costs(last.documentHash),currencies=[...new Set(data.pages.flatMap(p=>p.totals.map(t=>t.currency)))];return{...data,totals:currencies.map(c=>sumCosts(data.pages.flatMap(p=>p.attempts.filter(a=>a.cost.currency===c).map(a=>a.cost)),c))};
@@ -95,5 +101,5 @@ export function createPartitionIntegration({root,credentials,fetchImpl,render=re
   const last=job.phase?null:await optional(join(directory(slug),'cost-report.json'));
   const result={version:'paper-cost-report/v1',settledAt:job.phase?new Date().toISOString():last?.settledAt||null,phase:job.phase||last?.phase||'snapshot',partial:job.phase?!!job.pendingRegions?.length:!!last?.partial,pendingCount:job.phase?job.pendingRegions?.length||0:last?.pendingCount||0,partition:{totals:partition.totals,pages:partition.pages},translation:{totals:translation,requests:rows.reduce((n,r)=>n+(r.unknownRequests||1),0)},totals,note:'分区与翻译分别累计历史调用；失败请求在内，本地复用不重复收费。按当时单价及接口用量折算，不是服务商账单；未知金额不按零计算。'};return result;
  }
- return{settings,configure,partition,partitionCosts,finishTranslation,report};
+ return{settings,configure,partition,replay,partitionCosts,finishTranslation,report};
 }
