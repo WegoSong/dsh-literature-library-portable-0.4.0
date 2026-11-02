@@ -36,7 +36,7 @@ export function createDshAccountTransport({getLlm,getAttachments}){
    const keys=[...new Set([...blocks.keys(),...assembled.keys()])].sort((a,b)=>a-b),text=keys.map(i=>assembled.get(i)??blocks.get(i)).join('');
    if(text.length>1_000_000)throw fail('账号模型输出超过本地预算');
    return{text,usage,truncated:finish==='max-tokens',maxTokens:cap};
-  }catch(e){const error=fail(controller.signal.aborted?'DSH 账号调用已停止，已发送内容可能收费':e.status===422?e.message:'DSH 账号服务调用失败，请检查登录和余额；未读取或转发授权信息');error.usage=usage;throw error;}
+  }catch(e){const error=fail(controller.signal.aborted?'DSH 账号调用已停止，已发送内容可能收费':e.status===422?e.message:'DSH 账号服务调用失败，请检查登录和余额；未读取或转发授权信息');error.usage=usage;const keys=[...new Set([...blocks.keys(),...assembled.keys()])].sort((a,b)=>a-b);error.partialText=keys.map(i=>assembled.get(i)??blocks.get(i)).join('');throw error;}
   finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
  }
  async function fetchChat(url,options){if(url!==ACCOUNT_ENDPOINT)throw fail('拒绝将 DSH 账号授权用于自定义接口');const b=JSON.parse(options.body),system=b.messages.find(m=>m.role==='system')?.content||'',content=b.messages.find(m=>m.role==='user')?.content||[];
