@@ -51,7 +51,6 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
  async function translateDirect(s,body,signal){
   const input=await inputFor(s);await assertSource(s);
   const text=directArticleText(input);
-  if(input.pages.length>32||text.length>240000)throw fail('本次超过单次输入预算（32 页或 240,000 字符）；请选择较小范围，不会自动拆分收费');
   s.phase='running';s.stage='直接翻译文本与公式（不要求分区或结构确认）';await save(s);
   let response,interrupted='';const cap=body.limits.translationMaxTokens;
   try{response=await record(s,'translation',async config=>generate({stage:'translation',workflow:'direct-text-formula',providerMode:config.mode,model:config.translationModel||config.model,system:DIRECT_TRANSLATION_PROMPT,content:[{type:'text',text},...await contentFor(s,input,signal)],reasoningEffort:'low',maxTokens:cap,signal}),cap,true);}
@@ -72,7 +71,7 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
   const content=[];for(const image of images){signal.throwIfAborted();content.push({type:'text',text:'PDF page '+image.page},{type:'image_url',image_url:{url:'data:image/png;base64,'+(await readFile(image.file)).toString('base64')}});}return content;
  }
  async function analyze(s,body,signal){
-  const input=await inputFor(s);checkArticleBudget(input);await assertSource(s);s.structureAttempted=true;s.phase='running';s.stage='AI 阅读文章并建立结构清单';await save(s);
+  const input=await inputFor(s);await assertSource(s);s.structureAttempted=true;s.phase='running';s.stage='AI 阅读文章并建立结构清单';await save(s);
   const content=[{type:'text',text:JSON.stringify(input)},...await contentFor(s,input,signal)];
   const cap=body.limits.structureMaxTokens;
   const response=await record(s,'structure',config=>generate({stage:'structure',providerMode:config.mode,model:config.model,system:ARTICLE_STRUCTURE_PROMPT+'\n'+ARTICLE_AUDIT_RULES,content,reasoningEffort:'low',maxTokens:cap,signal}),cap);
@@ -87,7 +86,7 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
   if(!s.reviewed)throw fail('请先检查并确认结构清单；未调用翻译');
   const pending=[...new Set([...(s.pendingIds||[]),...s.structure.objects.filter(o=>o.type==='unknown'&&o.part!=='running_matter').map(o=>o.id)])],targets=translationTargets(s.structure,input,s.media,pending);
   if(!targets.length)throw fail('没有可翻译对象；未调用模型');
-  const payload={scope:input.scope,structure:s.structure,targets};checkArticleBudget(input);if(JSON.stringify(payload).length>500000)throw fail('翻译输入超过本地预算，请明确缩小范围；未截断或自动拆分');
+  const payload={scope:input.scope,structure:s.structure,targets};
   s.phase='running';s.stage='阅读全文并连续翻译';await save(s);
   const cap=body.limits.translationMaxTokens;
   const response=await record(s,'translation',async config=>generate({stage:'translation',providerMode:config.mode,model:config.translationModel||config.model,system:TRANSLATION_PROMPT,content:[{type:'text',text:JSON.stringify(payload)},...await contentFor(s,input,signal)],reasoningEffort:'low',maxTokens:cap,signal}),cap);
@@ -122,14 +121,23 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
   if(s.schedule==='offpeak'&&isPeakShanghai(now())&&delay>0){s.stage='等待闲时 '+new Date(s.notBefore).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'});const timer=setTimeout(start,Math.min(delay,2_147_000_000));timer.unref?.();waiting.set(s.slug,{timer,start,controller,state:s});}
   else start();return save(s);
  }
+ async function confirmedLimits(value){
+  const config=await settings(),limits=validateArticleLimits(config.limits);
+  const agreed=value===undefined?DEFAULT_ARTICLE_LIMITS:validateArticleLimits(value);
+  if(Object.keys(limits).some(k=>limits[k]!==agreed[k]))throw fail('调用上限已变化，请刷新并重新确认预算；未发送请求',409);
+  return limits;
+ }
  async function command(body){
   const slug=body.slug,p=await paperFor(slug);let s=await load(slug);
   if(body.action==='stop'){if(active.has(slug)){active.get(slug).abort();const delayed=waiting.get(slug);if(delayed){clearTimeout(delayed.timer);waiting.delete(slug);}s.phase=delayed?'stopped':'stopping';s.stage=delayed?'闲时等待已取消，未发送该翻译请求':'正在停止；已发送请求可能收费';await save(s);if(delayed)active.delete(slug);}return get(slug);}
   if(body.action==='start-now'){const delayed=waiting.get(slug);if(!delayed)throw fail('没有等待闲时的任务，未新建翻译');clearTimeout(delayed.timer);s=delayed.state;s.schedule='now';s.notBefore=now().toISOString();s.stage='已改为立即翻译，等待队列';await save(s);delayed.start();return get(slug);}
   if(active.has(slug))throw fail('任务执行中，不能修改清单或重复调用',409);
   if(body.action==='prepare'){
+   const limits=body.limits===undefined?undefined:await confirmedLimits(body.limits);
+   const prepared=await prepare(p.pdfAbs,body.scope,{limits});
+   if(limits)checkArticleBudget(prepared.input,limits);
    if(s)await save(s); // Keep the last manual draft under its immutable revision folder.
-   const prepared=await prepare(p.pdfAbs,body.scope);const revision='r-'+randomUUID(),dir=join(folder(slug),revision);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'input.json'),prepared.input);
+   const revision='r-'+randomUUID(),dir=join(folder(slug),revision);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'input.json'),prepared.input);
    s={schema:'article-workflow/v1',slug,title:p.title||slug,revision,sourceHash:prepared.sourceHash,pageCount:prepared.pageCount,selection:prepared.selection,phase:'prepared',stage:'原文已准备，未调用 AI',structure:null,checks:null,reviewed:false,pendingIds:[],media:articleMedia(body.media),exports:s?.exports||[],costs:s?.costs||[],createdAt:new Date().toISOString()};await save(s);return{state:s};
   }
   if(!s)throw fail('请先选择范围并准备原文');
@@ -140,12 +148,11 @@ export function createArticleWorkflow({root,findPaper,generate,settings,publish,
   }
   if(['analyze','translate','translate-direct'].includes(body.action)){
    if(body.consent!==true)throw fail('必须明确确认发送所选范围图文与模型费用');
-   const config=await settings(),limits=validateArticleLimits(config.limits);
-   const agreed=body.limits===undefined?DEFAULT_ARTICLE_LIMITS:validateArticleLimits(body.limits);
-   if(Object.keys(limits).some(k=>limits[k]!==agreed[k]))throw fail('调用上限已变化，请刷新并重新确认预算；未发送请求',409);
+   const limits=await confirmedLimits(body.limits),input=await inputFor(s);
+   checkArticleBudget(input,limits,{requireText:body.action!=='translate-direct'});
    body={...body,limits};s.requestLimits=limits;
    if(body.action==='analyze'&&s.structure&&!body.replace)throw fail('已有结构清单；重新识别需明确确认保留旧稿并替换当前稿');
-   if(body.action==='analyze'&&(body.replace||s.structureAttempted)){await save(s);const next='r-'+randomUUID(),dir=join(folder(slug),next),input=await inputFor(s);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'input.json'),input);s.revision=next;s.structure=null;s.structureAttempted=false;s.reviewed=false;}
+   if(body.action==='analyze'&&(body.replace||s.structureAttempted)){await save(s);const next='r-'+randomUUID(),dir=join(folder(slug),next);await mkdir(dir,{recursive:true});await writeJsonAtomic(join(dir,'input.json'),input);s.revision=next;s.structure=null;s.structureAttempted=false;s.reviewed=false;}
    s.error=null;await launch(s,body,body.action==='analyze'?analyze:body.action==='translate-direct'?translateDirect:translate);return{state:s};
   }
   throw fail('不支持的文章工作流操作');

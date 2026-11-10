@@ -2,16 +2,18 @@
 
 本文从 **DSH 已经安装好、能打开 Web 界面** 开始，带你安装「DSH 文献库」插件（`dsh-literature-library`），并完成第一次导入和翻译配置。
 
-- 插件版本：**0.11.2**（优先直接翻译文本与公式，分区为可选实验）
+- 插件版本：**0.11.3**（优先直接翻译文本与公式，分区为可选实验）
 - 仓库：<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0>
 - 适用：DSH Web `0.2.1-rc.2` 到 `0.3.0` 之前（市场索引声明 `>=0.2.1-rc.2 <0.3.0`）
 - 平台：Windows 10/11、macOS、Linux
 
 > 教程里的界面文字以当前中文 DSH 为准；不同版本可能略有差异。
 
-当前默认流程：PDF 工具栏打开「结构与翻译」→ 选整篇或指定页码 → 选择「直接翻译文本与公式」→ 点击「翻译文本与公式」并确认费用。程序本地准备后仅提交一次翻译，不先调用 AI 分区、不要求结构清单确认；直接保存 Markdown，公式优先 LaTeX，不插图、不翻译表格主体。截断时保存部分译稿，不自动重试。旧结构流程保留为可选实验。一次最多 32 页/240000 字符，长文章需明确选择较小范围，不自动拆单收费。安装后完整重启 DSH，不删除旧文献、译文或凭据。下文旧按钮仅供历史对照。
+当前默认流程：PDF 工具栏打开「结构与翻译」→ 选整篇或指定页码 → 选择「直接翻译文本与公式」→ 点击「翻译文本与公式」并确认费用。程序本地准备后仅提交一次翻译，不先调用 AI 分区、不要求结构清单确认；直接保存 Markdown，公式优先 LaTeX，不插图、不翻译表格主体。截断时保存部分译稿，不自动重试。旧结构流程保留为可选实验。安装后完整重启 DSH，不删除旧文献、译文或凭据。下文旧按钮仅供历史对照。
 
-下载页面：https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/tag/v0.11.2 。普通 Windows 用户可下载并完整解压 `dsh-literature-library-portable-0.11.2.zip`，停止 DSH 后运行 `安装到DSH.cmd`；插件页面安装使用 `dsh-literature-library-0.11.2.tgz`。两种方式选一种，不要叠加安装。
+「调用上限」可调整单次输入页数（默认 32，范围 1–128）及单页原文字符上限（默认 20,000，范围 1–100,000）。不再设整批字符上限，输出 token 预算仍单独设置。超限时请缩小范围或调整设置，不自动截断或拆单；模型自身的上下文限制仍适用。
+
+下载页面：https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/tag/v0.11.3 。普通 Windows 用户可下载并完整解压 `dsh-literature-library-portable-0.11.3.zip`，停止 DSH 后运行 `安装到DSH.cmd`；插件页面安装使用 `dsh-literature-library-0.11.3.tgz`。两种方式选一种，不要叠加安装。
 >
 > 开始前请确认：浏览器能打开 DSH，例如 <http://127.0.0.1:3080>。
 
@@ -168,7 +170,7 @@ https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 
 如果那台电脑访问 GitHub 不稳定，先下载：
 
-<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.11.2/dsh-literature-library-0.11.2.tgz>
+<https://github.com/WegoSong/dsh-literature-library-portable-0.4.0/releases/download/v0.11.3/dsh-literature-library-0.11.3.tgz>
 
 把 `.tgz` 复制到目标电脑，然后：
 
@@ -176,7 +178,7 @@ https://github.com/WegoSong/dsh-literature-library-portable-0.4.0.git
 2. 填 tarball 的绝对路径，例如：
 
 ```text
-D:\dsh-literature-library-0.11.2.tgz
+D:\dsh-literature-library-0.11.3.tgz
 ```
 
 3. 点 **安装**，等待完成。
@@ -195,7 +197,7 @@ dsh plugin add "git+https://github.com/WegoSong/dsh-literature-library-portable-
 或本地 tarball：
 
 ```bash
-dsh plugin add "D:/dsh-literature-library-0.11.2.tgz"
+dsh plugin add "D:/dsh-literature-library-0.11.3.tgz"
 ```
 
 安装完成后重启 DSH Web。
@@ -301,10 +303,10 @@ DEEPSEEK_API_KEY
 左栏底部会显示：
 
 ```text
-v0.11.2  PDF.js
+v0.11.3  PDF.js
 ```
 
-如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.11.2，需要确认安装并重启 DSH。
+如果显示旧版本或 `v…`，说明运行中的客户端/宿主还不是 0.11.3，需要确认安装并重启 DSH。
 
 ---
 
@@ -344,7 +346,7 @@ C:\Users\<用户名>\.dsh\profiles\web\cordis.patch.yml
 
 删除这一整条 `literature-library` 行，避免安装新包后出现两个文献库面板。
 
-然后安装 0.11.2，再在同一个 `cordis.patch.yml` 末尾加：
+然后安装 0.11.3，再在同一个 `cordis.patch.yml` 末尾加：
 
 ```yaml
 - id: literature-library
@@ -392,7 +394,7 @@ Copy-Item -Recurse "E:\Wego\我的日常\自建项目\文献翻译插件\library
 1. 从 Release、另一台电脑或 U 盘拿到新版本的 `.tgz`，例如：
 
    ```text
-   dsh-literature-library-0.11.2.tgz
+   dsh-literature-library-0.11.3.tgz
    ```
 
 2. 任选一种：
@@ -418,7 +420,7 @@ Copy-Item -Recurse "E:\Wego\我的日常\自建项目\文献翻译插件\library
 
 - 失败自动回滚；只覆盖程序文件，不删除 `library/`。
 
-> **0.4.1 及更早版本没有「更新」按钮**，需要先手动安装一次当前版 0.11.2
+> **0.4.1 及更早版本没有「更新」按钮**，需要先手动安装一次当前版 0.11.3
 > （方式 A/B/C 均可）。之后才能使用更新入口。
 >
 > 更新包必须是 `npm pack` 生成的 `.tgz`，且版本号高于当前版本；不会接受降级或同名版本。
